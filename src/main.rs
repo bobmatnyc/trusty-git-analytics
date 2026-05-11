@@ -67,6 +67,9 @@ pub struct AnalyzeArgs {
     /// Re-collect all weeks even if already present in the database.
     #[arg(long, short = 'f', default_value_t = false)]
     pub force: bool,
+    /// Limit collection to the last N weeks of commits (overrides config start_date).
+    #[arg(long, value_name = "N")]
+    pub weeks: Option<u32>,
 }
 
 /// Arguments for `tga collect`.
@@ -84,6 +87,9 @@ pub struct CollectArgs {
     /// Re-collect all weeks even if already present in the database.
     #[arg(long, short = 'f', default_value_t = false)]
     pub force: bool,
+    /// Limit collection to the last N weeks of commits (overrides config start_date).
+    #[arg(long, value_name = "N")]
+    pub weeks: Option<u32>,
 }
 
 /// Arguments for `tga classify`.

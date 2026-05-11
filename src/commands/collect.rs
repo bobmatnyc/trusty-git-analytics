@@ -1,5 +1,6 @@
 //! `tga collect` — stage 1 (git extraction) entry point.
 
+use chrono::{Duration, Utc};
 use tga::collect::CollectionPipeline;
 use tga::core::config::Config;
 use tga::core::db::Database;
@@ -28,8 +29,13 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
         }
     }
 
+    // `--weeks N` is computed first and may be superseded by an explicit `--since`.
+    let weeks_since = args.weeks.map(weeks_to_since);
+    let effective_since = args.since.clone().or(weeks_since);
+
     // Apply date overrides to every selected repository.
-    if let Some(since) = args.since.as_ref() {
+    if let Some(since) = effective_since.as_ref() {
+        tracing::info!(since = %since, "applying collection lower bound");
         for repo in &mut cfg.repositories {
             repo.since_date = Some(since.clone());
         }
@@ -62,4 +68,13 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
         }
     }
     Ok(())
+}
+
+/// Convert a `--weeks N` value to an RFC3339 `since` timestamp.
+///
+/// Returns `(now - N weeks)` formatted as an RFC3339 string, which the
+/// git extractor accepts as a lower bound on commit author time.
+fn weeks_to_since(weeks: u32) -> String {
+    let cutoff = Utc::now() - Duration::weeks(i64::from(weeks));
+    cutoff.to_rfc3339()
 }
