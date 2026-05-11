@@ -7,6 +7,7 @@
 //! - bare ticket-prefixed messages (e.g. `PROJ-123: update auth`)
 //! - very short / very long messages (low-confidence default)
 
+use crate::classify::taxonomy::TopLevelCategory;
 use crate::classify::tiers::ClassificationResult;
 use crate::core::models::ClassificationMethod;
 
@@ -34,6 +35,7 @@ impl FuzzyClassifier {
             return Some(ClassificationResult {
                 category: "merge".to_string(),
                 subcategory: None,
+                top_level: Some(TopLevelCategory::Maintenance),
                 confidence: 0.95,
                 method: ClassificationMethod::FuzzyMatch,
                 ticket_id: None,
@@ -45,6 +47,7 @@ impl FuzzyClassifier {
             return Some(ClassificationResult {
                 category: "revert".to_string(),
                 subcategory: None,
+                top_level: Some(TopLevelCategory::Maintenance),
                 confidence: 0.9,
                 method: ClassificationMethod::FuzzyMatch,
                 ticket_id: None,
@@ -56,6 +59,7 @@ impl FuzzyClassifier {
             return Some(ClassificationResult {
                 category: "feature".to_string(),
                 subcategory: Some("ticketed".to_string()),
+                top_level: Some(TopLevelCategory::Feature),
                 confidence: 0.6,
                 method: ClassificationMethod::FuzzyMatch,
                 ticket_id: Some(ticket),
@@ -67,6 +71,7 @@ impl FuzzyClassifier {
             return Some(ClassificationResult {
                 category: "chore".to_string(),
                 subcategory: None,
+                top_level: Some(TopLevelCategory::Maintenance),
                 confidence: 0.4,
                 method: ClassificationMethod::FuzzyMatch,
                 ticket_id: None,

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::classify::taxonomy::SubcategoryDef;
 use crate::core::errors::{Result, TgaError};
 
 /// Top-level configuration root.
@@ -223,6 +224,23 @@ pub struct ClassificationConfig {
     /// Minimum confidence required to accept a classification.
     #[serde(default = "default_confidence_threshold")]
     pub confidence_threshold: f64,
+
+    /// User-defined subcategories. Each entry must declare a `parent`
+    /// top-level category. These extend the built-in subcategory registry;
+    /// entries whose `name` matches an existing built-in replace it.
+    ///
+    /// Example YAML:
+    /// ```yaml
+    /// classification:
+    ///   custom_categories:
+    ///     - name: "payments"
+    ///       parent: "integrations"
+    ///       display_name: "Payments Integration"
+    ///     - name: "auth"
+    ///       parent: "feature"
+    /// ```
+    #[serde(default)]
+    pub custom_categories: Vec<SubcategoryDef>,
 }
 
 fn default_confidence_threshold() -> f64 {

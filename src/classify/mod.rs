@@ -15,18 +15,104 @@ pub mod classifier;
 pub mod errors;
 pub mod pipeline;
 pub mod rules;
+pub mod taxonomy;
 pub mod tiers;
 
 pub use classifier::{ClassificationEngine, ClassificationEngineConfig};
 pub use errors::{ClassifyError, Result};
 pub use pipeline::{ClassificationPipeline, ClassificationStats};
 pub use rules::{Rule, RuleSet};
+pub use taxonomy::{SubcategoryDef, TaxonomyRegistry, TopLevelCategory};
 pub use tiers::ClassificationResult;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classify::taxonomy::{SubcategoryDef, TaxonomyRegistry, TopLevelCategory};
     use crate::core::models::ClassificationMethod;
+
+    // ---------- Taxonomy registry tests ----------
+
+    #[test]
+    fn registry_resolves_builtin_subcategories() {
+        let reg = TaxonomyRegistry::with_builtins();
+        assert_eq!(reg.resolve("feature"), Some(TopLevelCategory::Feature));
+        assert_eq!(reg.resolve("bugfix"), Some(TopLevelCategory::Bugfix));
+        assert_eq!(
+            reg.resolve("performance"),
+            Some(TopLevelCategory::PlatformWork)
+        );
+        assert_eq!(reg.resolve("ci"), Some(TopLevelCategory::Ktlo));
+        assert_eq!(
+            reg.resolve("documentation"),
+            Some(TopLevelCategory::Content)
+        );
+        assert_eq!(reg.resolve("refactor"), Some(TopLevelCategory::Maintenance));
+    }
+
+    #[test]
+    fn registry_merges_user_defined() {
+        let user = vec![
+            SubcategoryDef::new("payments", TopLevelCategory::Integrations),
+            SubcategoryDef::new("auth", TopLevelCategory::Feature),
+        ];
+        let reg = TaxonomyRegistry::new(user);
+        assert_eq!(
+            reg.resolve("payments"),
+            Some(TopLevelCategory::Integrations)
+        );
+        assert_eq!(reg.resolve("auth"), Some(TopLevelCategory::Feature));
+        assert_eq!(reg.resolve("feature"), Some(TopLevelCategory::Feature));
+    }
+
+    #[test]
+    fn user_cannot_override_top_level_enum() {
+        // A user-defined subcategory with the same name as a built-in just
+        // replaces it; it must not corrupt the registry or break unrelated
+        // lookups.
+        let user = vec![SubcategoryDef::new(
+            "security",
+            TopLevelCategory::PlatformWork,
+        )];
+        let reg = TaxonomyRegistry::new(user);
+        assert_eq!(
+            reg.resolve("security"),
+            Some(TopLevelCategory::PlatformWork)
+        );
+        assert_eq!(reg.resolve("bugfix"), Some(TopLevelCategory::Bugfix));
+        let dup_count = reg
+            .all()
+            .iter()
+            .filter(|d| d.name.eq_ignore_ascii_case("security"))
+            .count();
+        assert_eq!(dup_count, 1);
+    }
+
+    #[test]
+    fn classification_result_has_top_level() {
+        let engine = ClassificationEngine::new(
+            rules::default_rules(),
+            ClassificationEngineConfig::default(),
+        )
+        .expect("engine");
+        let r = engine
+            .classify_sync("feat: add new login flow", false)
+            .expect("classified");
+        assert_eq!(r.category, "feature");
+        assert_eq!(r.top_level, Some(TopLevelCategory::Feature));
+
+        let r = engine
+            .classify_sync("fix: null deref in user lookup", false)
+            .expect("classified");
+        assert_eq!(r.category, "bugfix");
+        assert_eq!(r.top_level, Some(TopLevelCategory::Bugfix));
+    }
+
+    #[test]
+    fn unknown_subcategory_returns_none_top_level() {
+        let reg = TaxonomyRegistry::with_builtins();
+        assert!(reg.resolve("definitely-not-registered-xyz").is_none());
+    }
 
     #[test]
     fn default_rules_is_non_empty() {

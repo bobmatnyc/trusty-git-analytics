@@ -115,6 +115,7 @@ impl LlmClassifier {
         Some(ClassificationResult {
             category: verdict.category,
             subcategory: verdict.subcategory,
+            top_level: None, // resolved by ClassificationEngine via the taxonomy registry
             confidence: verdict.confidence.clamp(0.0, 1.0),
             method: ClassificationMethod::LlmFallback,
             ticket_id: None,

@@ -88,7 +88,13 @@ impl ClassificationPipeline {
             None => ClassificationEngineConfig::default(),
         };
 
-        let engine = ClassificationEngine::new(ruleset, engine_cfg)?;
+        let custom_taxonomy = self
+            .config
+            .classification
+            .as_ref()
+            .map(|c| c.custom_categories.clone())
+            .unwrap_or_default();
+        let engine = ClassificationEngine::with_taxonomy(ruleset, engine_cfg, custom_taxonomy)?;
 
         // 2. Read unclassified commits.
         let commits = read_unclassified_commits(db)?;

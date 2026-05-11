@@ -13,10 +13,15 @@ pub struct Rule {
     /// Unique rule identifier (used in logs and overrides).
     pub id: String,
 
-    /// Classification category (e.g. `"feature"`, `"bugfix"`, `"chore"`).
+    /// **Subcategory name** in the two-level taxonomy (e.g. `"feature"`,
+    /// `"bugfix"`, `"security"`). Resolved to its top-level parent via
+    /// the [`crate::classify::taxonomy::TaxonomyRegistry`]. The field name
+    /// `category` is retained for DB-schema compatibility with the Python
+    /// predecessor.
     pub category: String,
 
-    /// Optional subcategory (e.g. `"security"`, `"performance"`).
+    /// Optional leaf label, more specific than `category`
+    /// (e.g. `"sql-injection"` under `category: "security"`).
     #[serde(default)]
     pub subcategory: Option<String>,
 

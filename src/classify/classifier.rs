@@ -4,6 +4,7 @@ use rayon::prelude::*;
 
 use crate::classify::errors::Result;
 use crate::classify::rules::RuleSet;
+use crate::classify::taxonomy::{SubcategoryDef, TaxonomyRegistry};
 use crate::classify::tiers::exact::ExactMatcher;
 use crate::classify::tiers::fuzzy::FuzzyClassifier;
 use crate::classify::tiers::llm::LlmClassifier;
@@ -42,6 +43,7 @@ pub struct ClassificationEngine {
     regex: RegexMatcher,
     fuzzy: FuzzyClassifier,
     llm: Option<LlmClassifier>,
+    taxonomy: TaxonomyRegistry,
     config: ClassificationEngineConfig,
 }
 
@@ -52,10 +54,27 @@ impl ClassificationEngine {
     /// is true. The API key is read from the `OPENAI_API_KEY` environment
     /// variable; if unset, the LLM tier silently returns `None`.
     ///
+    /// Uses the built-in taxonomy registry only. To extend it with
+    /// user-defined subcategories, use [`Self::with_taxonomy`].
+    ///
     /// # Errors
     ///
     /// Returns an error if the rules fail to compile (e.g. invalid regex).
     pub fn new(ruleset: RuleSet, config: ClassificationEngineConfig) -> Result<Self> {
+        Self::with_taxonomy(ruleset, config, Vec::new())
+    }
+
+    /// Build an engine with user-defined subcategory definitions merged into
+    /// the built-in taxonomy registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the rules fail to compile.
+    pub fn with_taxonomy(
+        ruleset: RuleSet,
+        config: ClassificationEngineConfig,
+        custom_taxonomy: Vec<SubcategoryDef>,
+    ) -> Result<Self> {
         let exact = ExactMatcher::new(&ruleset.rules)?;
         let regex = RegexMatcher::new(&ruleset.rules)?;
         let fuzzy = FuzzyClassifier;
@@ -65,13 +84,20 @@ impl ClassificationEngine {
         } else {
             None
         };
+        let taxonomy = TaxonomyRegistry::new(custom_taxonomy);
         Ok(Self {
             exact,
             regex,
             fuzzy,
             llm,
+            taxonomy,
             config,
         })
+    }
+
+    /// Borrow the engine's taxonomy registry.
+    pub fn taxonomy(&self) -> &TaxonomyRegistry {
+        &self.taxonomy
     }
 
     /// Borrow the engine's effective configuration.
@@ -87,6 +113,7 @@ impl ClassificationEngine {
         // Tier 1: exact keywords
         if let Some(rule) = self.exact.classify(message) {
             return Some(ClassificationResult {
+                top_level: self.taxonomy.resolve(&rule.category),
                 category: rule.category.clone(),
                 subcategory: rule.subcategory.clone(),
                 confidence: rule.confidence,
@@ -98,6 +125,7 @@ impl ClassificationEngine {
         // Tier 2: regex
         if let Some(rule) = self.regex.classify(message) {
             return Some(ClassificationResult {
+                top_level: self.taxonomy.resolve(&rule.category),
                 category: rule.category.clone(),
                 subcategory: rule.subcategory.clone(),
                 confidence: rule.confidence,
@@ -110,6 +138,11 @@ impl ClassificationEngine {
         if let Some(mut result) = self.fuzzy.classify(message, is_merge) {
             if result.ticket_id.is_none() {
                 result.ticket_id = RegexMatcher::extract_ticket_id(message);
+            }
+            // Re-resolve top_level via the engine's registry in case user
+            // overrides changed the parent for the fuzzy verdict's category.
+            if let Some(top) = self.taxonomy.resolve(&result.category) {
+                result.top_level = Some(top);
             }
             return Some(result);
         }
@@ -124,7 +157,8 @@ impl ClassificationEngine {
         }
 
         if let Some(llm) = &self.llm {
-            if let Some(r) = llm.classify(message).await {
+            if let Some(mut r) = llm.classify(message).await {
+                r.top_level = self.taxonomy.resolve(&r.category);
                 return r;
             }
         }
