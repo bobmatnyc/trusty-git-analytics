@@ -8,7 +8,14 @@ repositories:
     path: "/path/to/my-backend"
     branch: "main"
 
+# Optional: load developer aliases from a shared external file.
+# Entries from this file are merged with the inline `developer_aliases`
+# block below. For overlapping canonical names, the external file wins.
+# Relative paths resolve against the directory containing this config.
+aliases_file: "./example-aliases.yaml"
+
 developer_aliases:
+  # Inline aliases still supported; useful for per-project overrides.
   "Alice Smith":
     - "alice@example.com"
     - "alice.smith@work.com"

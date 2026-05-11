@@ -26,6 +26,10 @@ use serde::{Deserialize, Serialize};
 use crate::classify::taxonomy::SubcategoryDef;
 use crate::core::errors::{Result, TgaError};
 
+pub mod aliases;
+
+pub use aliases::{AliasFile, DeveloperAliasEntry};
+
 /// Top-level configuration root.
 ///
 /// Mirrors the YAML schema from the Python predecessor. All top-level
@@ -84,6 +88,17 @@ pub struct Config {
     #[serde(default)]
     pub developer_aliases: HashMap<String, Vec<String>>,
 
+    /// Path to an external aliases file (YAML). If set, entries are merged
+    /// with any inline [`Config::developer_aliases`]. The external file takes
+    /// precedence for entries with the same canonical name.
+    ///
+    /// Supports `~` home-directory expansion. Relative paths are resolved
+    /// against the directory of the loaded config file when known (passed
+    /// to [`Config::resolved_alias_map`]) and otherwise against the current
+    /// working directory.
+    #[serde(default)]
+    pub aliases_file: Option<String>,
+
     /// Analysis settings (ML categorization, etc.).
     ///
     /// Parsed for forward compatibility; individual sub-features gate their
@@ -94,6 +109,13 @@ pub struct Config {
     /// Cache directory and related settings.
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+
+    /// Filesystem path to the loaded config file, if any.
+    ///
+    /// Populated by [`Config::load`] and used to resolve relative paths
+    /// (notably [`Config::aliases_file`]). Not serialized to YAML.
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
 }
 
 /// Analysis pipeline configuration (forward-compat with Python schema).
@@ -343,8 +365,18 @@ impl Config {
         let resolved = expand_path(path);
         tracing::debug!(path = %resolved.display(), "loading config");
         let text = std::fs::read_to_string(&resolved)?;
-        let cfg: Config = serde_yaml::from_str(&text)?;
+        let mut cfg: Config = serde_yaml::from_str(&text)?;
+        cfg.source_path = Some(resolved);
         Ok(cfg)
+    }
+
+    /// Directory containing the loaded config file, if known.
+    ///
+    /// Returns the parent of [`Config::source_path`]; used to resolve
+    /// relative paths declared inside the config (e.g.
+    /// [`Config::aliases_file`]).
+    pub fn config_dir(&self) -> Option<&Path> {
+        self.source_path.as_deref().and_then(|p| p.parent())
     }
 
     /// Resolve identity aliases from either the Python-compatible
@@ -354,16 +386,69 @@ impl Config {
     /// map is keyed by canonical name; values are the list of email
     /// addresses or login aliases that should resolve to that name.
     pub fn resolved_aliases(&self) -> HashMap<String, Vec<String>> {
-        if !self.developer_aliases.is_empty() {
-            self.developer_aliases.clone()
-        } else if let Some(team) = &self.team {
-            team.members
-                .iter()
-                .map(|m| (m.name.clone(), m.aliases.clone()))
-                .collect()
-        } else {
-            HashMap::new()
+        // Fall back to whatever we can resolve without surfacing errors;
+        // callers that need to fail loudly on a bad `aliases_file` should
+        // use [`Config::resolved_alias_map`] directly.
+        match self.resolved_alias_map(self.config_dir()) {
+            Ok(map) if !map.is_empty() => map,
+            _ => {
+                if let Some(team) = &self.team {
+                    team.members
+                        .iter()
+                        .map(|m| (m.name.clone(), m.aliases.clone()))
+                        .collect()
+                } else {
+                    HashMap::new()
+                }
+            }
         }
+    }
+
+    /// Resolve the full alias map by merging inline [`Config::developer_aliases`]
+    /// with entries loaded from an external [`Config::aliases_file`] (if set).
+    ///
+    /// Merge semantics: external file entries **override** inline entries
+    /// with the same canonical name. Entries in inline that are not in the
+    /// external file are kept as-is.
+    ///
+    /// Path resolution for `aliases_file`:
+    /// 1. Leading `~` is expanded to the user's home directory.
+    /// 2. If still relative, resolved against `config_dir` if provided,
+    ///    otherwise against the current working directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TgaError::ConfigError`] if [`Config::aliases_file`] is set
+    /// but cannot be loaded or parsed.
+    pub fn resolved_alias_map(
+        &self,
+        config_dir: Option<&Path>,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let mut merged = self.developer_aliases.clone();
+
+        if let Some(rel) = &self.aliases_file {
+            let expanded = expand_path(Path::new(rel));
+            let resolved = if expanded.is_absolute() {
+                expanded
+            } else if let Some(dir) = config_dir {
+                dir.join(expanded)
+            } else {
+                expanded
+            };
+
+            let external = AliasFile::load(&resolved).map_err(|e| {
+                TgaError::ConfigError(format!(
+                    "failed to load aliases_file {}: {e}",
+                    resolved.display()
+                ))
+            })?;
+            for (name, list) in external.to_alias_map() {
+                // External overrides inline for matching canonical names.
+                merged.insert(name, list);
+            }
+        }
+
+        Ok(merged)
     }
 
     /// Validate cross-field invariants of the config.
