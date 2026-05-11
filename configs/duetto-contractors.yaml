@@ -14,13 +14,13 @@ github:
 repositories:
   - name: "duetto-frontend"
     path: "/Users/masa/Duetto/repos/duetto-frontend"
-    branch: "main"
+    branch: "develop"
   - name: "datapipelines"
     path: "/Users/masa/Duetto/repos/datapipelines"
     branch: "main"
   - name: "pricerator"
     path: "/Users/masa/Duetto/repos/pricerator"
-    branch: "main"
+    branch: "develop"
 
 # Developer aliases for contractors on term list
 developer_aliases:
