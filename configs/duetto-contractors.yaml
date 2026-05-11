@@ -1,0 +1,78 @@
+# GitFlow Analytics Configuration for Duetto Contractor Analysis
+# Created: 2026-02-25
+# Updated: 2026-02-26 - Fixed to use absolute paths
+
+version: "1.0"
+profile: balanced
+
+# GitHub Configuration
+github:
+  token: "${GITHUB_TOKEN}"
+
+# Repository Configuration - Key repos where contractors work
+# Using absolute paths to avoid path resolution issues (see issue #16)
+repositories:
+  - name: "duetto-frontend"
+    path: "/Users/masa/Duetto/repos/duetto-frontend"
+    branch: "main"
+  - name: "datapipelines"
+    path: "/Users/masa/Duetto/repos/datapipelines"
+    branch: "main"
+  - name: "pricerator"
+    path: "/Users/masa/Duetto/repos/pricerator"
+    branch: "main"
+
+# Developer aliases for contractors on term list
+developer_aliases:
+  "Renato Pezzotti":
+    - "renato.pezzotti@duettoresearch.com"
+  "David Momenso":
+    - "david.momenso@duettoresearch.com"
+  "Alan Araujo":
+    - "alan.brito@duettoresearch.com"
+  "Amitkumar Gaud":
+    - "amitkumar.gaud-c@duettoresearch.com"
+  "Akash Arora":
+    - "akash.arora-c@duettoresearch.com"
+    - "Akash.Arora-c@duettoresearch.com"
+  "Surya Subudhi":
+    - "surya.subudhi-c@duettoresearch.com"
+  "Jonas Arioli":
+    - "jonas.arioli-c@duettoresearch.com"
+  "Andre Ramos":
+    - "andre.ramos@duettoresearch.com"
+    - "129991831+andreramosduetto@users.noreply.github.com"
+  "Mateus Marques":
+    - "mateus.marques-c@duettoresearch.com"
+  "Sunny Kumar":
+    - "sunny.kumar-c@duettoresearch.com"
+  "Awni Chopra":
+    - "awni.chopra-c@duettoresearch.com"
+  "Manikanta Sai Kumar":
+    - "manikanta.saikumar-c@duettoresearch.com"
+  "Om Ochhane":
+    - "om.ochhane-c@duettoresearch.com"
+  "Radheshyam Jadhav":
+    - "radheshyam.jadhav@duettoresearch.com"
+  "Janga Vinod Kumar Reddy":
+    - "jangareddy-duetto"
+    - "janga.reddy-c@duettoresearch.com"
+  "Diogo Carvalho":
+    - "diogocarvalhoduetto"
+    - "diogo.carvalho@duettoresearch.com"
+
+# Analysis settings
+analysis:
+  ml_categorization:
+    enabled: false  # Just need commit counts
+
+# Output settings
+output:
+  directory: "/Users/masa/Duetto/CTO/projects/people/contractors/gitflow-reports"
+  formats:
+    - csv
+    - markdown
+
+# Cache settings
+cache:
+  directory: "/Users/masa/Duetto/repos/.gitflow-cache"

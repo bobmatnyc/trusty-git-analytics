@@ -53,6 +53,52 @@ impl IdentityResolver {
         }
     }
 
+    /// Construct a resolver from a flat `canonical_name → [aliases]` map.
+    ///
+    /// This is the format produced by [`tga_core::config::Config::resolved_aliases`]
+    /// and matches the Python predecessor's `developer_aliases` YAML key.
+    ///
+    /// The first entry in each alias list (if any looks like an email — i.e.
+    /// contains `@`) is treated as the canonical email; otherwise the
+    /// canonical email is left blank.
+    pub fn from_alias_map(map: &HashMap<String, Vec<String>>) -> Self {
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        let mut members: Vec<(String, String)> = Vec::new();
+        for (canon_name, alias_list) in map {
+            // Pick the first email-looking alias as canonical email.
+            let canon_email = alias_list
+                .iter()
+                .find(|a| a.contains('@'))
+                .cloned()
+                .unwrap_or_default();
+            members.push((canon_name.clone(), canon_email.clone()));
+            // Register canonical name + canonical email as self-aliases.
+            aliases.insert(canon_name.to_lowercase(), canon_name.clone());
+            if !canon_email.is_empty() {
+                aliases.insert(canon_email.to_lowercase(), canon_name.clone());
+            }
+            for a in alias_list {
+                aliases.insert(a.to_lowercase(), canon_name.clone());
+            }
+        }
+        Self {
+            aliases,
+            members,
+            threshold: DEFAULT_SIMILARITY_THRESHOLD,
+        }
+    }
+
+    /// Construct a resolver from a [`Config`], preferring the Python-compatible
+    /// `developer_aliases` map when present, falling back to `team.members`.
+    pub fn from_config(config: &tga_core::config::Config) -> Self {
+        let map = config.resolved_aliases();
+        if !map.is_empty() {
+            Self::from_alias_map(&map)
+        } else {
+            Self::new(config.team.as_ref())
+        }
+    }
+
     /// Override the fuzzy-match threshold (0.0–1.0).
     pub fn with_threshold(mut self, threshold: f64) -> Self {
         self.threshold = threshold;

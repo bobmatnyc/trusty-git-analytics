@@ -54,7 +54,7 @@ impl CollectionPipeline {
     pub async fn run(&self, db: &mut Database) -> Result<CollectionStats> {
         let mut stats = CollectionStats::default();
 
-        let resolver = IdentityResolver::new(self.config.team.as_ref());
+        let resolver = IdentityResolver::from_config(&self.config);
 
         for repo_cfg in &self.config.repositories {
             let collector = match GitCollector::new(repo_cfg) {

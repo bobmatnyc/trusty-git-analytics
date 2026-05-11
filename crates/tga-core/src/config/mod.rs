@@ -55,6 +55,68 @@ pub struct Config {
     /// JIRA API credentials and scope.
     #[serde(default)]
     pub jira: Option<JiraConfig>,
+
+    /// Schema version string (e.g. `"1.0"`).
+    ///
+    /// Stored for forward compatibility with the Python predecessor's YAML
+    /// format. Not enforced by the Rust loader — present so files written
+    /// for the Python tool deserialize cleanly.
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// Named profile (e.g. `"balanced"`).
+    ///
+    /// Stored for forward compatibility with the Python predecessor. Not
+    /// currently consumed by the Rust pipeline.
+    #[serde(default)]
+    pub profile: Option<String>,
+
+    /// Python-compatible flat alias map: canonical name → list of email
+    /// addresses or login aliases.
+    ///
+    /// When non-empty, takes precedence over [`TeamConfig::members`] for
+    /// identity resolution (see [`Config::resolved_aliases`]).
+    #[serde(default)]
+    pub developer_aliases: HashMap<String, Vec<String>>,
+
+    /// Analysis settings (ML categorization, etc.).
+    ///
+    /// Parsed for forward compatibility; individual sub-features gate their
+    /// own behavior on its presence.
+    #[serde(default)]
+    pub analysis: Option<AnalysisConfig>,
+
+    /// Cache directory and related settings.
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
+}
+
+/// Analysis pipeline configuration (forward-compat with Python schema).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnalysisConfig {
+    /// ML-based commit categorization settings.
+    #[serde(default)]
+    pub ml_categorization: Option<MlCategorizationConfig>,
+}
+
+/// ML categorization toggle and model selection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MlCategorizationConfig {
+    /// Whether ML categorization is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Optional model identifier.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Cache layer configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Filesystem directory used for cached artifacts. Supports `~` expansion.
+    #[serde(default)]
+    pub directory: Option<PathBuf>,
 }
 
 /// A single repository to collect commits from.
@@ -109,13 +171,22 @@ pub struct TeamMember {
 /// Output / reporting configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OutputConfig {
-    /// Output format identifier (`csv`, `json`, `markdown`).
+    /// Single output format identifier (`csv`, `json`, `markdown`).
+    ///
+    /// Retained for backward compatibility; prefer [`OutputConfig::formats`].
     #[serde(default)]
     pub format: Option<String>,
 
-    /// Destination directory or file path.
+    /// Destination directory for reports.
+    ///
+    /// Accepts both `directory` (Python-compat) and `output_path` (legacy
+    /// Rust) keys in the YAML.
+    #[serde(default, alias = "output_path")]
+    pub directory: Option<PathBuf>,
+
+    /// Output format list (e.g. `["csv", "markdown"]`).
     #[serde(default)]
-    pub output_path: Option<PathBuf>,
+    pub formats: Vec<String>,
 
     /// Include unclassified commits in output.
     #[serde(default)]
@@ -229,6 +300,25 @@ impl Config {
         let text = std::fs::read_to_string(&resolved)?;
         let cfg: Config = serde_yaml::from_str(&text)?;
         Ok(cfg)
+    }
+
+    /// Resolve identity aliases from either the Python-compatible
+    /// [`Config::developer_aliases`] map or from [`TeamConfig::members`].
+    ///
+    /// `developer_aliases` (when non-empty) takes precedence. The returned
+    /// map is keyed by canonical name; values are the list of email
+    /// addresses or login aliases that should resolve to that name.
+    pub fn resolved_aliases(&self) -> HashMap<String, Vec<String>> {
+        if !self.developer_aliases.is_empty() {
+            self.developer_aliases.clone()
+        } else if let Some(team) = &self.team {
+            team.members
+                .iter()
+                .map(|m| (m.name.clone(), m.aliases.clone()))
+                .collect()
+        } else {
+            HashMap::new()
+        }
     }
 
     /// Validate cross-field invariants of the config.
