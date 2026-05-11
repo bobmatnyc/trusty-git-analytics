@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "CLI binary (tga) for trusty-git-analytics: developer productivity analytics from git history."
 
 [[bin]]
 name = "tga"

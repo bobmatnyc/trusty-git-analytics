@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Shared core types, configuration, database schema, and error definitions for trusty-git-analytics."
 
 [dependencies]
 serde.workspace = true

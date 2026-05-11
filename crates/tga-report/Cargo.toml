@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Stage 3 (reporting) for trusty-git-analytics: CSV, JSON, and Markdown report generation."
 
 [dependencies]
 tga-core = { path = "../tga-core" }

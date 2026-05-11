@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Stage 1 (collection) for trusty-git-analytics: git extraction via libgit2 and HTTP clients for GitHub/JIRA."
 
 [dependencies]
 tga-core = { path = "../tga-core" }

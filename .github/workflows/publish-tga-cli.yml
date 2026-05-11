@@ -1,0 +1,83 @@
+# Publishes the tga-cli crate to crates.io (provides the `tga` binary).
+#
+# Triggered by:
+#   - Push of a tag matching tga-cli-v* (e.g. tga-cli-v0.1.0)
+#   - Manual workflow_dispatch (with optional dry-run mode)
+#
+# Pipeline stages:
+#   1. Dry-run gate  — cargo publish --dry-run -p tga-cli
+#   2. Clippy gate   — cargo clippy -p tga-cli -- -D warnings
+#   3. Publish       — cargo publish -p tga-cli
+#
+# Publish order across the workspace (tga-cli is LAST):
+#   1. tga-core                                            (must publish first)
+#   2. tga-collect, tga-classify, tga-report (parallel)    (must publish before tga-cli)
+#   3. tga-cli (this workflow)                             (depends on all four)
+#
+# PREREQUISITE: tga-core, tga-collect, tga-classify, and tga-report must all be
+# published to crates.io at versions compatible with this crate's path/version
+# dependencies. The dry-run gate will fail if any are missing from the index.
+#
+# Required repository secret:
+#   CARGO_REGISTRY_TOKEN — crates.io API token with publish scope for tga-cli.
+
+name: Publish tga-cli
+
+on:
+  push:
+    tags:
+      - "tga-cli-v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (publish --dry-run, skip actual upload)"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  publish:
+    name: Publish tga-cli to crates.io
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # ── Prerequisite checks ───────────────────────────────────────────────
+      - name: Verify dependency crates are on crates.io
+        run: |
+          for crate in tga-core tga-collect tga-classify tga-report; do
+            if ! cargo search "$crate" --limit 1 | grep -q "^$crate "; then
+              echo "ERROR: $crate is not published to crates.io yet."
+              echo "Publish $crate before publishing tga-cli."
+              exit 1
+            fi
+          done
+
+      # ── Quality gates ─────────────────────────────────────────────────────
+      - name: Dry-run publish gate
+        run: cargo publish --dry-run -p tga-cli
+
+      - name: Clippy gate
+        run: cargo clippy -p tga-cli -- -D warnings
+
+      # ── Publish ───────────────────────────────────────────────────────────
+      - name: Publish tga-cli
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Dry-run mode: skipping actual publish (dry-run gate already passed above)"
+          else
+            cargo publish -p tga-cli --no-verify
+          fi

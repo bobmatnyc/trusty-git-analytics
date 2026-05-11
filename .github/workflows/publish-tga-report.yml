@@ -1,0 +1,80 @@
+# Publishes the tga-report crate to crates.io.
+#
+# Triggered by:
+#   - Push of a tag matching tga-report-v* (e.g. tga-report-v0.1.0)
+#   - Manual workflow_dispatch (with optional dry-run mode)
+#
+# Pipeline stages:
+#   1. Dry-run gate  — cargo publish --dry-run -p tga-report
+#   2. Clippy gate   — cargo clippy -p tga-report -- -D warnings
+#   3. Publish       — cargo publish -p tga-report
+#
+# Publish order across the workspace:
+#   1. tga-core         (must be on crates.io first)
+#   2. tga-collect, tga-classify, tga-report (this workflow) (parallel)
+#   3. tga-cli          (depends on all four)
+#
+# PREREQUISITE: tga-core must already be published to crates.io at a version
+# compatible with this crate's path/version dependency.
+#
+# Required repository secret:
+#   CARGO_REGISTRY_TOKEN — crates.io API token with publish scope for tga-report.
+
+name: Publish tga-report
+
+on:
+  push:
+    tags:
+      - "tga-report-v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (publish --dry-run, skip actual upload)"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  publish:
+    name: Publish tga-report to crates.io
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # ── Prerequisite check ────────────────────────────────────────────────
+      - name: Verify tga-core is on crates.io
+        run: |
+          if ! cargo search tga-core --limit 1 | grep -q '^tga-core '; then
+            echo "ERROR: tga-core is not published to crates.io yet."
+            echo "Publish tga-core first (tag: tga-core-v*) before publishing tga-report."
+            exit 1
+          fi
+
+      # ── Quality gates ─────────────────────────────────────────────────────
+      - name: Dry-run publish gate
+        run: cargo publish --dry-run -p tga-report
+
+      - name: Clippy gate
+        run: cargo clippy -p tga-report -- -D warnings
+
+      # ── Publish ───────────────────────────────────────────────────────────
+      - name: Publish tga-report
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Dry-run mode: skipping actual publish (dry-run gate already passed above)"
+          else
+            cargo publish -p tga-report --no-verify
+          fi

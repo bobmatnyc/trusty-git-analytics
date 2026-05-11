@@ -1,0 +1,68 @@
+# Publishes the tga-core crate to crates.io.
+#
+# Triggered by:
+#   - Push of a tag matching tga-core-v* (e.g. tga-core-v0.1.0)
+#   - Manual workflow_dispatch (with optional dry-run mode)
+#
+# Pipeline stages:
+#   1. Dry-run gate  — cargo publish --dry-run -p tga-core
+#   2. Clippy gate   — cargo clippy -p tga-core -- -D warnings
+#   3. Publish       — cargo publish -p tga-core
+#
+# Publish order across the workspace:
+#   1. tga-core         (this workflow — no internal deps)
+#   2. tga-collect, tga-classify, tga-report (parallel — depend on tga-core)
+#   3. tga-cli          (depends on all four)
+#
+# Required repository secret:
+#   CARGO_REGISTRY_TOKEN — crates.io API token with publish scope for tga-core.
+
+name: Publish tga-core
+
+on:
+  push:
+    tags:
+      - "tga-core-v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (publish --dry-run, skip actual upload)"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  publish:
+    name: Publish tga-core to crates.io
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # ── Quality gates ─────────────────────────────────────────────────────
+      - name: Dry-run publish gate
+        run: cargo publish --dry-run -p tga-core
+
+      - name: Clippy gate
+        run: cargo clippy -p tga-core -- -D warnings
+
+      # ── Publish ───────────────────────────────────────────────────────────
+      - name: Publish tga-core
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Dry-run mode: skipping actual publish (dry-run gate already passed above)"
+          else
+            cargo publish -p tga-core --no-verify
+          fi

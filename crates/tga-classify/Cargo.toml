@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Stage 2 (classification) for trusty-git-analytics: four-tier rules + LLM commit classification cascade."
 
 [dependencies]
 tga-core = { path = "../tga-core" }
