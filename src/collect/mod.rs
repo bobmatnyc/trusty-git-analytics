@@ -9,6 +9,7 @@
 //! - [`identity`] — author identity resolution (exact + fuzzy)
 //! - [`github`] — GitHub REST client (PRs)
 //! - [`jira`] — JIRA REST client (issues)
+//! - [`linear`] — Linear GraphQL client (issues)
 //! - [`collector`] — end-to-end pipeline orchestrator
 //! - [`errors`] — module-level error type ([`CollectError`])
 
@@ -18,6 +19,7 @@ pub mod git;
 pub mod github;
 pub mod identity;
 pub mod jira;
+pub mod linear;
 
 pub use collector::{CollectionPipeline, CollectionStats};
 pub use errors::{CollectError, Result};

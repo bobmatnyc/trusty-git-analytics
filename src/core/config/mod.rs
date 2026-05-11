@@ -56,6 +56,10 @@ pub struct Config {
     #[serde(default)]
     pub jira: Option<JiraConfig>,
 
+    /// Linear integration settings.
+    #[serde(default)]
+    pub linear: Option<LinearConfig>,
+
     /// Schema version string (e.g. `"1.0"`).
     ///
     /// Stored for forward compatibility with the Python predecessor's YAML
@@ -223,6 +227,29 @@ pub struct ClassificationConfig {
 
 fn default_confidence_threshold() -> f64 {
     0.7
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Linear project management integration settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LinearConfig {
+    /// Linear API key (personal or workspace).
+    ///
+    /// Supports `${LINEAR_API_KEY}` env-var substitution.
+    #[serde(default)]
+    pub api_key: Option<String>,
+
+    /// Only fetch issues from these team keys (e.g. `["ENG", "FE"]`).
+    /// Empty = all teams.
+    #[serde(default)]
+    pub team_keys: Vec<String>,
+
+    /// Fetch issue details when a commit message references a Linear issue ID.
+    #[serde(default = "default_true")]
+    pub fetch_on_reference: bool,
 }
 
 /// GitHub API integration settings.

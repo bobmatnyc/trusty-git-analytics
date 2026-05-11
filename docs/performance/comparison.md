@@ -7,14 +7,14 @@
 - **tga version**: 0.1.0 (Rust, release build)
 - **Python tool**: gitflow-analytics v3.16.4 (uv run)
 - **Test repo 1**: gitflow-analytics (~482 commits, local)
-- **Test repo 2**: duetto/datapipelines (~4,816 commits, local)
+- **Test repo 2**: large internal monorepo (~4,816 commits, local)
 
 ## Performance Results
 
 | Repo | Commits | tga (Rust) | gitflow-analytics (Python) | Speedup |
 |------|---------|------------|---------------------------|---------|
 | gitflow-analytics | 482 | 1.65s | 74.38s | 45x |
-| datapipelines | 4,816 | 15.18s | ~740s (extrapolated) | ~49x |
+| large internal monorepo | 4,816 | 15.18s | ~740s (extrapolated) | ~49x |
 
 **Throughput**: tga processes ~317 commits/sec; Python ~6.5 commits/sec.
 

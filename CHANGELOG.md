@@ -76,11 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `anyhow::Result` error propagation to `main`
 
 #### CI / CD
-- GitHub Actions CI workflow (`ci.yml`): runs on push and PR to `main`; matrix over `stable` and `beta` toolchains; jobs: format check, Clippy with `-D warnings`, tests (skipping `collect_duetto_frontend` integration test that requires local repos), rustdoc build with `RUSTDOCFLAGS="-D warnings"`, release binary build
+- GitHub Actions CI workflow (`ci.yml`): runs on push and PR to `main`; matrix over `stable` and `beta` toolchains; jobs: format check, Clippy with `-D warnings`, tests (skipping the integration test that requires a local git repo configured via `INTEGRATION_REPO_PATH`), rustdoc build with `RUSTDOCFLAGS="-D warnings"`, release binary build
 - Concurrent-run cancellation via `concurrency.cancel-in-progress`
 - Rust artifact caching via `Swatinem/rust-cache@v2`
 - GitHub Actions publish workflow (`publish-tga-core.yml`): triggered by `tga-core-v*` tags or `workflow_dispatch`; dry-run gate, Clippy gate, then `cargo publish`; supports `dry_run` input to skip actual upload
 - `CARGO_REGISTRY_TOKEN` secret required for actual publish
 
 #### Integration
-- `configs/duetto-contractors.yaml`: real-world example config for analyzing three Duetto repositories with 16 contractor developer aliases, CSV + Markdown output
+- `configs/example-config.yaml`: example config for analyzing multiple repositories with developer aliases, CSV + Markdown output

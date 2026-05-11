@@ -11,6 +11,7 @@ use crate::collect::errors::Result;
 use crate::collect::git::GitCollector;
 use crate::collect::github::GitHubClient;
 use crate::collect::identity::IdentityResolver;
+use crate::collect::linear::LinearClient;
 
 /// Aggregate statistics for a single pipeline run.
 #[derive(Debug, Clone, Default)]
@@ -21,6 +22,8 @@ pub struct CollectionStats {
     pub authors_resolved: usize,
     /// Number of PR rows written (zero if GitHub fetch disabled).
     pub prs_fetched: usize,
+    /// Number of Linear issues fetched (0 if Linear not configured).
+    pub linear_issues_fetched: usize,
     /// Per-repo error messages encountered (non-fatal).
     pub errors: Vec<String>,
 }
@@ -102,6 +105,62 @@ impl CollectionPipeline {
                     },
                     Err(e) => {
                         stats.errors.push(format!("GitHub client init failed: {e}"));
+                    }
+                }
+            }
+        }
+
+        // Optional: Linear issue enrichment.
+        if let Some(linear_cfg) = &self.config.linear {
+            if linear_cfg.fetch_on_reference {
+                match LinearClient::new(linear_cfg) {
+                    Ok(client) => {
+                        // Collect commit messages from DB.
+                        let messages: Vec<String> = {
+                            let conn = db.connection();
+                            let mut stmt = match conn.prepare("SELECT message FROM commits") {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    stats
+                                        .errors
+                                        .push(format!("Linear: query commits failed: {e}"));
+                                    return Ok(stats);
+                                }
+                            };
+                            let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    stats
+                                        .errors
+                                        .push(format!("Linear: read commits failed: {e}"));
+                                    return Ok(stats);
+                                }
+                            };
+                            let mut out = Vec::new();
+                            for r in rows.flatten() {
+                                out.push(r);
+                            }
+                            out
+                        };
+
+                        let msg_refs: Vec<&str> = messages.iter().map(String::as_str).collect();
+                        let issues = client
+                            .fetch_referenced_issues(&msg_refs, &linear_cfg.team_keys)
+                            .await;
+                        for issue in &issues {
+                            info!(
+                                id = %issue.identifier,
+                                state = %issue.state,
+                                team = %issue.team,
+                                "Linear issue fetched"
+                            );
+                        }
+                        // TODO: persist Linear issues to a dedicated table
+                        // (e.g. `linear_issues`) once the schema migration lands.
+                        stats.linear_issues_fetched += issues.len();
+                    }
+                    Err(e) => {
+                        stats.errors.push(format!("Linear client init failed: {e}"));
                     }
                 }
             }

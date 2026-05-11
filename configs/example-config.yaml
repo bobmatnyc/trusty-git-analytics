@@ -1,0 +1,34 @@
+version: "1.0"
+
+repositories:
+  - name: "my-app"
+    path: "/path/to/my-app"
+    branch: "main"
+  - name: "my-backend"
+    path: "/path/to/my-backend"
+    branch: "main"
+
+developer_aliases:
+  "Alice Smith":
+    - "alice@example.com"
+    - "alice.smith@work.com"
+
+classification:
+  rules_file: "./configs/my-rules.yaml"  # optional
+
+output:
+  directory: "./reports"
+  formats:
+    - csv
+    - json
+    - markdown
+
+# Linear project management integration (optional).
+# Enriches commits that reference Linear issue IDs (e.g. ENG-123) with
+# title, status, team, and assignee from the Linear GraphQL API.
+linear:
+  api_key: "${LINEAR_API_KEY}"
+  team_keys:
+    - "ENG"
+    - "FE"
+  fetch_on_reference: true

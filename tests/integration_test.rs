@@ -1,49 +1,53 @@
-//! Integration test: run collection against real Duetto repos.
+//! Integration test: run collection against a real local git repository.
 //!
-//! Skipped automatically if the repos don't exist locally — safe to run in CI.
+//! Set the `INTEGRATION_REPO_PATH` environment variable to the path of a local
+//! git repository to enable this test. Skipped automatically when the variable
+//! is unset — safe to run in CI without any local repos present.
 
-use std::path::Path;
+use std::path::PathBuf;
 use tga::collect::CollectionPipeline;
-use tga::core::config::Config;
+use tga::core::config::{Config, RepositoryConfig};
 use tga::core::db::Database;
 
 #[tokio::test]
-async fn collect_duetto_frontend() {
-    let repo_path = Path::new("/Users/masa/Duetto/repos/duetto-frontend");
+async fn collect_integration_repo() {
+    // Set INTEGRATION_REPO_PATH env var to a local git repo to run this test.
+    let repo_path = match std::env::var("INTEGRATION_REPO_PATH") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => {
+            eprintln!("SKIP: set INTEGRATION_REPO_PATH to run integration test");
+            return;
+        }
+    };
+
     if !repo_path.exists() {
-        eprintln!("SKIP: Duetto repos not available");
+        eprintln!(
+            "SKIP: INTEGRATION_REPO_PATH does not exist: {}",
+            repo_path.display()
+        );
         return;
     }
 
-    // Load the config (same YAML as the Python tool).
-    let config = Config::load(Path::new(
-        "/Users/masa/Projects/trusty-git-analytics/configs/duetto-contractors.yaml",
-    ))
-    .expect("config load");
+    // Build a minimal config pointing at the provided repo.
+    let repo_name = repo_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("integration-repo")
+        .to_string();
+    let config = Config {
+        repositories: vec![RepositoryConfig {
+            path: repo_path.clone(),
+            name: Some(repo_name),
+            branch: None,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
 
-    // Only collect the first repo (duetto-frontend) for speed.
-    // Clear `branch` so the collector falls back to HEAD — local clones may
-    // be on `develop` instead of the configured `main`.
-    let mut single_repo_config = config.clone();
-    single_repo_config.repositories = config
-        .repositories
-        .into_iter()
-        .filter(|r| r.name.as_deref() == Some("duetto-frontend"))
-        .map(|mut r| {
-            r.branch = None;
-            r
-        })
-        .collect();
-
-    assert!(
-        !single_repo_config.repositories.is_empty(),
-        "duetto-frontend not in config"
-    );
-
-    // Open an in-memory DB for this test.
+    // Open an in-memory DB for this test — nothing is written to disk.
     let mut db = Database::open_in_memory().expect("db open");
 
-    let pipeline = CollectionPipeline::new(single_repo_config);
+    let pipeline = CollectionPipeline::new(config);
     let stats = pipeline.run(&mut db).await.expect("collection run");
 
     println!(
@@ -52,7 +56,8 @@ async fn collect_duetto_frontend() {
     );
     assert!(
         stats.commits_collected > 0,
-        "expected commits to be collected"
+        "expected commits to be collected from {}",
+        repo_path.display()
     );
     assert!(
         stats.authors_resolved > 0,

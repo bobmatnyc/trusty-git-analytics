@@ -123,7 +123,7 @@ When `developer_aliases` is non-empty it takes precedence over `team.members`. U
 
 ### Example: multi-repo config with GitHub
 
-See [`configs/duetto-contractors.yaml`](configs/duetto-contractors.yaml) for a working real-world example that covers multiple repositories, developer aliases, and CSV+Markdown output.
+See [`configs/example-config.yaml`](configs/example-config.yaml) for a working example that covers multiple repositories, developer aliases, and CSV+Markdown output.
 
 ## CLI Reference
 
@@ -403,10 +403,10 @@ cargo doc --open
 
 ### Running Against Real Repos
 
-`configs/duetto-contractors.yaml` is a working example that analyzes three repositories using `developer_aliases`. Adjust paths to match your local checkout:
+`configs/example-config.yaml` is a working example that analyzes repositories using `developer_aliases`. Copy it, adjust paths and names to match your setup, then run:
 
 ```bash
-tga analyze --config configs/duetto-contractors.yaml --database duetto.db
+tga analyze --config configs/example-config.yaml --database tga.db
 ```
 
 ### CI Gates
@@ -429,4 +429,6 @@ The GitHub Actions workflow (`ci.yml`) requires:
 
 ## License
 
-MIT
+**Non-commercial use only.** See [LICENSE](LICENSE) for terms.
+
+Elastic License 2.0
