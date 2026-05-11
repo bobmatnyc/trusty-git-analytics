@@ -27,8 +27,10 @@ use crate::classify::taxonomy::SubcategoryDef;
 use crate::core::errors::{Result, TgaError};
 
 pub mod aliases;
+pub mod azdo;
 
 pub use aliases::{AliasFile, DeveloperAliasEntry};
+pub use azdo::AzureDevOpsConfig;
 
 /// Top-level configuration root.
 ///
@@ -64,6 +66,11 @@ pub struct Config {
     /// Linear integration settings.
     #[serde(default)]
     pub linear: Option<LinearConfig>,
+
+    /// Project management integrations. Canonical location for ADO,
+    /// and future PM tools.
+    #[serde(default)]
+    pub pm: Option<PmConfig>,
 
     /// Schema version string (e.g. `"1.0"`).
     ///
@@ -292,6 +299,18 @@ pub struct LinearConfig {
     pub fetch_on_reference: bool,
 }
 
+/// Project management integrations config block.
+///
+/// Located at `pm:` in YAML (clean namespace, avoids jira/jira_integration
+/// dual-stack). Each member is independently optional; presence of the `pm`
+/// block does not require any specific integration to be configured.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PmConfig {
+    /// Azure DevOps integration (Phase 1: config + stub client).
+    #[serde(default)]
+    pub azure_devops: Option<AzureDevOpsConfig>,
+}
+
 /// GitHub API integration settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GithubConfig {
@@ -451,11 +470,21 @@ impl Config {
         Ok(merged)
     }
 
+    /// Convenience accessor for the Azure DevOps integration config, if any.
+    ///
+    /// Returns `Some(&AzureDevOpsConfig)` when `pm.azure_devops` is set in
+    /// the YAML, otherwise `None`.
+    pub fn azure_devops_config(&self) -> Option<&AzureDevOpsConfig> {
+        self.pm.as_ref().and_then(|p| p.azure_devops.as_ref())
+    }
+
     /// Validate cross-field invariants of the config.
     ///
     /// # Errors
     ///
-    /// Returns [`TgaError::ValidationError`] if any invariant is violated.
+    /// Returns [`TgaError::ValidationError`] if any invariant is violated,
+    /// or [`TgaError::ConfigError`] propagated from per-integration
+    /// validators (e.g. Azure DevOps URL checks).
     pub fn validate(&self) -> Result<()> {
         if self.repositories.is_empty() {
             return Err(TgaError::ValidationError(
@@ -468,6 +497,9 @@ impl Config {
                     "repository.path must not be empty".into(),
                 ));
             }
+        }
+        if let Some(adzo_config) = self.azure_devops_config() {
+            adzo_config.validate()?;
         }
         Ok(())
     }

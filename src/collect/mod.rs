@@ -10,10 +10,12 @@
 //! - [`github`] — GitHub REST client (PRs)
 //! - [`jira`] — JIRA REST client (issues)
 //! - [`linear`] — Linear GraphQL client (issues)
+//! - [`azdo`] — Azure DevOps stub client (Phase 1: config + AB# detection)
 //! - [`ticket`] — ticket-reference detection on commit messages
 //! - [`collector`] — end-to-end pipeline orchestrator
 //! - [`errors`] — module-level error type ([`CollectError`])
 
+pub mod azdo;
 pub mod collector;
 pub mod errors;
 pub mod git;
