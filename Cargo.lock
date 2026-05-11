@@ -2104,55 +2104,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "tga-classify"
+name = "tga"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "async-trait",
- "chrono",
- "indicatif",
- "rayon",
- "regex",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "tga-core",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tga-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
+ "blake3",
  "chrono",
  "clap",
- "indicatif",
- "serde",
- "serde_yaml",
- "tga-classify",
- "tga-collect",
- "tga-core",
- "tga-report",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tga-collect"
-version = "0.1.0"
-dependencies = [
- "aho-corasick",
- "anyhow",
- "async-trait",
- "chrono",
+ "csv",
  "git2",
  "indicatif",
  "rayon",
@@ -2161,46 +2122,14 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "strsim",
- "tga-core",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tga-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "chrono",
- "regex",
- "rusqlite",
- "serde",
- "serde_json",
  "serde_yaml",
- "thiserror 1.0.69",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "tga-report"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "csv",
- "indicatif",
- "rayon",
- "serde",
- "serde_json",
+ "strsim",
  "tera",
- "tga-core",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

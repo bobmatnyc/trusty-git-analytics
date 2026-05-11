@@ -1,7 +1,7 @@
-# Continuous Integration for the trusty-git-analytics Rust workspace.
+# Continuous Integration for the trusty-git-analytics Rust package.
 #
-# Runs formatting, lint, tests, docs, and a release binary build across all
-# crates. The `collect_duetto_frontend` integration test is skipped because
+# Runs formatting, lint, tests, docs, and a release binary build.
+# The `collect_duetto_frontend` integration test is skipped because
 # it requires local Duetto repositories that are not available in CI.
 name: CI
 
@@ -44,13 +44,13 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: Clippy (workspace, all targets)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (all targets)
+        run: cargo clippy --all-targets -- -D warnings
 
       # The collect_duetto_frontend test depends on local Duetto repos
       # that are not available in CI; skip it explicitly.
-      - name: Test (workspace)
-        run: cargo test --workspace -- --skip collect_duetto_frontend
+      - name: Test
+        run: cargo test -- --skip collect_duetto_frontend
 
   docs:
     name: Docs (stable)
@@ -69,7 +69,7 @@ jobs:
       - name: Build documentation
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --no-deps
 
   build-release:
     name: Build release binary (tga)

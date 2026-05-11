@@ -1,15 +1,28 @@
-[workspace]
-members = ["crates/*"]
-resolver = "2"
-
-[workspace.package]
+[package]
+name = "tga"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 license = "MIT"
 repository = "https://github.com/bobmatnyc/trusty-git-analytics"
+description = "Developer productivity analytics — git commit collection, classification, and reporting"
+keywords = ["git", "analytics", "productivity", "developer-metrics"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+exclude = [
+    ".claude/*",
+    ".claude-mpm/*",
+    ".fastembed_cache/*",
+    ".github/*",
+    "docs/*",
+    "configs/*",
+]
 
-[workspace.dependencies]
+[[bin]]
+name = "tga"
+path = "src/main.rs"
+
+[dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 # CLI
@@ -41,8 +54,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Progress bars
 indicatif = "0.17"
-# Configuration
-config = "0.14"
 # UUID
 uuid = { version = "1", features = ["v4", "serde"] }
 # Hashing (config hash)
@@ -51,9 +62,5 @@ blake3 = "1"
 csv = "1"
 # Template engine (for markdown reports)
 tera = "1"
-# URL parsing
-url = "2"
 # Async trait
 async-trait = "0.1"
-# Semver
-semver = { version = "1", features = ["serde"] }

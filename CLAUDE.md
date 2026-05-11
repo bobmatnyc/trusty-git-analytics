@@ -15,40 +15,38 @@ superior performance, parallelism, and correctness.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Cargo workspace | DONE | All 5 crates scaffolded with correct dependencies |
-| `tga-core/src/lib.rs` | PLACEHOLDER | Empty — needs types, config, DB, errors |
-| `tga-collect/src/lib.rs` | PLACEHOLDER | Empty — needs git2 extraction, HTTP clients |
-| `tga-classify/src/lib.rs` | PLACEHOLDER | Empty — needs classification cascade |
-| `tga-report/src/lib.rs` | PLACEHOLDER | Empty — needs CSV/JSON/Markdown output |
-| `tga-cli/src/main.rs` | PLACEHOLDER | Only prints project name — needs clap CLI |
-| Database migrations | NOT STARTED | Schema defined in docs, no SQL files yet |
-| Configuration structs | NOT STARTED | YAML schema defined in docs |
-| Tests | NOT STARTED | No test files exist |
-| CI/CD | NOT STARTED | No GitHub Actions workflows |
-
-**Start here**: Implement `tga-core` first — all other crates depend on it.
+| Single `tga` crate | DONE | Consolidated from 5-crate workspace into one library+binary |
+| `src/core/` | DONE | Types, config, DB schema, error definitions |
+| `src/collect/` | DONE | git2 extraction, identity resolution, GitHub/JIRA clients |
+| `src/classify/` | DONE | Four-tier classification cascade (rules + LLM) |
+| `src/report/` | DONE | CSV/JSON/Markdown report generation |
+| `src/main.rs` + `src/commands/` | DONE | clap CLI binary entry point |
+| Database migrations | DONE | v1 initial schema in `src/core/db/sql/` |
+| Configuration structs | DONE | YAML schema implemented in `src/core/config/` |
+| Tests | DONE | 31 unit tests + 1 gated integration test |
+| CI/CD | DONE | GitHub Actions workflows for build, test, publish |
 
 ## Architecture Overview
 
-Three-stage pipeline implemented as a Cargo workspace under `crates/`:
+Three-stage pipeline implemented as a single crate. The binary `tga` is
+built from `src/main.rs`; the library (`tga::*`) is reusable from
+integration tests, external code, and the binary itself.
 
-| Crate | Path | Purpose |
-|-------|------|---------|
-| `tga-core` | `crates/tga-core` | Shared types, config (serde), DB schema (rusqlite), error types |
-| `tga-collect` | `crates/tga-collect` | Stage 1: git extraction (git2), GitHub/JIRA HTTP clients (reqwest+tokio) |
-| `tga-classify` | `crates/tga-classify` | Stage 2: four-tier classification cascade (rules + LLM) |
-| `tga-report` | `crates/tga-report` | Stage 3: CSV/JSON/Markdown generation |
-| `tga-cli` | `crates/tga-cli` | Binary entry point (`tga`), clap CLI |
+| Module | Path | Purpose |
+|--------|------|---------|
+| `tga::core` | `src/core/` | Shared types, config (serde), DB schema (rusqlite), error types |
+| `tga::collect` | `src/collect/` | Stage 1: git extraction (git2), GitHub/JIRA HTTP clients (reqwest+tokio) |
+| `tga::classify` | `src/classify/` | Stage 2: four-tier classification cascade (rules + LLM) |
+| `tga::report` | `src/report/` | Stage 3: CSV/JSON/Markdown generation |
+| `commands` (bin-private) | `src/commands/` | Subcommand handlers wired into `main.rs` |
 
-### Crate Dependency Order
+### Module Dependency Order
 
 ```
-tga-core  <──  tga-collect  <──┐
-          <──  tga-classify <──┤  tga-cli (binary)
-          <──  tga-report   <──┘
+core  <──  collect   <──┐
+      <──  classify  <──┤  main.rs (binary)
+      <──  report    <──┘
 ```
-
-Implement in this order: `tga-core` → `tga-collect` → `tga-classify` → `tga-report` → `tga-cli`
 
 ## Key Rust Decisions
 
@@ -67,7 +65,7 @@ Implement in this order: `tga-core` → `tga-collect` → `tga-classify` → `tg
 
 ## Database
 
-SQLite, same schema as `gitflow-analytics`. Schema defined in `tga-core/src/db/`.
+SQLite, same schema as `gitflow-analytics`. Schema defined in `src/core/db/`.
 Migration runner applies versioned SQL migrations on startup (v1–v18 from Python port, +future).
 
 🔴 **Critical**: Always use WAL journal mode: `PRAGMA journal_mode=WAL`.
@@ -77,13 +75,13 @@ Reference: `docs/requirements/database-schema.md`
 ## Configuration
 
 YAML file, same structure as Python version. Deserialized via `serde_yaml` into structs in
-`tga-core/src/config/`. Support `~` expansion for paths.
+`src/core/config/`. Support `~` expansion for paths.
 
 Reference: `docs/requirements/configuration.md`
 
 ## CLI Structure
 
-Binary: `tga` (produced by `tga-cli` crate)
+Binary: `tga` (produced by `src/main.rs`)
 
 Subcommands: `analyze`, `collect`, `classify`, `report`, `fetch`, `aliases`, `identities`,
              `pr-metrics`, `override`, `install`
@@ -119,26 +117,26 @@ cargo doc --open
 # Run the CLI (dev)
 cargo run --bin tga -- <subcommand>
 
-# Check a single crate
-cargo check -p tga-core
+# Check the crate
+cargo check
 ```
 
 🔴 **CI requirements**: `cargo clippy -- -D warnings` and `cargo fmt --check` must both pass before merging.
 
 ## Priority Rankings
 
-### 🔴 Critical (implement first)
-- `tga-core`: error types, config structs, DB schema, migration runner
+### 🔴 Critical
+- `core`: error types, config structs, DB schema, migration runner
 - WAL mode pragma on every DB open
-- `anyhow` in binaries, `thiserror` in library crates (never mix)
+- `anyhow` in `main.rs`, `thiserror` enums in library modules (never mix)
 
-### 🟡 Important (implement second)
-- `tga-collect`: git2 commit extraction, identity resolution, GitHub/JIRA clients
-- `tga-classify`: four-tier cascade (exact rules → regex → fuzzy → LLM fallback)
-- `tga-cli`: clap subcommand wiring
+### 🟡 Important
+- `collect`: git2 commit extraction, identity resolution, GitHub/JIRA clients
+- `classify`: four-tier cascade (exact rules → regex → fuzzy → LLM fallback)
+- `commands`: clap subcommand wiring
 
-### 🟢 Nice-to-have (implement third)
-- `tga-report`: CSV/JSON output first, Markdown templates later
+### 🟢 Nice-to-have
+- `report`: CSV/JSON output first, Markdown templates later
 - Progress bars (indicatif) in long-running operations
 - `--dry-run` flags on mutating commands
 
@@ -165,7 +163,7 @@ All specification documents are in `docs/requirements/`:
 
 ## Coding Standards
 
-- Use `anyhow::Result` in binary crates (`tga-cli`), `thiserror` enums in library crates
+- Use `anyhow::Result` in the binary (`src/main.rs` and `src/commands/`), `thiserror` enums in library modules (`core`, `collect`, `classify`, `report`)
 - Prefer `tracing::{info, warn, error, debug}` over `println!` / `eprintln!`
 - All public API items must have doc comments (`///`)
 - No `unwrap()` or `expect()` in library code — propagate errors with `?`
