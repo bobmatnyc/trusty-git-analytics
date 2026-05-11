@@ -88,7 +88,7 @@ impl IdentityResolver {
         }
     }
 
-    /// Construct a resolver from a [`Config`], preferring the Python-compatible
+    /// Construct a resolver from a [`tga_core::config::Config`], preferring the Python-compatible
     /// `developer_aliases` map when present, falling back to `team.members`.
     pub fn from_config(config: &tga_core::config::Config) -> Self {
         let map = config.resolved_aliases();
