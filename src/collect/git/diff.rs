@@ -57,7 +57,15 @@ pub fn compute_commit_diff(repo: &Repository, commit: &Commit<'_>) -> Result<Com
 
     let mut opts = DiffOptions::new();
     opts.include_typechange(true);
-    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))?;
+    let mut diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))?;
+
+    // Enable rename and copy detection so renamed files are reported as a single
+    // `Delta::Renamed` operation with net line differences rather than as a
+    // delete-of-old-file plus add-of-new-file pair (which would double-count lines).
+    // This requires the mutable `find_similar` call on the diff itself.
+    let mut find_opts = git2::DiffFindOptions::new();
+    find_opts.renames(true).copies(true);
+    diff.find_similar(Some(&mut find_opts))?;
 
     let stats = diff.stats()?;
     let files_cell: std::cell::RefCell<Vec<FileDiff>> =

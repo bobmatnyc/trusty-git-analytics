@@ -107,7 +107,11 @@ impl Aggregator {
             first: DateTime<Utc>,
             last: DateTime<Utc>,
         }
-        let mut authors: HashMap<(String, String), AuthorAcc> = HashMap::new();
+        // Keyed by author_email only — the same person committing with the same email
+        // but slightly different display names (e.g. "Bob Smith" vs "bobsmith") should
+        // be aggregated into a single author row. We retain the longest display name
+        // seen as the canonical name for that email.
+        let mut authors: HashMap<String, AuthorAcc> = HashMap::new();
 
         // Per-repo state.
         struct RepoAcc {
@@ -138,8 +142,10 @@ impl Aggregator {
                 max_ts = row.timestamp;
             }
 
-            // Authors.
-            let key = (row.author_name.clone(), row.author_email.clone());
+            // Authors. Group by email only; pick the longest display name seen
+            // as the canonical name (heuristic: longer names tend to be the full
+            // "Firstname Lastname" form rather than a short login handle).
+            let key = row.author_email.clone();
             let a = authors.entry(key).or_insert_with(|| AuthorAcc {
                 name: row.author_name.clone(),
                 email: row.author_email.clone(),
@@ -151,6 +157,9 @@ impl Aggregator {
                 first: row.timestamp,
                 last: row.timestamp,
             });
+            if row.author_name.len() > a.name.len() {
+                a.name = row.author_name.clone();
+            }
             a.commits += 1;
             a.insertions += row.insertions;
             a.deletions += row.deletions;
@@ -183,9 +192,10 @@ impl Aggregator {
                 *r.categories.entry(cat.clone()).or_insert(0) += 1;
             }
 
-            // Weekly.
+            // Weekly. Keyed by email (not display name) so that the same identity
+            // committing under multiple names lands in a single weekly bucket.
             let week = iso_week_label(&row.timestamp);
-            let wkey = (week, row.author_name.clone(), row.repository.clone());
+            let wkey = (week, row.author_email.clone(), row.repository.clone());
             let w = weekly.entry(wkey).or_insert_with(|| WeekAcc {
                 commits: 0,
                 insertions: 0,
@@ -240,12 +250,22 @@ impl Aggregator {
             .collect();
         repo_summaries.sort_by(|x, y| y.commit_count.cmp(&x.commit_count));
 
-        // Materialize weekly activity.
+        // Build email → canonical display name map from the author summaries
+        // so that the weekly activity rows display the same canonical name as
+        // the authors table (avoids "Bob" in one report and "bobmatnyc" in
+        // another for the same underlying identity).
+        let email_to_name: HashMap<String, String> = author_summaries
+            .iter()
+            .map(|a| (a.email.clone(), a.name.clone()))
+            .collect();
+
+        // Materialize weekly activity. The bucket key uses email; resolve to
+        // canonical display name for the output row.
         let weekly_activity: Vec<WeeklyActivity> = weekly
             .into_iter()
-            .map(|((week, author, repository), w)| WeeklyActivity {
+            .map(|((week, email, repository), w)| WeeklyActivity {
                 week,
-                author,
+                author: email_to_name.get(&email).cloned().unwrap_or(email),
                 repository,
                 commit_count: w.commits,
                 insertions: w.insertions,
