@@ -187,6 +187,7 @@ pub fn default_rules() -> RuleSet {
 
     RuleSet {
         version: Some("1.0".into()),
+        extend_defaults: true,
         rules,
     }
 }

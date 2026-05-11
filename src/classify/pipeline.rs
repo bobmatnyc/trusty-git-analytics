@@ -60,7 +60,22 @@ impl ClassificationPipeline {
             .as_ref()
             .and_then(|c| c.rules_file.as_ref())
         {
-            Some(path) => load_rules(path)?,
+            Some(path) => {
+                let custom = load_rules(path)?;
+                if custom.extend_defaults {
+                    // Merge: start with defaults, let custom rules override by id
+                    let mut merged = default_rules();
+                    let custom_ids: std::collections::HashSet<String> =
+                        custom.rules.iter().map(|r| r.id.clone()).collect();
+                    // Remove any default rules whose id is overridden by custom
+                    merged.rules.retain(|r| !custom_ids.contains(&r.id));
+                    // Append custom rules (they may have higher priority to win)
+                    merged.rules.extend(custom.rules);
+                    merged
+                } else {
+                    custom
+                }
+            }
             None => default_rules(),
         };
 

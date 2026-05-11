@@ -49,8 +49,20 @@ pub struct RuleSet {
     #[serde(default)]
     pub version: Option<String>,
 
+    /// When `true` (default), custom rules are merged on top of the built-in
+    /// default ruleset. Default rules fire first (lower priority numbers win
+    /// only if both match the same message and default has higher priority).
+    /// Custom rules that share an `id` with a default rule **override** that rule.
+    /// Set to `false` to use only the rules in this file.
+    #[serde(default = "default_true")]
+    pub extend_defaults: bool,
+
     /// All rules in this set. Order is not significant; see [`Rule::priority`].
     pub rules: Vec<Rule>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl RuleSet {

@@ -1,0 +1,161 @@
+# Duetto-specific classification rules
+# extend_defaults: true means these rules ADD TO the built-in conventional commit rules
+version: "1.0"
+extend_defaults: true
+
+rules:
+  # ── Dependabot / dependency updates ────────────────────────────────────────
+  - id: dependabot-bump
+    category: dependency-update
+    subcategory: automated
+    keywords:
+      - "[dependabot]"
+      - "dependabot"
+      - "bump "
+    patterns:
+      - '(?i)\[dependabot\]'
+      - '(?i)^bumps? \['
+      - '(?i)^bump '
+    priority: 95
+    confidence: 0.95
+
+  # ── Version increment commits ───────────────────────────────────────────────
+  - id: version-increment
+    category: chore
+    subcategory: version-bump
+    keywords:
+      - "increment version"
+      - "increment to v"
+    patterns:
+      - '(?i)^increment (version|to v)'
+      - '(?i)^\d+\.\d+\.\d+\s*(\(#\d+\))?$'
+      - '(?i)^v\d+\.\d+'
+    priority: 90
+    confidence: 0.90
+
+  # ── Release branch merges ───────────────────────────────────────────────────
+  - id: release-merge
+    category: release
+    subcategory: ~
+    keywords:
+      - "merge release/"
+    patterns:
+      - '(?i)^merge release/'
+      - '(?i)^merge (branch |pull request )?[''"]?release/'
+    priority: 95
+    confidence: 0.95
+
+  # ── Dev/main sync commits ───────────────────────────────────────────────────
+  - id: branch-sync
+    category: chore
+    subcategory: sync
+    keywords:
+      - "- dev sync"
+      - "- test dev"
+      - "dev sync"
+      - "main - dev"
+    patterns:
+      - '(?i)(main|develop?)\s*-\s*(dev|test|sync)'
+      - '(?i)^sync (main|develop?|branch)'
+    priority: 70
+    confidence: 0.80
+
+  # ── Duetto shortboard ticket format [sb-NNN] ───────────────────────────────
+  - id: sb-ticket
+    category: feature
+    subcategory: ticketed
+    keywords: []
+    patterns:
+      - '\[sb-\d+\]'
+      - '\[SB-\d+\]'
+    priority: 75
+    confidence: 0.80
+
+  # ── CI / workflow / GitHub Actions updates ─────────────────────────────────
+  - id: workflow-update
+    category: ci
+    subcategory: workflow
+    keywords:
+      - ".yml"
+      - "workflow"
+      - "github action"
+      - "deploy_lambda"
+      - "stage_deploy"
+    patterns:
+      - '(?i)update.*\.yml'
+      - '(?i)(add|update|fix|correct) (github action|workflow|\.yml)'
+      - '(?i)\b(stage_deploy|deploy_lambda)\b'
+    priority: 65
+    confidence: 0.78
+
+  # ── Data pipeline / Glue jobs ──────────────────────────────────────────────
+  - id: data-pipeline
+    category: feature
+    subcategory: data-pipeline
+    keywords:
+      - "glue job"
+      - "data contract"
+      - "datacontract"
+      - "data_plat"
+      - "data_eng"
+      - "stream pipeline"
+      - "kinesis"
+      - "firehose"
+    patterns:
+      - '(?i)(create|init|update|fix)\s+glue\s+job'
+      - '(?i)data[\s_-]?contract'
+      - '(?i)(stream|kinesis|firehose)\s+pipeline'
+    priority: 65
+    confidence: 0.78
+
+  # ── WIP commits ─────────────────────────────────────────────────────────────
+  - id: wip
+    category: chore
+    subcategory: wip
+    keywords:
+      - "wip:"
+      - "wip "
+    patterns:
+      - '(?i)^\s*wip[:\s]'
+    priority: 60
+    confidence: 0.75
+
+  # ── Feature/UI arch style (Duetto PR-title pattern) ────────────────────────
+  - id: feature-ui-arch
+    category: feature
+    subcategory: ui
+    keywords:
+      - "feature/ui arch"
+      - "feature/ui-arch"
+    patterns:
+      - '(?i)^feature/ui[\s_-]?arch'
+    priority: 85
+    confidence: 0.88
+
+  # ── Dependency / library updates (non-Dependabot) ──────────────────────────
+  - id: dep-update
+    category: dependency-update
+    subcategory: manual
+    keywords:
+      - "update dependencies"
+      - "upgrade dependencies"
+      - "bump dependencies"
+    patterns:
+      - '(?i)^(update|upgrade|bump)\s+(all\s+)?(npm|pip|maven|gradle|cargo)?\s*dep'
+    priority: 60
+    confidence: 0.78
+
+  # ── Infrastructure / ops ───────────────────────────────────────────────────
+  - id: infra-ops
+    category: chore
+    subcategory: infrastructure
+    keywords:
+      - "terraform"
+      - "helm chart"
+      - "k8s"
+      - "kubernetes"
+      - "docker"
+    patterns:
+      - '(?i)\b(terraform|helm|kubectl|kubernetes)\b'
+    priority: 55
+    confidence: 0.75

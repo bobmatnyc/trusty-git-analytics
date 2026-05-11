@@ -66,6 +66,10 @@ analysis:
   ml_categorization:
     enabled: false  # Just need commit counts
 
+# Classification: use Duetto-specific rules on top of built-in defaults
+classification:
+  rules_file: "./configs/duetto-rules.yaml"
+
 # Output settings
 output:
   directory: "/Users/masa/Duetto/CTO/projects/people/contractors/gitflow-reports"
