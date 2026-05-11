@@ -1,0 +1,49 @@
+//! `tga classify` — stage 2 (classification cascade) entry point.
+
+use tga_classify::ClassificationPipeline;
+use tga_core::config::{ClassificationConfig, Config};
+use tga_core::db::Database;
+
+use crate::ClassifyArgs;
+
+/// Run the classification stage over previously-collected commits.
+///
+/// Honors `--rules` and `--use-llm` overrides by mutating the
+/// [`ClassificationConfig`] section of the loaded YAML config.
+pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyhow::Result<()> {
+    let mut cfg = config;
+
+    // Ensure a classification section exists so overrides have somewhere to land.
+    if cfg.classification.is_none() && (args.rules.is_some() || args.use_llm) {
+        cfg.classification = Some(ClassificationConfig::default());
+    }
+    if let Some(ref mut c) = cfg.classification {
+        if let Some(rules) = args.rules {
+            c.rules_file = Some(rules);
+        }
+        if args.use_llm {
+            c.use_llm = true;
+        }
+    }
+
+    let pipeline = ClassificationPipeline::new(cfg);
+    let stats = pipeline.run(db).await?;
+
+    println!(
+        "Classified {}/{} commits",
+        stats.classified, stats.total_commits
+    );
+    if !stats.by_method.is_empty() {
+        println!("By method:");
+        for (method, count) in &stats.by_method {
+            println!("  {method}: {count}");
+        }
+    }
+    if !stats.by_category.is_empty() {
+        println!("By category:");
+        for (category, count) in &stats.by_category {
+            println!("  {category}: {count}");
+        }
+    }
+    Ok(())
+}
