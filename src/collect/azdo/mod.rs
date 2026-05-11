@@ -12,4 +12,8 @@
 
 pub mod client;
 
-pub use client::{AzdoConnectionInfo, AzdoError, AzdoProject, AzureDevOpsClient, WorkItem};
+pub use client::{
+    extract_work_item_refs, fetch_referenced_work_items, AzdoConnectionInfo, AzdoError, AzdoField,
+    AzdoProject, AzdoWorkItem, AzdoWorkItemType, AzureDevOpsClient, WiqlResult, WorkItem,
+    WorkItemRef,
+};

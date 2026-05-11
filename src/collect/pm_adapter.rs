@@ -480,20 +480,28 @@ impl PmAdapter for AzureDevOpsAdapter {
 
         match self.inner.get_work_items(&[id]).await {
             Ok(items) => Ok(items.into_iter().next().map(|w| {
-                let raw = serde_json::json!({ "id": w.id, "title": w.title });
+                let raw = serde_json::json!({
+                    "id": w.id,
+                    "title": w.title,
+                    "state": w.state,
+                    "workItemType": w.work_item_type,
+                    "tags": w.tags,
+                    "teamProject": w.team_project,
+                    "url": w.url,
+                });
                 PmTicket {
                     id: format!("AB#{}", w.id),
                     title: w.title,
-                    status: String::new(),
-                    ticket_type: String::new(),
-                    labels: Vec::new(),
-                    url: None,
+                    status: w.state,
+                    ticket_type: w.work_item_type,
+                    labels: w.tags,
+                    url: w.url,
                     source: PmSource::AzureDevOps,
                     raw,
                 }
             })),
-            // Phase 6 not yet implemented — surface as Ok(None) so the
-            // pipeline degrades gracefully instead of failing the whole run.
+            // Defensive: any residual NotImplemented variants in the future
+            // should degrade gracefully rather than fail the pipeline.
             Err(crate::collect::azdo::AzdoError::NotImplemented { .. }) => Ok(None),
             Err(e) => Err(azdo_err_to_pm(e)),
         }
