@@ -1,0 +1,8 @@
+/target
+*.db
+*.db-shm
+*.db-wal
+.tga-cache/
+reports/
+.env
+.env.local

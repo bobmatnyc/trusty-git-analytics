@@ -1,0 +1,27 @@
+[package]
+name = "tga-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tga"
+path = "src/main.rs"
+
+[dependencies]
+tga-core = { path = "../tga-core" }
+tga-collect = { path = "../tga-collect" }
+tga-classify = { path = "../tga-classify" }
+tga-report = { path = "../tga-report" }
+clap.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+indicatif.workspace = true
+chrono.workspace = true

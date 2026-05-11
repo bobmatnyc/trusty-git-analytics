@@ -1,0 +1,25 @@
+[package]
+name = "tga-collect"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tga-core = { path = "../tga-core" }
+git2.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+rayon.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+strsim.workspace = true
+aho-corasick.workspace = true
+regex.workspace = true
+async-trait.workspace = true
+indicatif.workspace = true
