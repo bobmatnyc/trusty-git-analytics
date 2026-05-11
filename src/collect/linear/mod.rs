@@ -6,4 +6,4 @@
 
 pub mod client;
 
-pub use client::{LinearClient, LinearIssue};
+pub use client::{store_linear_issues, LinearClient, LinearIssue};

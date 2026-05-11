@@ -25,11 +25,18 @@ pub struct Migration {
 }
 
 /// All migrations known to this binary, in order of application.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial_schema",
-    sql: include_str!("sql/0001_initial_schema.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial_schema",
+        sql: include_str!("sql/0001_initial_schema.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "linear_issues",
+        sql: include_str!("sql/0002_linear_issues.sql"),
+    },
+];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
 fn ensure_migrations_table(conn: &Connection) -> Result<()> {

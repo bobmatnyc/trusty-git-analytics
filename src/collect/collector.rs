@@ -155,9 +155,17 @@ impl CollectionPipeline {
                                 "Linear issue fetched"
                             );
                         }
-                        // TODO: persist Linear issues to a dedicated table
-                        // (e.g. `linear_issues`) once the schema migration lands.
-                        stats.linear_issues_fetched += issues.len();
+                        match client.store_issues(db, &issues) {
+                            Ok(n) => {
+                                info!(stored = n, "persisted linear_issues rows");
+                                stats.linear_issues_fetched += n;
+                            }
+                            Err(e) => {
+                                stats
+                                    .errors
+                                    .push(format!("Linear: store issues failed: {e}"));
+                            }
+                        }
                     }
                     Err(e) => {
                         stats.errors.push(format!("Linear client init failed: {e}"));

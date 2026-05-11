@@ -9,10 +9,12 @@
 use std::collections::HashSet;
 
 use reqwest::Client;
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use crate::collect::errors::{CollectError, Result};
 use crate::core::config::LinearConfig;
+use crate::core::db::Database;
 
 /// HTTP `User-Agent` string sent on every request.
 const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
@@ -215,6 +217,58 @@ impl LinearClient {
         }
         issues
     }
+
+    /// Persist a batch of [`LinearIssue`] rows into the `linear_issues` table.
+    ///
+    /// Uses `INSERT OR REPLACE` keyed on `identifier`, so re-running collection
+    /// refreshes the cached state, title, assignee, etc. The `fetched_at`
+    /// column is set to the current UTC timestamp for every persisted row.
+    ///
+    /// Returns the number of rows written.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`crate::core::TgaError::DbError`] on SQL failures.
+    pub fn store_issues(
+        &self,
+        db: &Database,
+        issues: &[LinearIssue],
+    ) -> crate::core::Result<usize> {
+        store_linear_issues(db, issues)
+    }
+}
+
+/// Persist Linear issues to the database (free function for reuse from tests
+/// and contexts where no [`LinearClient`] instance is available).
+///
+/// # Errors
+///
+/// Propagates [`crate::core::TgaError::DbError`] on SQL failures.
+pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core::Result<usize> {
+    let conn = db.connection();
+    let fetched_at = chrono::Utc::now().to_rfc3339();
+    let mut count = 0usize;
+    for issue in issues {
+        let team_key = issue.identifier.split('-').next().unwrap_or("").to_string();
+        conn.execute(
+            "INSERT OR REPLACE INTO linear_issues \
+             (identifier, title, state, team, team_key, assignee, priority, url, fetched_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                issue.identifier,
+                issue.title,
+                issue.state,
+                issue.team,
+                team_key,
+                issue.assignee,
+                issue.priority as i64,
+                issue.url,
+                fetched_at,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Resolve a `${VAR_NAME}` placeholder against the process environment.
@@ -270,6 +324,104 @@ mod tests {
             CollectError::Config(msg) => assert!(msg.contains("api_key")),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    fn sample_issue(identifier: &str) -> LinearIssue {
+        LinearIssue {
+            identifier: identifier.to_string(),
+            title: format!("Title for {identifier}"),
+            state: "In Progress".to_string(),
+            team: "Engineering".to_string(),
+            assignee: Some("Alice".to_string()),
+            priority: 2,
+            url: format!("https://linear.app/x/issue/{identifier}"),
+        }
+    }
+
+    #[test]
+    fn store_linear_issues_inserts_rows() {
+        let db = Database::open_in_memory().expect("db");
+        let issues = vec![sample_issue("ENG-1"), sample_issue("FE-42")];
+        let n = store_linear_issues(&db, &issues).expect("store");
+        assert_eq!(n, 2);
+
+        let conn = db.connection();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM linear_issues", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 2);
+
+        let (identifier, team_key, priority): (String, String, i64) = conn
+            .query_row(
+                "SELECT identifier, team_key, priority FROM linear_issues WHERE identifier = ?1",
+                ["ENG-1"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("query");
+        assert_eq!(identifier, "ENG-1");
+        assert_eq!(team_key, "ENG");
+        assert_eq!(priority, 2);
+    }
+
+    #[test]
+    fn store_linear_issues_is_idempotent_on_identifier() {
+        let db = Database::open_in_memory().expect("db");
+        let mut issue = sample_issue("ENG-9");
+        store_linear_issues(&db, &[issue.clone()]).expect("first");
+
+        // Re-store with updated state — should replace, not duplicate.
+        issue.state = "Done".to_string();
+        issue.assignee = Some("Bob".to_string());
+        store_linear_issues(&db, &[issue]).expect("second");
+
+        let conn = db.connection();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM linear_issues", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1);
+
+        let (state, assignee): (String, Option<String>) = conn
+            .query_row(
+                "SELECT state, assignee FROM linear_issues WHERE identifier = ?1",
+                ["ENG-9"],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("query");
+        assert_eq!(state, "Done");
+        assert_eq!(assignee.as_deref(), Some("Bob"));
+    }
+
+    #[test]
+    fn store_linear_issues_handles_missing_assignee() {
+        let db = Database::open_in_memory().expect("db");
+        let mut issue = sample_issue("OPS-7");
+        issue.assignee = None;
+        store_linear_issues(&db, &[issue]).expect("store");
+
+        let conn = db.connection();
+        let assignee: Option<String> = conn
+            .query_row(
+                "SELECT assignee FROM linear_issues WHERE identifier = ?1",
+                ["OPS-7"],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert!(assignee.is_none());
+    }
+
+    #[test]
+    fn migration_v2_creates_linear_issues_table() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.connection();
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='linear_issues'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("table exists");
+        assert_eq!(name, "linear_issues");
+        assert!(db.schema_version().expect("version") >= 2);
     }
 
     /// Live integration test — only runs when `LINEAR_API_KEY` env var is set.

@@ -92,7 +92,11 @@ mod tests {
         let _db1 = db::Database::open(&db_path).expect("first open");
         let db2 = db::Database::open(&db_path).expect("second open");
         // Running again must not duplicate or fail.
-        assert_eq!(db2.schema_version().expect("version"), 1);
+        let expected = db::migrations::MIGRATIONS
+            .last()
+            .map(|m| m.version)
+            .unwrap_or(0);
+        assert_eq!(db2.schema_version().expect("version"), expected);
     }
 
     // --- minimal tempfile helpers (avoid pulling in a `tempfile` dep) ---
