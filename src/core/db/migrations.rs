@@ -41,6 +41,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "commits_ticketed",
         sql: include_str!("sql/0003_commits_ticketed.sql"),
     },
+    Migration {
+        version: 4,
+        name: "collection_runs",
+        sql: include_str!("sql/0004_collection_runs.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

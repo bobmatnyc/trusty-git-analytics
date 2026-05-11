@@ -22,10 +22,16 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
 
     if !args.skip_collect {
         tracing::info!("stage 1: collect");
-        let collect_stats = CollectionPipeline::new(cfg.clone()).run(db).await?;
+        let collect_stats = CollectionPipeline::new(cfg.clone())
+            .with_force(args.force)
+            .run(db)
+            .await?;
         println!(
-            "Collected {} commits from {} authors",
-            collect_stats.commits_collected, collect_stats.authors_resolved
+            "Collected {} commits from {} authors ({} weeks collected, {} weeks skipped)",
+            collect_stats.commits_collected,
+            collect_stats.authors_resolved,
+            collect_stats.weeks_collected,
+            collect_stats.weeks_skipped,
         );
         if !collect_stats.errors.is_empty() {
             for e in &collect_stats.errors {

@@ -16,7 +16,10 @@ use tracing::{debug, info};
 use crate::core::config::expand_path;
 use crate::core::errors::{Result, TgaError};
 
+pub mod collection_runs;
 pub mod migrations;
+
+pub use collection_runs::{is_week_collected, record_collection_run};
 
 /// Wrapper around a [`rusqlite::Connection`] with project-standard pragmas
 /// applied and migrations run.

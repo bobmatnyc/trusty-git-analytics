@@ -40,12 +40,17 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
         }
     }
 
-    let pipeline = CollectionPipeline::new(cfg);
+    let pipeline = CollectionPipeline::new(cfg).with_force(args.force);
     let stats = pipeline.run(db).await?;
 
     println!(
-        "Collected {} commits from {} authors ({} PRs fetched)",
-        stats.commits_collected, stats.authors_resolved, stats.prs_fetched
+        "Collected {} commits from {} authors ({} PRs fetched, \
+         {} weeks collected, {} weeks skipped)",
+        stats.commits_collected,
+        stats.authors_resolved,
+        stats.prs_fetched,
+        stats.weeks_collected,
+        stats.weeks_skipped,
     );
     if !stats.errors.is_empty() {
         eprintln!(

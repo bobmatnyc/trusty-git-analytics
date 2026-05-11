@@ -64,6 +64,9 @@ pub struct AnalyzeArgs {
     /// Output directory override.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+    /// Re-collect all weeks even if already present in the database.
+    #[arg(long, short = 'f', default_value_t = false)]
+    pub force: bool,
 }
 
 /// Arguments for `tga collect`.
@@ -78,6 +81,9 @@ pub struct CollectArgs {
     /// Collect until date (ISO 8601, overrides config).
     #[arg(long)]
     pub until: Option<String>,
+    /// Re-collect all weeks even if already present in the database.
+    #[arg(long, short = 'f', default_value_t = false)]
+    pub force: bool,
 }
 
 /// Arguments for `tga classify`.

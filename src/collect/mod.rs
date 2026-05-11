@@ -22,6 +22,7 @@ pub mod identity;
 pub mod jira;
 pub mod linear;
 pub mod ticket;
+pub mod weeks;
 
 pub use collector::{CollectionPipeline, CollectionStats};
 pub use errors::{CollectError, Result};

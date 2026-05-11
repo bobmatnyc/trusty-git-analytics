@@ -3,8 +3,7 @@
 //! Orchestrates git extraction, identity resolution, and optional GitHub
 //! and JIRA fetches against a configured [`crate::core::config::Config`].
 
-use crate::core::config::Config;
-use crate::core::db::Database;
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use tracing::{info, warn};
 
 use crate::collect::errors::Result;
@@ -12,6 +11,9 @@ use crate::collect::git::GitCollector;
 use crate::collect::github::GitHubClient;
 use crate::collect::identity::IdentityResolver;
 use crate::collect::linear::LinearClient;
+use crate::collect::weeks::{clamp_week_to_range, weeks_in_range};
+use crate::core::config::Config;
+use crate::core::db::{self, Database};
 
 /// Aggregate statistics for a single pipeline run.
 #[derive(Debug, Clone, Default)]
@@ -24,6 +26,11 @@ pub struct CollectionStats {
     pub prs_fetched: usize,
     /// Number of Linear issues fetched (0 if Linear not configured).
     pub linear_issues_fetched: usize,
+    /// Number of `(repo, week)` pairs that were collected this run.
+    pub weeks_collected: usize,
+    /// Number of `(repo, week)` pairs skipped because already present in
+    /// `collection_runs` (and `force` was false).
+    pub weeks_skipped: usize,
     /// Per-repo error messages encountered (non-fatal).
     pub errors: Vec<String>,
 }
@@ -31,12 +38,24 @@ pub struct CollectionStats {
 /// Top-level Stage 1 orchestrator.
 pub struct CollectionPipeline {
     config: Config,
+    force: bool,
 }
 
 impl CollectionPipeline {
     /// Construct a new pipeline from a validated [`Config`].
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            force: false,
+        }
+    }
+
+    /// Enable forced re-collection: every `(repo, ISO-week)` pair is
+    /// collected regardless of whether `collection_runs` already has a row
+    /// for it.
+    pub fn with_force(mut self, force: bool) -> Self {
+        self.force = force;
+        self
     }
 
     /// Borrow the underlying configuration.
@@ -68,18 +87,7 @@ impl CollectionPipeline {
                     continue;
                 }
             };
-            let repo_name = collector.name().to_string();
-            match collector.collect(db) {
-                Ok(n) => {
-                    info!(repo = %repo_name, commits = n, "extracted");
-                    stats.commits_collected += n;
-                }
-                Err(e) => {
-                    let msg = format!("collection failed for {repo_name}: {e}");
-                    warn!("{msg}");
-                    stats.errors.push(msg);
-                }
-            }
+            self.collect_repo_by_week(db, &collector, &mut stats);
         }
 
         // Backfill authors from observed commits.
@@ -177,6 +185,103 @@ impl CollectionPipeline {
         Ok(stats)
     }
 
+    /// Collect a single repository week-by-week, skipping `(repo, ISO-week)`
+    /// pairs that already have a row in `collection_runs` unless `force` is
+    /// set. All non-fatal errors are pushed into `stats.errors` so that one
+    /// bad week (or bad repo) does not abort the entire run.
+    fn collect_repo_by_week(
+        &self,
+        db: &mut Database,
+        collector: &GitCollector,
+        stats: &mut CollectionStats,
+    ) {
+        let repo_name = collector.name().to_string();
+
+        // Derive the [from, to] NaiveDate window from the collector's
+        // configured since/until. If no bounds are set, fall back to
+        // collecting the entire history in one shot.
+        let (from, to) = match (collector.since(), collector.until()) {
+            (Some(s), Some(u)) => (s.date_naive(), u.date_naive()),
+            _ => {
+                // No date bounds → bypass week-level bookkeeping. This
+                // preserves prior behaviour for repos configured without
+                // since/until dates.
+                match collector.collect(db) {
+                    Ok(n) => {
+                        info!(repo = %repo_name, commits = n, "extracted (unbounded)");
+                        stats.commits_collected += n;
+                    }
+                    Err(e) => {
+                        let msg = format!("collection failed for {repo_name}: {e}");
+                        warn!("{msg}");
+                        stats.errors.push(msg);
+                    }
+                }
+                return;
+            }
+        };
+
+        for week in weeks_in_range(from, to) {
+            let (year, week_no, _, _) = week;
+            // Skip-if-collected check.
+            if !self.force {
+                match db::is_week_collected(db, &repo_name, year, week_no) {
+                    Ok(true) => {
+                        info!("Skipping {repo_name} W{week_no} {year} — already collected");
+                        println!(
+                            "Skipped   W{week_no:02} {year}: already collected \
+                             (use --force to re-collect) [{repo_name}]"
+                        );
+                        stats.weeks_skipped += 1;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        let msg = format!(
+                            "collection_runs lookup failed for {repo_name} W{week_no} {year}: {e}"
+                        );
+                        warn!("{msg}");
+                        stats.errors.push(msg);
+                        continue;
+                    }
+                }
+            }
+
+            // Clamp the week to the user-requested range so we don't pull
+            // commits outside [from, to] on partial-week boundaries.
+            let (win_start, win_end) = clamp_week_to_range(week, from, to);
+            let since_ts = naive_date_start_utc(win_start);
+            let until_ts = naive_date_end_utc(win_end);
+
+            match collector.collect_window(db, Some(since_ts), Some(until_ts)) {
+                Ok(n) => {
+                    info!(
+                        repo = %repo_name,
+                        year,
+                        week = week_no,
+                        commits = n,
+                        "extracted week"
+                    );
+                    println!("Collected W{week_no:02} {year}: {n} commits [{repo_name}]");
+                    stats.commits_collected += n;
+                    stats.weeks_collected += 1;
+                    if let Err(e) = db::record_collection_run(db, &repo_name, year, week_no, n) {
+                        let msg = format!(
+                            "failed to record collection_run for {repo_name} W{week_no} {year}: {e}"
+                        );
+                        warn!("{msg}");
+                        stats.errors.push(msg);
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("collection failed for {repo_name} W{week_no} {year}: {e}");
+                    warn!("{msg}");
+                    stats.errors.push(msg);
+                }
+            }
+        }
+    }
+
     /// Read distinct `(author_name, author_email)` pairs from `commits`
     /// and upsert them via the resolver, then link `commits.author_id`.
     fn upsert_observed_authors(
@@ -213,4 +318,20 @@ impl CollectionPipeline {
         }
         Ok(count)
     }
+}
+
+/// Convert a calendar date to the UTC instant at 00:00:00 on that day.
+fn naive_date_start_utc(d: NaiveDate) -> DateTime<Utc> {
+    let ndt = d
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 is always a valid time");
+    Utc.from_utc_datetime(&ndt)
+}
+
+/// Convert a calendar date to the UTC instant at 23:59:59 on that day.
+fn naive_date_end_utc(d: NaiveDate) -> DateTime<Utc> {
+    let ndt = d
+        .and_hms_opt(23, 59, 59)
+        .expect("23:59:59 is always a valid time");
+    Utc.from_utc_datetime(&ndt)
 }

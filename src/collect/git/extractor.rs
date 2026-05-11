@@ -92,8 +92,32 @@ impl GitCollector {
     ///
     /// Any underlying git or database failure is propagated.
     pub fn collect(&self, db: &mut Database) -> Result<usize> {
+        self.collect_window(db, self.since, self.until)
+    }
+
+    /// Walk the repository and insert commits whose timestamp falls within
+    /// `[since, until]`. The supplied bounds override the collector's
+    /// configured `since`/`until` for this call only.
+    ///
+    /// Either bound may be `None` to leave that side open.
+    ///
+    /// # Errors
+    ///
+    /// Any underlying git or database failure is propagated.
+    pub fn collect_window(
+        &self,
+        db: &mut Database,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
+    ) -> Result<usize> {
         let repo = Repository::open(&self.path)?;
-        info!(repo = %self.name, path = %self.path.display(), "starting commit extraction");
+        info!(
+            repo = %self.name,
+            path = %self.path.display(),
+            ?since,
+            ?until,
+            "starting commit extraction"
+        );
 
         let mut revwalk = repo.revwalk()?;
         revwalk.set_sorting(Sort::TIME)?;
@@ -131,13 +155,13 @@ impl GitCollector {
                 }
             };
 
-            if let Some(s) = self.since {
+            if let Some(s) = since {
                 if ts < s {
                     pb.inc(1);
                     continue;
                 }
             }
-            if let Some(u) = self.until {
+            if let Some(u) = until {
                 if ts > u {
                     pb.inc(1);
                     continue;
@@ -214,6 +238,16 @@ impl GitCollector {
     /// Borrow the resolved repository name (display).
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Configured inclusive lower bound on commit timestamps, if any.
+    pub fn since(&self) -> Option<DateTime<Utc>> {
+        self.since
+    }
+
+    /// Configured inclusive upper bound on commit timestamps, if any.
+    pub fn until(&self) -> Option<DateTime<Utc>> {
+        self.until
     }
 }
 
