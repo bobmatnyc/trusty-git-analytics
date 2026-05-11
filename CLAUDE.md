@@ -23,7 +23,7 @@ superior performance, parallelism, and correctness.
 | `src/main.rs` + `src/commands/` | DONE | clap CLI binary entry point |
 | Database migrations | DONE | v1 initial schema in `src/core/db/sql/` |
 | Configuration structs | DONE | YAML schema implemented in `src/core/config/` |
-| Tests | DONE | 31 unit tests + 1 gated integration test |
+| Tests | DONE | 37 unit tests + 1 gated integration test |
 | CI/CD | DONE | GitHub Actions workflows for build, test, publish |
 
 ## Architecture Overview
@@ -83,8 +83,8 @@ Reference: `docs/requirements/configuration.md`
 
 Binary: `tga` (produced by `src/main.rs`)
 
-Subcommands: `analyze`, `collect`, `classify`, `report`, `fetch`, `aliases`, `identities`,
-             `pr-metrics`, `override`, `install`
+Subcommands: `analyze` (full pipeline), `collect` (stage 1), `classify` (stage 2),
+             `report` (stage 3)
 
 Reference: `docs/requirements/cli-commands.md`
 
