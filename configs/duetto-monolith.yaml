@@ -1,0 +1,17 @@
+version: "1.0"
+aliases_file: "/Users/masa/Duetto/repos/duetto-aliases.yaml"
+
+repositories:
+  - name: "duetto-monolith"
+    path: "/Users/masa/Duetto/repos/duetto"
+    branch: "develop"
+
+classification:
+  rules_file: "/Users/masa/Projects/trusty-git-analytics/configs/duetto-rules.yaml"
+
+output:
+  directory: "/Users/masa/Projects/trusty-git-analytics/reports/monolith-w11-w19"
+  formats:
+    - csv
+    - json
+    - markdown
