@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 tga-core = { path = "../tga-core" }
+rusqlite.workspace = true
 git2.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
