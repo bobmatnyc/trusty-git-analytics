@@ -1,11 +1,14 @@
-//! Azure DevOps integration (Phase 1 stub).
+//! Azure DevOps integration (Phase 2).
 //!
-//! Phase 1 establishes the surface API: a non-network client that validates
-//! credentials format and exposes `NotImplemented` errors tagged with the
-//! phase in which each method will land. No HTTP calls are made.
+//! Phase 2 wires a real `reqwest` HTTP session with PAT-based Basic auth
+//! and implements two endpoints against `api-version=7.1`:
 //!
-//! Phase 2 will add the HTTP session and a `GET _apis/connectionData`
-//! auth probe; Phase 6 will add work-item fetching.
+//! * `GET _apis/connectionData` — auth probe + identity echo
+//!   ([`AzureDevOpsClient::test_connection`])
+//! * `GET _apis/projects` — list projects (single page, up to 100)
+//!   ([`AzureDevOpsClient::get_projects`])
+//!
+//! Phase 6 will add work-item fetching on top of this session.
 
 pub mod client;
 

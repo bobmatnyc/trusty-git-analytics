@@ -6,6 +6,7 @@
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use tracing::{info, warn};
 
+use crate::collect::azdo::AzureDevOpsClient;
 use crate::collect::errors::Result;
 use crate::collect::git::GitCollector;
 use crate::collect::github::GitHubClient;
@@ -115,6 +116,20 @@ impl CollectionPipeline {
                         stats.errors.push(format!("GitHub client init failed: {e}"));
                     }
                 }
+            }
+        }
+
+        // Optional: Azure DevOps connection probe (non-fatal).
+        // Phase 2 only verifies the PAT; work-item fetch lands in Phase 6.
+        if let Some(azdo_cfg) = self.config.azure_devops_config() {
+            let client = AzureDevOpsClient::new(azdo_cfg.clone());
+            match client.test_connection().await {
+                Ok(info) => info!(
+                    user = info.user_name.as_deref().unwrap_or("?"),
+                    org = %info.organization_url,
+                    "Azure DevOps connection verified",
+                ),
+                Err(e) => warn!("Azure DevOps connection failed (non-fatal): {e}"),
             }
         }
 
