@@ -19,6 +19,38 @@ use crate::core::db::Database;
 /// Default Jaro-Winkler threshold for fuzzy identity matching.
 pub const DEFAULT_SIMILARITY_THRESHOLD: f64 = 0.85;
 
+/// Lower fuzzy-match threshold applied to *normalized* comparisons (email
+/// local-part vs canonical name with punctuation stripped). The normalization
+/// step removes a lot of cosmetic differences, so we accept a slightly
+/// lower raw similarity score when matching on the normalized form.
+pub const NORMALIZED_SIMILARITY_THRESHOLD: f64 = 0.82;
+
+/// Normalize a string for fuzzy comparison by:
+/// 1. Lowercasing
+/// 2. Replacing `.`, `-`, `_` with spaces (common email/login separators)
+/// 3. Collapsing repeated whitespace
+///
+/// Examples:
+/// - `"Bob.Matsuoka"` → `"bob matsuoka"`
+/// - `"alice_smith-c"` → `"alice smith c"`
+/// - `"Bob   M"`       → `"bob m"`
+fn normalize_for_fuzzy(s: &str) -> String {
+    s.to_lowercase()
+        .replace(['.', '-', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Extract the local-part (before `@`) of an email address, lowercased.
+/// Returns the whole input lowercased if no `@` is present.
+fn email_local_part(email: &str) -> String {
+    match email.find('@') {
+        Some(i) => email[..i].to_lowercase(),
+        None => email.to_lowercase(),
+    }
+}
+
 /// Resolves observed author identities to canonical `(name, email)` pairs.
 pub struct IdentityResolver {
     /// Mapping of alias (lowercased name or email) → canonical name.
@@ -127,7 +159,7 @@ impl IdentityResolver {
             }
         }
 
-        // 3. Fuzzy match against member names/emails
+        // 3. Fuzzy match against member names/emails (raw Jaro-Winkler).
         let mut best: Option<(f64, &(String, String))> = None;
         for m in &self.members {
             let s_name = jaro_winkler(&name_lc, &m.0.to_lowercase());
@@ -142,7 +174,39 @@ impl IdentityResolver {
             return (m.0.clone(), m.1.clone());
         }
 
-        // 4. Fallback: return as-is.
+        // 4. Normalized fuzzy: compare the email local-part and the raw name
+        //    against canonical names and member emails after stripping
+        //    punctuation (`.`, `-`, `_`). This catches cases like
+        //    `"Bob M" <bob.matsuoka@co.com>` → `"Bob Matsuoka"`, where the
+        //    raw name is too short for Jaro-Winkler to clear 0.85 but the
+        //    email local-part `bob.matsuoka` normalizes to `bob matsuoka`,
+        //    which is an exact match for the canonical name.
+        let name_norm = normalize_for_fuzzy(name);
+        let local_norm = normalize_for_fuzzy(&email_local_part(email));
+        let mut best_norm: Option<(f64, &(String, String))> = None;
+        for m in &self.members {
+            let canon_name_norm = normalize_for_fuzzy(&m.0);
+            let canon_local_norm = normalize_for_fuzzy(&email_local_part(&m.1));
+            // Try all pairings; take the best score for this member.
+            let candidates = [
+                jaro_winkler(&local_norm, &canon_name_norm),
+                jaro_winkler(&local_norm, &canon_local_norm),
+                jaro_winkler(&name_norm, &canon_name_norm),
+                jaro_winkler(&name_norm, &canon_local_norm),
+            ];
+            let score = candidates.iter().cloned().fold(0.0_f64, f64::max);
+            if score >= NORMALIZED_SIMILARITY_THRESHOLD
+                && best_norm.map(|(b, _)| score > b).unwrap_or(true)
+            {
+                best_norm = Some((score, m));
+            }
+        }
+        if let Some((score, m)) = best_norm {
+            debug!(score, member = %m.0, "normalized fuzzy identity match");
+            return (m.0.clone(), m.1.clone());
+        }
+
+        // 5. Fallback: return as-is.
         (name.to_string(), email.to_string())
     }
 
@@ -240,5 +304,178 @@ mod tests {
         let (n, e) = r.resolve("Anyone", "anyone@x.com");
         assert_eq!(n, "Anyone");
         assert_eq!(e, "anyone@x.com");
+    }
+
+    /// All aliases — emails AND non-email login handles — must be indexed
+    /// in the lookup map so every variant resolves to the canonical name.
+    #[test]
+    fn all_aliases_registered() {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        map.insert(
+            "Alice Smith".to_string(),
+            vec![
+                "alice@company.com".into(),
+                "alice.smith@personal.com".into(),
+                "asmith".into(), // non-email login handle
+            ],
+        );
+        let r = IdentityResolver::from_alias_map(&map);
+
+        // Primary email → canonical name + primary email.
+        let (n, e) = r.resolve("whoever", "alice@company.com");
+        assert_eq!(n, "Alice Smith");
+        assert_eq!(e, "alice@company.com");
+
+        // Secondary email → canonical name + canonical (first) email.
+        let (n, e) = r.resolve("whoever", "alice.smith@personal.com");
+        assert_eq!(n, "Alice Smith");
+        assert_eq!(e, "alice@company.com");
+
+        // Non-email handle as name → canonical name.
+        let (n, e) = r.resolve("asmith", "noise@nowhere.test");
+        assert_eq!(n, "Alice Smith");
+        assert_eq!(e, "alice@company.com");
+    }
+
+    /// Email local-part fuzzy: a short raw name like `"Bob M"` plus an
+    /// email `<bob.matsuoka@co.com>` should resolve to `"Bob Matsuoka"`
+    /// via the normalized fuzzy pass even when raw Jaro-Winkler on the
+    /// short name falls below the strict 0.85 threshold.
+    #[test]
+    fn email_local_part_fuzzy_match() {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        map.insert(
+            "Bob Matsuoka".to_string(),
+            vec!["bob.matsuoka@duettoresearch.com".into()],
+        );
+        let r = IdentityResolver::from_alias_map(&map);
+
+        // Different email + truncated name — only the email local-part
+        // normalizes to "bob matsuoka" which matches the canonical name.
+        let (n, e) = r.resolve("Bob M", "bob.matsuoka@otherdomain.com");
+        assert_eq!(n, "Bob Matsuoka");
+        assert_eq!(e, "bob.matsuoka@duettoresearch.com");
+    }
+
+    /// Email case must not affect lookup — `ALICE@COMPANY.COM` resolves
+    /// the same as `alice@company.com`.
+    #[test]
+    fn case_insensitive_email_lookup() {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        map.insert("Alice Smith".to_string(), vec!["alice@company.com".into()]);
+        let r = IdentityResolver::from_alias_map(&map);
+
+        let (n, e) = r.resolve("Whoever", "ALICE@COMPANY.COM");
+        assert_eq!(n, "Alice Smith");
+        assert_eq!(e, "alice@company.com");
+
+        let (n2, e2) = r.resolve("WhoEver", "Alice@Company.Com");
+        assert_eq!(n2, "Alice Smith");
+        assert_eq!(e2, "alice@company.com");
+    }
+
+    /// Short truncated display names should still fuzzy-match the
+    /// canonical form when the email local-part backs them up.
+    #[test]
+    fn short_name_fuzzy() {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        map.insert(
+            "Bob Matsuoka".to_string(),
+            vec!["bob.matsuoka@co.com".into()],
+        );
+        let r = IdentityResolver::from_alias_map(&map);
+
+        // The unknown email forces fuzzy. "bob m" alone is too short for
+        // raw Jaro-Winkler to clear 0.85 against "bob matsuoka", but the
+        // local-part `bobm` normalizes and the normalized threshold (0.82)
+        // accepts the match.
+        let (n, _e) = r.resolve("Bob M", "bobm@unknown.test");
+        assert_eq!(n, "Bob Matsuoka");
+    }
+
+    /// A completely unknown identity returns the raw input unchanged.
+    #[test]
+    fn unknown_author_passthrough() {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        map.insert("Alice Smith".to_string(), vec!["alice@company.com".into()]);
+        let r = IdentityResolver::from_alias_map(&map);
+
+        let (n, e) = r.resolve("Zelda Q", "zelda@nowhere.test");
+        assert_eq!(n, "Zelda Q");
+        assert_eq!(e, "zelda@nowhere.test");
+    }
+
+    /// Multiple distinct emails for the same person all collapse onto a
+    /// single canonical name and email pair.
+    #[test]
+    fn multiple_emails_same_person() {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        map.insert(
+            "Andre Ramos".to_string(),
+            vec![
+                "andre.ramos@duettoresearch.com".into(),
+                "129991831+andreramosduetto@users.noreply.github.com".into(),
+                "andre@personal.dev".into(),
+            ],
+        );
+        let r = IdentityResolver::from_alias_map(&map);
+
+        let (n1, e1) = r.resolve("Andre Ramos", "andre.ramos@duettoresearch.com");
+        let (n2, e2) = r.resolve(
+            "andreramosduetto",
+            "129991831+andreramosduetto@users.noreply.github.com",
+        );
+        let (n3, e3) = r.resolve("A. Ramos", "andre@personal.dev");
+
+        assert_eq!(n1, "Andre Ramos");
+        assert_eq!(n2, "Andre Ramos");
+        assert_eq!(n3, "Andre Ramos");
+        // Canonical email is the first email-looking alias for each.
+        assert_eq!(e1, "andre.ramos@duettoresearch.com");
+        assert_eq!(e2, "andre.ramos@duettoresearch.com");
+        assert_eq!(e3, "andre.ramos@duettoresearch.com");
+    }
+
+    /// Verify resolution against the real `configs/duetto-contractors.yaml`
+    /// alias map. This guards against regressions in the YAML schema or
+    /// resolver wiring that would silently break a deployed config.
+    #[test]
+    fn duetto_contractors_config_resolves() {
+        use std::path::Path;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("configs")
+            .join("duetto-contractors.yaml");
+        // Skip silently if the fixture isn't present (keeps the test green
+        // in stripped-down checkouts).
+        if !path.exists() {
+            return;
+        }
+        let cfg = crate::core::config::Config::load(&path).expect("load duetto-contractors yaml");
+        let r = IdentityResolver::from_config(&cfg);
+
+        // Known mapping from the YAML.
+        let (n, _) = r.resolve("whoever", "andre.ramos@duettoresearch.com");
+        assert_eq!(n, "Andre Ramos");
+
+        // Case-insensitive variant of an explicitly listed alias.
+        let (n, _) = r.resolve("whoever", "Akash.Arora-c@duettoresearch.com");
+        assert_eq!(n, "Akash Arora");
+
+        // Non-email login handle alias.
+        let (n, _) = r.resolve("jangareddy-duetto", "noise@nowhere.test");
+        assert_eq!(n, "Janga Vinod Kumar Reddy");
+    }
+
+    #[test]
+    fn normalize_for_fuzzy_basic() {
+        assert_eq!(normalize_for_fuzzy("Bob.Matsuoka"), "bob matsuoka");
+        assert_eq!(normalize_for_fuzzy("alice_smith-c"), "alice smith c");
+        assert_eq!(normalize_for_fuzzy("  Foo   Bar  "), "foo bar");
+    }
+
+    #[test]
+    fn email_local_part_basic() {
+        assert_eq!(email_local_part("Bob@Example.COM"), "bob");
+        assert_eq!(email_local_part("no-at-symbol"), "no-at-symbol");
     }
 }

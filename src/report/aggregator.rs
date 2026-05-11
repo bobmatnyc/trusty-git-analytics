@@ -47,11 +47,24 @@ impl Aggregator {
 
     fn load_rows(db: &Database) -> Result<Vec<CommitRow>> {
         let conn = db.connection();
+        // Prefer the canonical identity from the `authors` table when the
+        // commit has been linked (i.e. `author_id IS NOT NULL`). This ensures
+        // that aliases configured in `developer_aliases` are honored at
+        // aggregation time: every commit by the same person — regardless of
+        // the raw name/email recorded in git — collapses to one canonical
+        // `(name, email)` pair in reports.
+        //
+        // Falls back to the raw commit fields when no `author_id` is set
+        // (which can happen for commits inserted before
+        // `upsert_observed_authors` ran).
         let mut stmt = conn
             .prepare(
-                "SELECT c.author_name, c.author_email, c.timestamp, c.repository, \
+                "SELECT COALESCE(a.canonical_name,  c.author_name)  AS author_name, \
+                        COALESCE(NULLIF(a.canonical_email, ''), c.author_email) AS author_email, \
+                        c.timestamp, c.repository, \
                         c.insertions, c.deletions, c.files_changed, cl.category \
                  FROM commits c \
+                 LEFT JOIN authors a ON a.id = c.author_id \
                  LEFT JOIN classifications cl ON cl.id = c.classification_id",
             )
             .map_err(crate::core::TgaError::from)?;
