@@ -26,8 +26,11 @@ rules:
     keywords:
       - "increment version"
       - "increment to v"
+      - "new release, version"
+      - "new release version"
     patterns:
       - '(?i)^increment (version|to v)'
+      - '(?i)^new release,?\s+version='
       - '(?i)^\d+\.\d+\.\d+\s*(\(#\d+\))?$'
       - '(?i)^v\d+\.\d+'
     priority: 90
