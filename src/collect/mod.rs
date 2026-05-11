@@ -23,11 +23,16 @@ pub mod github;
 pub mod identity;
 pub mod jira;
 pub mod linear;
+pub mod pm_adapter;
 pub mod ticket;
 pub mod weeks;
 
 pub use collector::{CollectionPipeline, CollectionStats};
 pub use errors::{CollectError, Result};
+pub use pm_adapter::{
+    build_adapters, AzureDevOpsAdapter, GitHubAdapter, JiraAdapter, LinearAdapter, PmAdapter,
+    PmError, PmSource, PmTicket,
+};
 
 #[cfg(test)]
 mod tests {
