@@ -38,13 +38,34 @@ pub fn load_rules(path: &Path) -> Result<RuleSet> {
 
 /// Return the built-in default ruleset.
 ///
-/// Covers conventional commit prefixes (`feat:`, `fix:`, `chore:`, `docs:`,
-/// `refactor:`, `test:`, `ci:`, `perf:`, `style:`, `build:`, `revert:`),
-/// JIRA-style ticket patterns (e.g. `PROJ-123`), and common keywords such
-/// as `hotfix`, `bug`, `breaking change`, `merge`, and `revert`.
+/// Covers a broad swath of commit-message patterns to keep the
+/// "uncategorized" rate low without an LLM:
+///
+/// - Conventional commit prefixes (`feat:`, `fix:`, `chore:`, `docs:`,
+///   `refactor:`, `test:`, `ci:`, `perf:`, `style:`, `build:`, `revert:`)
+///   matched both as exact substrings (Tier 1) and as anchored regex
+///   patterns at the start of the message (Tier 2). The regex form also
+///   accepts optional scopes (`feat(api):`) and breaking-change markers
+///   (`feat!:`).
+/// - GitHub `Merge pull request #N from …` and `Merge branch …` headers.
+/// - "Revert "..."" style headers (in addition to `revert:` prefix).
+/// - Initial-commit / WIP / version-bump conventions.
+/// - Dependency, infrastructure (Docker / k8s / Terraform / GitHub
+///   Actions), and code-review keywords.
+/// - JIRA-style ticket patterns (`PROJ-123`) and GitHub issue refs
+///   (`#123`).
+/// - Lower-priority keyword fallbacks for `bug`, `security`,
+///   `performance`, etc. so that prose commit messages still classify
+///   without LLM help.
 pub fn default_rules() -> RuleSet {
     let rules = vec![
-        // -- Conventional commits (high priority, regex-anchored) --
+        // ================================================================
+        // Tier-2 (regex) rules: anchored, conventional-commit prefixes.
+        //
+        // These run after exact keyword matches but are intentionally high
+        // priority so that a leading `feat(scope)!:` beats a stray "bug"
+        // word later in the message.
+        // ================================================================
         Rule {
             id: "cc-feat".into(),
             category: "feature".into(),
@@ -85,8 +106,8 @@ pub fn default_rules() -> RuleSet {
             id: "cc-refactor".into(),
             category: "refactor".into(),
             subcategory: None,
-            keywords: vec!["refactor:".into()],
-            patterns: vec![r"(?i)^\s*refactor(\([^)]*\))?!?:".into()],
+            keywords: vec!["refactor:".into(), "refactoring:".into()],
+            patterns: vec![r"(?i)^\s*refactor(ing)?(\([^)]*\))?!?:".into()],
             priority: 90,
             confidence: 0.9,
         },
@@ -112,8 +133,8 @@ pub fn default_rules() -> RuleSet {
             id: "cc-perf".into(),
             category: "performance".into(),
             subcategory: None,
-            keywords: vec!["perf:".into()],
-            patterns: vec![r"(?i)^\s*perf(\([^)]*\))?!?:".into()],
+            keywords: vec!["perf:".into(), "performance:".into()],
+            patterns: vec![r"(?i)^\s*perf(ormance)?(\([^)]*\))?!?:".into()],
             priority: 90,
             confidence: 0.9,
         },
@@ -139,49 +160,544 @@ pub fn default_rules() -> RuleSet {
             id: "cc-revert".into(),
             category: "revert".into(),
             subcategory: None,
-            keywords: vec!["revert:".into()],
-            patterns: vec![r"(?i)^\s*revert(\([^)]*\))?!?:".into()],
-            priority: 80,
+            // Include the leading word with trailing space so that an
+            // auto-generated `Revert "feat: ..."` message wins the Tier-1
+            // race against the inner `feat:` keyword.
+            keywords: vec!["revert:".into(), "revert \"".into()],
+            patterns: vec![
+                r"(?i)^\s*revert(\([^)]*\))?!?:".into(),
+                r#"(?i)^\s*revert\s+""#.into(), // "Revert "feat: ..."" auto-generated
+                r"(?i)^\s*this reverts commit".into(),
+            ],
+            // Above `cc-feat` (100) and `cc-fix` (100) so that
+            // `Revert "feat: ..."` is classified as a revert, not a feature.
+            priority: 115,
             confidence: 0.9,
         },
-        // -- Breaking change marker --
+        // Additional conventional-style prefixes seen in the wild.
+        Rule {
+            id: "cc-security".into(),
+            category: "security".into(),
+            subcategory: None,
+            keywords: vec!["security:".into(), "sec:".into()],
+            patterns: vec![r"(?i)^\s*(security|sec)(\([^)]*\))?!?:".into()],
+            priority: 95,
+            confidence: 0.9,
+        },
+        Rule {
+            id: "cc-deps".into(),
+            category: "maintenance".into(),
+            subcategory: Some("dependencies".into()),
+            keywords: vec!["deps:".into(), "dep:".into(), "dependencies:".into()],
+            patterns: vec![r"(?i)^\s*dep(s|endencies)?(\([^)]*\))?!?:".into()],
+            priority: 85,
+            confidence: 0.9,
+        },
+        Rule {
+            id: "cc-i18n".into(),
+            category: "localization".into(),
+            subcategory: None,
+            keywords: vec!["i18n:".into(), "l10n:".into()],
+            patterns: vec![r"(?i)^\s*(i18n|l10n)(\([^)]*\))?!?:".into()],
+            priority: 85,
+            confidence: 0.9,
+        },
+        Rule {
+            id: "cc-release".into(),
+            category: "release".into(),
+            subcategory: None,
+            keywords: vec!["release:".into()],
+            patterns: vec![r"(?i)^\s*release(\([^)]*\))?!?:".into()],
+            priority: 85,
+            confidence: 0.9,
+        },
+        Rule {
+            id: "cc-wip".into(),
+            category: "wip".into(),
+            subcategory: None,
+            keywords: vec!["wip:".into()],
+            patterns: vec![
+                r"(?i)^\s*wip(\([^)]*\))?!?:".into(),
+                r"(?i)^\s*\[wip\]".into(),
+            ],
+            priority: 85,
+            confidence: 0.85,
+        },
+        // ================================================================
+        // Breaking-change marker (highest priority — overrides cc-feat etc.)
+        // ================================================================
         Rule {
             id: "breaking-change".into(),
             category: "breaking".into(),
             subcategory: Some("api".into()),
             keywords: vec!["breaking change".into(), "breaking-change".into()],
-            patterns: vec![r"(?i)breaking[\s-]change".into()],
+            patterns: vec![
+                r"(?i)breaking[\s-]change".into(),
+                // Conventional-commit `!:` breaking marker
+                // e.g. `feat(api)!: drop v1`, `refactor!: rename module`.
+                r"(?i)^\s*(feat|fix|chore|refactor|perf|build|docs|ci|style|test)(\([^)]*\))?!:"
+                    .into(),
+            ],
             priority: 110,
             confidence: 0.9,
         },
-        // -- JIRA-style ticket --
+        // ================================================================
+        // Merge / git-plumbing patterns (the fuzzy tier also handles these,
+        // but having rules catches them earlier with higher confidence).
+        // ================================================================
+        Rule {
+            id: "merge-pr".into(),
+            category: "merge".into(),
+            subcategory: Some("pull-request".into()),
+            keywords: vec!["merge pull request".into(), "merge remote-tracking".into()],
+            patterns: vec![r"(?i)^\s*merge pull request #\d+".into()],
+            priority: 105,
+            confidence: 0.95,
+        },
+        Rule {
+            id: "merge-branch".into(),
+            category: "merge".into(),
+            subcategory: Some("branch".into()),
+            keywords: vec!["merge branch".into()],
+            patterns: vec![
+                r"(?i)^\s*merge branch ".into(),
+                r"(?i)^\s*merge tag ".into(),
+            ],
+            priority: 105,
+            confidence: 0.95,
+        },
+        // ================================================================
+        // Initial / bootstrap / repo-setup commits.
+        // ================================================================
+        Rule {
+            id: "initial-commit".into(),
+            category: "chore".into(),
+            subcategory: Some("initial".into()),
+            keywords: vec!["initial commit".into(), "first commit".into()],
+            patterns: vec![
+                r"(?i)^\s*initial\s+commit\b".into(),
+                r"(?i)^\s*first\s+commit\b".into(),
+                r"(?i)^\s*initial\s+import\b".into(),
+                r"(?i)^\s*bootstrap\s+repo".into(),
+            ],
+            priority: 95,
+            confidence: 0.9,
+        },
+        // ================================================================
+        // Version-bump / release tagging.
+        // ================================================================
+        Rule {
+            id: "version-bump".into(),
+            category: "release".into(),
+            subcategory: Some("version-bump".into()),
+            keywords: vec![
+                "bump version".into(),
+                "version bump".into(),
+                "release version".into(),
+                "prepare release".into(),
+                "cut release".into(),
+            ],
+            patterns: vec![
+                r"(?i)^\s*bump\s+(version|to\s+v?\d)".into(),
+                r"(?i)^\s*release\s+v?\d+\.\d+".into(),
+                r"(?i)^\s*v?\d+\.\d+\.\d+(\s*$|\s+release)".into(),
+            ],
+            priority: 90,
+            confidence: 0.9,
+        },
+        // ================================================================
+        // Dependency updates — very common "uncategorized" source.
+        // ================================================================
+        Rule {
+            id: "kw-deps-update".into(),
+            category: "maintenance".into(),
+            subcategory: Some("dependencies".into()),
+            keywords: vec![
+                "update deps".into(),
+                "update dependencies".into(),
+                "upgrade deps".into(),
+                "upgrade dependencies".into(),
+                "bump deps".into(),
+                "bump dependencies".into(),
+                "pin dependencies".into(),
+                "lockfile".into(),
+                "package-lock".into(),
+                "yarn.lock".into(),
+                "cargo.lock".into(),
+                "poetry.lock".into(),
+            ],
+            patterns: vec![
+                r"(?i)\bbump\s+\S+\s+from\s+\S+\s+to\s+\S+".into(), // Dependabot
+                r"(?i)\bupdate\s+\S+\s+to\s+v?\d+\.\d+".into(),
+            ],
+            priority: 75,
+            confidence: 0.9,
+        },
+        Rule {
+            id: "kw-dependabot".into(),
+            category: "maintenance".into(),
+            subcategory: Some("dependencies".into()),
+            keywords: vec!["dependabot".into(), "renovate".into(), "snyk".into()],
+            patterns: vec![],
+            priority: 75,
+            confidence: 0.9,
+        },
+        // ================================================================
+        // Lint / formatting / tooling cleanup.
+        // ================================================================
+        Rule {
+            id: "kw-lint".into(),
+            category: "style".into(),
+            subcategory: Some("lint".into()),
+            keywords: vec![
+                "fix lint".into(),
+                "lint fix".into(),
+                "fix linting".into(),
+                "fix linter".into(),
+                "satisfy lint".into(),
+                "clippy fix".into(),
+                "fix clippy".into(),
+                "eslint fix".into(),
+                "rubocop".into(),
+                "prettier".into(),
+                "gofmt".into(),
+                "rustfmt".into(),
+                "black format".into(),
+            ],
+            patterns: vec![r"(?i)\bfix(es|ed|ing)?\s+lint(ing|er)?\b".into()],
+            priority: 75,
+            confidence: 0.85,
+        },
+        Rule {
+            id: "kw-format".into(),
+            category: "style".into(),
+            subcategory: Some("format".into()),
+            keywords: vec![
+                "reformat".into(),
+                "code formatting".into(),
+                "fix formatting".into(),
+                "fix whitespace".into(),
+                "trailing whitespace".into(),
+                "fix indentation".into(),
+            ],
+            patterns: vec![],
+            priority: 65,
+            confidence: 0.8,
+        },
+        // ================================================================
+        // Code review / PR feedback follow-ups.
+        // ================================================================
+        Rule {
+            id: "kw-review".into(),
+            category: "refactor".into(),
+            subcategory: Some("review".into()),
+            keywords: vec![
+                "address review".into(),
+                "address feedback".into(),
+                "address comments".into(),
+                "review feedback".into(),
+                "review comments".into(),
+                "pr feedback".into(),
+                "code review".into(),
+                "apply suggestions".into(),
+                "incorporate review".into(),
+            ],
+            patterns: vec![],
+            priority: 70,
+            confidence: 0.8,
+        },
+        // ================================================================
+        // Cleanup / housekeeping prose.
+        // ================================================================
+        Rule {
+            id: "kw-cleanup".into(),
+            category: "refactor".into(),
+            subcategory: Some("cleanup".into()),
+            keywords: vec![
+                "clean up".into(),
+                "cleanup".into(),
+                "dead code".into(),
+                "remove unused".into(),
+                "delete unused".into(),
+                "tidy up".into(),
+                "housekeeping".into(),
+            ],
+            patterns: vec![r"(?i)\bremove\s+(unused|dead|stale|obsolete)\b".into()],
+            priority: 60,
+            confidence: 0.8,
+        },
+        // ================================================================
+        // Infrastructure / DevOps / CI keywords.
+        // ================================================================
+        Rule {
+            id: "kw-docker".into(),
+            category: "build".into(),
+            subcategory: Some("docker".into()),
+            keywords: vec![
+                "dockerfile".into(),
+                "docker-compose".into(),
+                "docker compose".into(),
+                "docker image".into(),
+            ],
+            patterns: vec![],
+            priority: 70,
+            confidence: 0.85,
+        },
+        Rule {
+            id: "kw-k8s".into(),
+            category: "build".into(),
+            subcategory: Some("kubernetes".into()),
+            keywords: vec![
+                "kubernetes".into(),
+                "k8s".into(),
+                "helm chart".into(),
+                "kustomize".into(),
+            ],
+            patterns: vec![],
+            priority: 70,
+            confidence: 0.85,
+        },
+        Rule {
+            id: "kw-terraform".into(),
+            category: "build".into(),
+            subcategory: Some("terraform".into()),
+            keywords: vec![
+                "terraform".into(),
+                "tf module".into(),
+                "tflint".into(),
+                "ansible playbook".into(),
+            ],
+            patterns: vec![],
+            priority: 70,
+            confidence: 0.85,
+        },
+        Rule {
+            id: "kw-github-actions".into(),
+            category: "ci".into(),
+            subcategory: Some("github-actions".into()),
+            keywords: vec![
+                "github action".into(),
+                "github actions".into(),
+                "github workflow".into(),
+                "gh action".into(),
+                ".github/workflows".into(),
+                "circleci".into(),
+                "gitlab ci".into(),
+                "jenkinsfile".into(),
+                "azure pipeline".into(),
+                "azure pipelines".into(),
+                "travis".into(),
+            ],
+            patterns: vec![],
+            priority: 70,
+            confidence: 0.85,
+        },
+        // ================================================================
+        // Generic verbs — lowest priority so prefix rules win first.
+        // These convert prose commits into reasonable categories.
+        // ================================================================
+        Rule {
+            id: "kw-add-implement".into(),
+            category: "feature".into(),
+            subcategory: None,
+            keywords: vec![
+                "implement".into(),
+                "introduce".into(),
+                "add support".into(),
+                "add feature".into(),
+                "new feature".into(),
+                "initial implementation".into(),
+            ],
+            patterns: vec![r"(?i)^\s*add\s+(new\s+)?(support\s+for|feature|the)\b".into()],
+            priority: 45,
+            confidence: 0.7,
+        },
+        Rule {
+            id: "kw-fix-resolve".into(),
+            category: "bugfix".into(),
+            subcategory: None,
+            keywords: vec![
+                "fix bug".into(),
+                "fix issue".into(),
+                "fix crash".into(),
+                "fix regression".into(),
+                "fix race".into(),
+                "fix deadlock".into(),
+                "fix leak".into(),
+                "fix segfault".into(),
+                "fix panic".into(),
+                "fix error".into(),
+                "resolve issue".into(),
+                "resolve bug".into(),
+                "resolve race".into(),
+                "resolve deadlock".into(),
+                "fixes #".into(),
+                "fixes:".into(),
+                "closes #".into(),
+                "patch bug".into(),
+                "correct behavior".into(),
+                "correct handling".into(),
+            ],
+            patterns: vec![r"(?i)\b(fix(es|ed)?|resolves?|closes?)\s+#\d+".into()],
+            priority: 60,
+            confidence: 0.85,
+        },
+        Rule {
+            id: "kw-bug".into(),
+            category: "bugfix".into(),
+            subcategory: None,
+            keywords: vec!["defect".into(), "regression".into()],
+            patterns: vec![r"(?i)\b(bug|bugs)\b".into()],
+            priority: 40,
+            confidence: 0.7,
+        },
+        Rule {
+            id: "kw-security".into(),
+            category: "security".into(),
+            subcategory: None,
+            keywords: vec![
+                "security patch".into(),
+                "security fix".into(),
+                "vulnerability".into(),
+                "cve-".into(),
+                "xss".into(),
+                "csrf".into(),
+                "sql injection".into(),
+                "rce".into(),
+                "ssrf".into(),
+            ],
+            patterns: vec![r"(?i)\bCVE-\d{4}-\d+".into()],
+            priority: 80,
+            confidence: 0.9,
+        },
+        Rule {
+            id: "kw-performance".into(),
+            category: "performance".into(),
+            subcategory: None,
+            keywords: vec![
+                "speed up".into(),
+                "speedup".into(),
+                "optimize".into(),
+                "optimization".into(),
+                "improve performance".into(),
+                "reduce latency".into(),
+                "reduce memory".into(),
+                "memory leak".into(),
+            ],
+            patterns: vec![],
+            priority: 55,
+            confidence: 0.8,
+        },
+        Rule {
+            id: "kw-docs".into(),
+            category: "documentation".into(),
+            subcategory: None,
+            keywords: vec![
+                "readme".into(),
+                "changelog".into(),
+                "update docs".into(),
+                "documentation".into(),
+                "javadoc".into(),
+                "rustdoc".into(),
+                "docstring".into(),
+                "doc comment".into(),
+            ],
+            patterns: vec![r"(?i)\bupdate\s+(the\s+)?(readme|changelog|docs)\b".into()],
+            priority: 50,
+            confidence: 0.8,
+        },
+        Rule {
+            id: "kw-test-add".into(),
+            category: "test".into(),
+            subcategory: None,
+            keywords: vec![
+                "add test".into(),
+                "add tests".into(),
+                "unit test".into(),
+                "unit tests".into(),
+                "integration test".into(),
+                "e2e test".into(),
+                "snapshot test".into(),
+                "test coverage".into(),
+                "test suite".into(),
+                "fix test".into(),
+                "fix tests".into(),
+                "fix flaky".into(),
+                "flaky test".into(),
+            ],
+            patterns: vec![],
+            priority: 55,
+            confidence: 0.85,
+        },
+        Rule {
+            id: "kw-config".into(),
+            category: "chore".into(),
+            subcategory: Some("config".into()),
+            keywords: vec![
+                "update config".into(),
+                "config change".into(),
+                "configuration".into(),
+                ".gitignore".into(),
+                ".editorconfig".into(),
+                "tsconfig".into(),
+                "pyproject".into(),
+                "package.json".into(),
+                "cargo.toml".into(),
+            ],
+            patterns: vec![],
+            priority: 50,
+            confidence: 0.75,
+        },
+        Rule {
+            id: "kw-database".into(),
+            category: "feature".into(),
+            subcategory: Some("database".into()),
+            keywords: vec![
+                "db migration".into(),
+                "database migration".into(),
+                "schema migration".into(),
+                "add migration".into(),
+                "new migration".into(),
+                "alter table".into(),
+            ],
+            patterns: vec![],
+            priority: 60,
+            confidence: 0.8,
+        },
+        Rule {
+            id: "kw-wip".into(),
+            category: "wip".into(),
+            subcategory: None,
+            keywords: vec![
+                "work in progress".into(),
+                "todo:".into(),
+                "fixme:".into(),
+                "checkpoint".into(),
+            ],
+            patterns: vec![r"(?i)^\s*wip\b".into(), r"(?i)^\s*\[wip\]".into()],
+            priority: 40,
+            confidence: 0.65,
+        },
+        // ================================================================
+        // Ticket / issue identifiers (regex tier).
+        // ================================================================
         Rule {
             id: "jira-ticket".into(),
             category: "feature".into(),
             subcategory: Some("ticketed".into()),
             keywords: vec![],
             patterns: vec![r"\b[A-Z][A-Z0-9]+-\d+\b".into()],
-            priority: 50,
-            confidence: 0.75,
-        },
-        // -- Lower-priority keyword fallbacks --
-        Rule {
-            id: "kw-bug".into(),
-            category: "bugfix".into(),
-            subcategory: None,
-            keywords: vec!["bug".into(), "defect".into()],
-            patterns: vec![],
-            priority: 40,
+            priority: 30,
             confidence: 0.7,
         },
         Rule {
-            id: "kw-security".into(),
-            category: "bugfix".into(),
-            subcategory: Some("security".into()),
-            keywords: vec!["security".into(), "cve-".into(), "vulnerability".into()],
-            patterns: vec![],
-            priority: 60,
-            confidence: 0.85,
+            id: "github-issue-ref".into(),
+            category: "feature".into(),
+            subcategory: Some("issue".into()),
+            keywords: vec![],
+            patterns: vec![r"(?i)(^|\s)(refs?|references|see|for)\s+#\d+\b".into()],
+            priority: 25,
+            confidence: 0.6,
         },
     ];
 
