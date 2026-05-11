@@ -6,19 +6,32 @@ Analyze git repositories to measure developer productivity — classify commit w
 
 `tga` walks one or more local git repositories, collects every commit into a SQLite database, classifies each commit into a work category (feature, bugfix, refactor, etc.) using a four-tier rule cascade, then aggregates the results into per-author and per-week reports. It is a Rust port of [gitflow-analytics](https://github.com/bobmatnyc/gitflow-analytics) with the same YAML config schema and the same SQLite schema — existing config files work without modification.
 
-## Quick Start
+## Installation
 
-### Installation
+### From crates.io (recommended)
 
 ```bash
-# From crates.io (once published)
-cargo install tga
-
-# From source
-git clone https://github.com/bobmatnyc/trusty-git-analytics
-cargo build --release
-# Binary: ./target/release/tga
+cargo install trusty-git-analytics
 ```
+
+This installs the `tga` binary to `~/.cargo/bin/`. Ensure `~/.cargo/bin` is in your `PATH`.
+
+### From source
+
+```bash
+git clone https://github.com/bobmatnyc/trusty-git-analytics
+cd trusty-git-analytics
+cargo install --path .
+```
+
+### Verify installation
+
+```bash
+tga --version
+tga --help
+```
+
+## Quick Start
 
 ### Run Your First Analysis
 
