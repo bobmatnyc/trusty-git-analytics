@@ -496,63 +496,307 @@ mod tests {
 
     // ---------- Coverage smoke test: a representative corpus ----------
 
-    /// Smoke test: confirm < 15% of a representative corpus ends up
-    /// uncategorized. Each entry is a real-world commit-message shape.
+    /// Smoke test: confirm that with the expanded ruleset + catch-all,
+    /// **zero** messages from a 200+ real-world corpus fall through as
+    /// `"uncategorized"`. The catch-all routes residual prose to
+    /// `category="maintenance"` with `subcategory="uncategorized"` (so
+    /// reports can still flag low-confidence verdicts) — but the top-level
+    /// `category` should never be the literal string `"uncategorized"`.
     #[test]
-    fn corpus_uncategorized_below_15_percent() {
+    fn corpus_uncategorized_below_1_percent() {
         let corpus: &[(&str, bool)] = &[
+            // --- Conventional-commit prefixes ---
             ("feat: add login flow", false),
             ("feat(api)!: drop deprecated /v1 routes", false),
+            ("feat(ui): user avatars on profile page", false),
             ("fix: null deref in user lookup", false),
             ("fix(ui): modal close button", false),
+            ("fix(api): handle 404 gracefully", false),
             ("chore: tidy imports", false),
             ("chore(deps): bump axios", false),
             ("docs: clarify install steps", false),
             ("docs(readme): typo", false),
             ("test: add cases for parser", false),
+            ("test(auth): cover token refresh", false),
             ("ci: enable rust beta", false),
+            ("ci(release): publish step", false),
             ("perf: cache hot path", false),
+            ("perf(db): index hot table", false),
             ("style: rustfmt run", false),
+            ("style(lint): tabs to spaces", false),
             ("build: upgrade webpack", false),
+            ("build(deps): upgrade vite", false),
             ("refactor: extract auth helper", false),
+            ("refactor(core): split module", false),
             ("revert: revert bad commit", false),
             ("Revert \"feat: add buggy thing\"", false),
+            ("revert!: undo breaking change", false),
+            ("security: patch CVE-2024-1234", false),
+            ("i18n: add Spanish translations", false),
+            ("l10n: French strings update", false),
+            ("release: v1.2.0", false),
+            ("wip: still thinking", false),
+            ("deps: bump tokio to 1.40", false),
+            // --- Merge / revert plumbing ---
             ("Merge pull request #42 from foo/bar", true),
+            ("Merge pull request #99 from contrib/feature", true),
             ("Merge branch 'main' into dev", true),
+            ("Merge branch 'feature/x' of github.com:org/repo", true),
+            ("Merge tag 'v1.0.0'", true),
+            ("Merge remote-tracking branch 'origin/main'", true),
+            ("This reverts commit abcd1234.", false),
+            ("Revert \"chore: deprecated\"", false),
+            // --- Initial / bootstrap ---
             ("Initial commit", false),
             ("First commit", false),
+            ("Initial import of legacy codebase", false),
+            ("Bootstrap repo with starter template", false),
+            // --- Version / release ---
             ("Bump version to 1.2.3", false),
             ("Release v2.0", false),
+            ("Release v3.4.0", false),
+            ("Prepare release 2.0", false),
+            ("Cut release 4.5.0", false),
+            ("v1.2.3", false),
+            ("1.2.3", false),
+            ("bump to 2.0.0", false),
+            // --- Dependency updates ---
             ("Update dependencies", false),
+            ("Update dependencies for security", false),
             ("Bump tokio from 1.30 to 1.40", false),
+            ("Bump axios from 0.21.0 to 1.0.0", false),
             ("Dependabot weekly update", false),
+            ("Dependabot bumps lodash", false),
+            ("Renovate: update dependencies", false),
+            ("Snyk: upgrade vulnerable package", false),
+            ("Pin dependencies to known-good versions", false),
+            ("Update yarn.lock after install", false),
+            ("Update package-lock.json", false),
+            ("Update Cargo.lock", false),
+            ("Update poetry.lock", false),
+            // --- Lint / format ---
             ("Fix lint warnings", false),
-            ("Run prettier", false),
+            ("Run prettier on src/", false),
+            ("Reformat with rustfmt", false),
+            ("Apply clippy fix", false),
+            ("Fix linting errors", false),
+            ("Trailing whitespace removal", false),
+            ("Fix indentation in module", false),
+            ("eslint fix run", false),
+            ("gofmt the whole tree", false),
+            ("black format pass", false),
+            // --- Code review / PR hygiene ---
             ("Address review comments", false),
             ("Code review feedback", false),
+            ("Apply suggestions from code review", false),
+            ("Incorporate review feedback", false),
+            ("Address PR feedback", false),
+            ("Reviewer feedback applied", false),
+            ("Per review: rename variable", false),
+            ("nit: typo in comment", false),
+            ("Remove debug logging", false),
+            ("Remove console.log statements", false),
+            ("Remove print statements", false),
+            ("Remove TODO comment", false),
+            // --- Cleanup ---
             ("Clean up dead code", false),
+            ("Cleanup", false),
             ("Remove unused imports", false),
+            ("Remove unused variables", false),
+            ("Delete dead code paths", false),
+            ("Tidy up the worker module", false),
+            ("Housekeeping in core/", false),
+            // --- Infra (Docker/k8s/terraform/CI) ---
             ("Update Dockerfile", false),
-            ("Add Helm chart", false),
+            ("Update Dockerfile base image", false),
+            ("Tweak docker-compose for dev", false),
+            ("Add Helm chart for staging", false),
+            ("Update kubernetes manifests", false),
+            ("Switch k8s to nginx ingress", false),
+            ("Refactor Terraform modules", false),
+            ("Add ansible playbook for deploy", false),
             ("Update github workflow", false),
+            ("Update github action versions", false),
+            ("Tweak circleci config", false),
+            ("Update gitlab ci pipeline", false),
+            ("Add jenkinsfile for builds", false),
+            // --- Cloud platforms ---
+            ("Add aws lambda for image resize", false),
+            ("Update cloudformation stack", false),
+            ("Tweak cloudfront caching", false),
+            ("Adjust cloudwatch alarms", false),
+            ("Provision s3 bucket for backups", false),
+            ("Update iam role for runner", false),
+            ("Add dynamodb table for sessions", false),
+            ("Deploy to google cloud run", false),
+            ("Migrate to gke cluster", false),
+            ("Configure bigquery dataset", false),
+            ("Add azure functions for webhook", false),
+            ("Configure aks cluster", false),
+            ("Provision blob storage container", false),
+            // --- Monitoring / observability ---
+            ("Add datadog dashboard", false),
+            ("Wire up prometheus metrics", false),
+            ("Add grafana dashboard for latency", false),
+            ("Configure sentry alerts", false),
+            ("Tweak pagerduty escalation", false),
+            ("Add opentelemetry tracing", false),
+            ("Add tracing spans to handler", false),
+            ("Tune alert rule thresholds", false),
+            ("Kibana dashboard for logs", false),
+            // --- Databases ---
+            ("Switch to postgresql for prod", false),
+            ("Update mysql driver", false),
+            ("Add redis cache for sessions", false),
+            ("Migrate to mongodb cluster", false),
+            ("Reindex elasticsearch nodes", false),
+            ("Apply database schema change", false),
+            ("Add index migration for users", false),
+            // --- Messaging ---
+            ("Wire up kafka consumer", false),
+            ("Switch from rabbitmq to nats", false),
+            ("Add sqs queue for webhooks", false),
+            ("Publish events to pub/sub topic", false),
+            ("Drop AMQP fallback path", false),
+            ("Add event bus for orders", false),
+            // --- Networking ---
+            ("Tune nginx config", false),
+            ("Add traefik routing rules", false),
+            ("Switch load balancer to ALB", false),
+            ("Renew tls certificate", false),
+            ("Add letsencrypt cert manager", false),
+            ("Configure cdn caching", false),
+            ("Add istio sidecar injection", false),
+            // --- Language tooling ---
+            ("Update Cargo.toml deps", false),
+            ("Run cargo clippy", false),
+            ("Tidy npm scripts", false),
+            ("Migrate to pnpm", false),
+            ("Update pyproject metadata", false),
+            ("Switch to poetry from pip", false),
+            ("Update tsconfig strict flags", false),
+            ("Migrate gradle to maven", false),
+            ("Update go.mod requirements", false),
+            ("Add golangci-lint config", false),
+            // --- Bug / fix prose ---
             ("Fix crash on empty input", false),
             ("Resolves #123", false),
             ("Closes #456 properly", false),
-            ("Patch XSS vulnerability", false),
-            ("Reduce memory usage", false),
-            ("Update README", false),
-            ("Add unit tests for parser", false),
+            ("Fix race condition in worker", false),
+            ("Fix deadlock in scheduler", false),
+            ("Fix memory leak in worker", false),
+            ("Fix segfault on shutdown", false),
             ("Fix flaky test", false),
+            ("Correct error handling", false),
+            ("Handle null response from API", false),
+            ("Prevent double submission", false),
+            // --- Security prose ---
+            ("Patch XSS vulnerability", false),
+            ("Fix SQL injection in search", false),
+            ("Address CVE-2023-0001", false),
+            ("Mitigate CSRF on form submit", false),
+            ("Defend against SSRF in webhook", false),
+            // --- Performance prose ---
+            ("Speed up query parser", false),
+            ("Optimize hot path", false),
+            ("Improve performance of search", false),
+            ("Reduce memory usage in cache", false),
+            ("Reduce latency in handler", false),
+            // --- Docs prose ---
+            ("Update README", false),
+            ("Update README with install instructions", false),
+            ("Update changelog for 1.0", false),
+            ("Update CONTRIBUTING guidelines", false),
+            ("Add CODE_OF_CONDUCT", false),
+            ("Update LICENSE file", false),
+            ("Add SECURITY.md", false),
+            ("Add docstring to extractor", false),
+            ("Add swagger spec for endpoints", false),
+            ("Generate openapi schema", false),
+            ("Publish postman collection", false),
+            ("Update API documentation", false),
+            // --- Tests ---
+            ("Add unit tests for parser", false),
+            ("Add integration tests for auth", false),
+            ("Add e2e tests for checkout", false),
+            ("Improve test coverage", false),
+            ("Fix flaky integration test", false),
+            // --- WIP / experiments ---
             ("WIP: experimenting", false),
             ("[WIP] refactor", false),
+            ("Spike: try alternative algorithm", false),
+            ("POC: new caching strategy", false),
+            ("Prototype dashboard layout", false),
+            ("Experiment with new parser", false),
+            ("Trying out new ORM", false),
+            // --- Database migrations ---
             ("Add migration for users table", false),
+            // --- Ticket-only / refs ---
             ("PROJ-123 implement payment flow", false),
-            ("security: patch CVE-2024-1234", false),
-            ("i18n: add Spanish translations", false),
-            ("implement new feature for export", false),
-            ("introduce caching layer", false),
-            ("This reverts commit abcd1234.", false),
+            ("ENG-456", false),
+            ("ABC-789 wire up dashboards", false),
+            ("refs #123", false),
+            ("see #456", false),
+            // --- Translations / content ---
+            ("Add Spanish translations", false),
+            ("Update French locale file", false),
+            ("Translate UI strings to German", false),
+            ("Add new landing page copy", false),
+            ("Update blog post draft", false),
+            ("Refresh marketing copy", false),
+            // --- Assets ---
+            ("Update favicon", false),
+            ("Replace logo svg", false),
+            ("Add new icons set", false),
+            // --- Rollback ---
+            ("Rollback to previous deploy", false),
+            ("Roll back risky change", false),
+            ("Back out broken commit", false),
+            ("Undo regression", false),
+            ("Revert to v1.0 behavior", false),
+            // --- Auto-generated plumbing ---
+            ("Squashed commit of feature branch", false),
+            ("Cherry pick from main", false),
+            ("Cherry-pick fix to release branch", false),
+            // --- Generic prose (catch-all candidates) ---
+            ("Add new module", false),
+            ("Create new package", false),
+            ("Modify the worker config", false),
+            ("Adjust default timeout", false),
+            ("Tweak the retry policy", false),
+            ("Replace old helper with new util", false),
+            ("Rename internal field", false),
+            ("Move types to shared crate", false),
+            ("Improve error message", false),
+            ("Enhance UX on form", false),
+            ("Drop legacy compatibility shim", false),
+            ("Strip stale flags", false),
+            ("Purge old experiments", false),
+            ("Deprecate old endpoint", false),
+            ("Handle edge case", false),
+            ("Prevent regression", false),
+            // --- Single-word / minimal ---
+            ("WIP", false),
+            ("fix", false),
+            ("update", false),
+            ("changes", false),
+            ("cleanup", false),
+            ("misc", false),
+            ("temp", false),
+            ("minor", false),
+            // --- Adversarial: prose that historically went uncategorized ---
+            ("foo bar baz", false),
+            ("the rain in spain", false),
+            ("xyzzy plugh frobnicate", false),
+            ("something something something", false),
+            ("just a small change", false),
         ];
+
+        assert!(
+            corpus.len() >= 200,
+            "corpus must have at least 200 entries to be representative, got {}",
+            corpus.len()
+        );
 
         let results = engine().classify_batch(corpus);
         let total = results.len();
@@ -561,14 +805,23 @@ mod tests {
             .filter(|r| r.category == "uncategorized")
             .count();
         let pct = (uncategorized as f64 / total as f64) * 100.0;
-        assert!(
-            pct < 15.0,
-            "uncategorized {uncategorized}/{total} = {pct:.1}% (>= 15%)"
+
+        // With the catch-all rule we expect *zero* uncategorized verdicts.
+        // Anything else means a corpus entry slipped through every rule
+        // *and* the catch-all regex — which would be a real bug.
+        assert_eq!(
+            uncategorized, 0,
+            "expected 0 uncategorized, got {uncategorized}/{total} ({pct:.2}%)"
         );
     }
 
     #[tokio::test]
-    async fn engine_classify_full_cascade_returns_uncategorized_when_no_match() {
+    async fn engine_classify_full_cascade_catches_residual_via_catch_all() {
+        // With the catch-all rule installed, even adversarial nonsense
+        // messages get a deterministic verdict (category="maintenance",
+        // subcategory="uncategorized") at low confidence (0.3). Downstream
+        // reports can filter on the subcategory or confidence to flag
+        // commits for LLM review.
         let engine = ClassificationEngine::new(
             rules::default_rules(),
             ClassificationEngineConfig {
@@ -580,7 +833,13 @@ mod tests {
         let r = engine
             .classify("xyzzy plugh frobnicate quux nonsense", false)
             .await;
-        assert_eq!(r.category, "uncategorized");
+        assert_eq!(r.category, "maintenance");
+        assert_eq!(r.subcategory.as_deref(), Some("uncategorized"));
+        assert!(
+            r.confidence <= 0.5,
+            "catch-all verdicts must have low confidence, got {}",
+            r.confidence
+        );
     }
 
     #[tokio::test]

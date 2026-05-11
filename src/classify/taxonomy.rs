@@ -214,6 +214,26 @@ impl TaxonomyRegistry {
             SubcategoryDef::new("merge", Maintenance),
             // `chore` is conventional-commit "miscellaneous" → Maintenance.
             SubcategoryDef::new("chore", Maintenance),
+            // Platform-work extensions (cloud / monitoring / db / messaging / networking).
+            SubcategoryDef::new("cloud", PlatformWork),
+            SubcategoryDef::new("monitoring", PlatformWork),
+            SubcategoryDef::new("observability", PlatformWork),
+            SubcategoryDef::new("database", PlatformWork),
+            SubcategoryDef::new("messaging", PlatformWork),
+            SubcategoryDef::new("networking", PlatformWork),
+            SubcategoryDef::new("storage", PlatformWork),
+            // Feature extensions (experiments / spikes / prototypes).
+            SubcategoryDef::new("experiment", Feature),
+            SubcategoryDef::new("spike", Feature),
+            SubcategoryDef::new("prototype", Feature),
+            // Maintenance extensions.
+            SubcategoryDef::new("rollback", Maintenance),
+            SubcategoryDef::new("config", Maintenance),
+            SubcategoryDef::new("tooling", Maintenance),
+            // Content extensions.
+            SubcategoryDef::new("content-docs", Content),
+            SubcategoryDef::new("translation", Content),
+            SubcategoryDef::new("assets", Content),
             // Work-in-progress and uncategorized roll up to Unknown.
             SubcategoryDef::new("wip", Unknown),
             SubcategoryDef::new("uncategorized", Unknown),
