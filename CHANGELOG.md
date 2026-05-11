@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-05-11]
+
+### Added
+
+#### `src/collect/pm_adapter.rs` — unified PM adapter layer
+- `PmAdapter` async trait (`fetch_ticket`, `fetch_tickets`, `detect_ticket_refs`, `health_check`) with `Send + Sync` bounds for use behind `Box<dyn PmAdapter>`
+- `PmTicket` normalized ticket payload preserving the raw upstream JSON in `PmTicket::raw` for forward compatibility
+- `PmSource` enum (`Jira`, `GitHub`, `Linear`, `AzureDevOps`) with stable `as_str()` labels
+- `PmError` thiserror enum covering `Http`, `Auth`, `NotFound`, `RateLimited`, `Serialization`, `Config`, `Other` variants
+- Concrete adapter wrappers: `JiraAdapter`, `GitHubAdapter`, `LinearAdapter`, `AzureDevOpsAdapter` — each delegates to the existing backend client
+- `build_adapters(config)` factory: instantiates every adapter whose config section is present; skips missing or invalid sections with `tracing::warn!` rather than failing the whole pipeline
+- Shared detection regexes: JIRA/Linear `KEY-N`, GitHub `#N` (non-hex), ADO `AB#N`
+
+#### `src/collect/azdo/client.rs` — Azure DevOps Phases 3–6
+- `get_work_item_types(project)` — fetch all work item types defined in a project (Phase 3)
+- `get_fields(project)` — fetch all field definitions for a project (Phase 3)
+- `run_wiql(project, query)` — execute an arbitrary WIQL query, returning `WiqlResult` with work item IDs and refs (Phase 4)
+- `get_recent_work_item_ids(project, since)` — convenience WIQL wrapper for recently-updated items (Phase 4)
+- `get_work_items(ids)` — batch-fetch work items by ID; chunks requests at 200 IDs per call per ADO API limits (Phase 5)
+- `extract_work_item_refs(text)` — standalone function extracting bare `AB#N` integers from commit messages (Phase 6)
+- `fetch_referenced_work_items(client, text)` — convenience wrapper: detects refs in text, fetches the work items, returns `Vec<AzdoWorkItem>` (Phase 6)
+- `AzureDevOpsAdapter::fetch_ticket` is now fully implemented (strips `AB#` prefix, calls `get_work_items`, maps to `PmTicket`)
+
+#### `--weeks N` flag (`src/main.rs`, `src/commands/collect.rs`, `src/commands/analyze.rs`)
+- `--weeks <N>` added to both `tga collect` and `tga analyze` subcommands
+- Computes `now − N weeks` as an RFC3339 lower bound and applies it to every configured repository's `since_date`, overriding any `start_date` in config
+- `--since` (explicit ISO date) takes precedence over `--weeks` when both are supplied on `collect`
+
 ### Added
 
 #### tga-core

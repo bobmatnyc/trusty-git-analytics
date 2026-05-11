@@ -123,6 +123,107 @@ metrics fresh without re-fetching closed PRs.
 
 ---
 
+## PM Adapter Layer (`src/collect/pm_adapter.rs`)
+
+All PM system clients are abstracted behind the `PmAdapter` trait, allowing the collect/classify pipeline to enrich commits with ticket metadata without coupling to a specific backend.
+
+### `PmAdapter` Trait
+
+```rust
+#[async_trait]
+pub trait PmAdapter: Send + Sync {
+    fn name(&self) -> &str;
+    fn source(&self) -> PmSource;
+    async fn fetch_ticket(&self, ticket_id: &str) -> Result<Option<PmTicket>, PmError>;
+    async fn fetch_tickets(&self, ids: &[&str]) -> Vec<Result<Option<PmTicket>, PmError>>;
+    fn detect_ticket_refs(&self, text: &str) -> Vec<String>;
+    async fn health_check(&self) -> Result<(), PmError>;
+}
+```
+
+- `fetch_ticket` returns `Ok(None)` for "not found" (authoritative), `Err(_)` for transport/auth failures.
+- `fetch_tickets` has a default sequential implementation; adapters with native batch endpoints (JIRA `/search`, ADO `/workitemsbatch`) should override.
+- `detect_ticket_refs` scopes detection to the adapter's own reference format.
+
+### `PmTicket` — Normalized Payload
+
+All adapters return `PmTicket` regardless of backend:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | `String` | Canonical ID as reported by the system (`"PROJ-123"`, `"#42"`, `"AB#7"`) |
+| `title` | `String` | Short summary / title |
+| `status` | `String` | Workflow state (`"Done"`, `"In Progress"`, `"closed"`) |
+| `ticket_type` | `String` | Issue type (`"story"`, `"bug"`, `"task"`, `"epic"`); `""` if unavailable |
+| `labels` | `Vec<String>` | Tags / labels; empty if unavailable |
+| `url` | `Option<String>` | Web URL if known |
+| `source` | `PmSource` | `Jira` / `GitHub` / `Linear` / `AzureDevOps` |
+| `raw` | `serde_json::Value` | Verbatim upstream JSON for forward compatibility |
+
+### `PmSource` Enum
+
+| Variant | `as_str()` |
+|---------|-----------|
+| `Jira` | `"jira"` |
+| `GitHub` | `"github"` |
+| `Linear` | `"linear"` |
+| `AzureDevOps` | `"azure_devops"` |
+
+### `build_adapters(config)` Factory
+
+Instantiates all adapters whose config section is present. Adapters with missing or invalid config are skipped with `tracing::warn!` so a single misconfigured integration does not abort the pipeline. Returns `Vec<Box<dyn PmAdapter>>`.
+
+### Adding a New PM System
+
+1. Implement the backend client in `src/collect/<system>/`.
+2. Add a wrapper struct (e.g. `MySystemAdapter`) implementing `PmAdapter`.
+3. Add a `PmSource` variant and `as_str()` arm.
+4. Add detection regex in the private `detect_ticket_refs` implementation.
+5. Add a config section to `AzureDevOpsConfig` or a new config struct, and wire it into `build_adapters`.
+
+---
+
+## Azure DevOps Work Item Collection (`src/collect/azdo/client.rs`)
+
+### Authentication
+
+PAT (Personal Access Token) passed as the password in HTTP Basic Auth with an empty username. The `health_check` uses `GET _apis/connectionData` to verify connectivity and credentials before any heavy fetches.
+
+### Work Item Types and Fields
+
+- `get_work_item_types(project)` — returns all work item types defined in the project (Bug, Task, User Story, Epic, etc.).
+- `get_fields(project)` — returns all field definitions; used to discover custom field refs at runtime.
+
+### WIQL Queries
+
+`run_wiql(project, query)` posts a WIQL query to `POST _apis/wit/wiql?api-version=7.0` and returns a `WiqlResult` containing work item IDs and references. WIQL is ADO's SQL-like query language for work items.
+
+`get_recent_work_item_ids(project, since)` is a convenience wrapper that issues:
+
+```sql
+SELECT [System.Id] FROM WorkItems
+WHERE [System.TeamProject] = '{project}' AND [System.ChangedDate] >= '{since}'
+ORDER BY [System.ChangedDate] DESC
+```
+
+### Batch Work Item Fetch
+
+`get_work_items(ids: &[u32])` fetches full work item records:
+
+- Chunks the ID slice at **200 IDs per request** (ADO API limit).
+- `POST _apis/wit/workitemsbatch?api-version=7.0` with `{"ids": [...], "fields": [standard field list]}`.
+- Maps each response item to `AzdoWorkItem` with `id`, `title`, `state`, `work_item_type`, `tags`, `team_project`, and `url`.
+
+### AB# Reference Detection and Enrichment
+
+`extract_work_item_refs(text: &str) -> Vec<u32>` extracts bare ADO work item IDs from commit messages using the `AB#\d+` pattern.
+
+`fetch_referenced_work_items(client, text)` is an async convenience function that calls `extract_work_item_refs` then `get_work_items` and returns `Vec<AzdoWorkItem>`.
+
+`AzureDevOpsAdapter::fetch_ticket` in the PM adapter layer accepts either `"AB#123"` or `"123"` as input, strips the prefix, and delegates to `get_work_items`.
+
+---
+
 ## Developer Identity Resolution
 
 ### Resolution Order

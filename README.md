@@ -86,6 +86,10 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `jira.username` | string | — | JIRA API username (email for Cloud) |
 | `jira.token` | string | — | JIRA API token |
 | `jira.project_key` | string | — | Project key filter (e.g. `API`) |
+| `pm.azure_devops.organization_url` | string | — | ADO org URL (e.g. `https://dev.azure.com/myorg`) |
+| `pm.azure_devops.pat` | string | — | Azure DevOps Personal Access Token |
+| `pm.azure_devops.project` | string | — | Default ADO project name |
+| `pm.azure_devops.fetch_on_reference` | bool | `false` | Fetch work items when `AB#N` refs appear in commits |
 | `cache.directory` | path | — | Cache directory (supports `~`) |
 | `version` | string | — | Schema version; stored for compatibility |
 | `profile` | string | — | Named profile; stored for compatibility |
@@ -141,7 +145,7 @@ Run the full pipeline: collect → classify → report.
 
 ```bash
 tga analyze [--config <PATH>] [--database <PATH>] [--output <DIR>]
-            [--skip-collect] [--skip-classify]
+            [--skip-collect] [--skip-classify] [--weeks <N>]
 ```
 
 | Flag | Description |
@@ -149,6 +153,7 @@ tga analyze [--config <PATH>] [--database <PATH>] [--output <DIR>]
 | `--skip-collect` | Skip Stage 1; use commits already in the database |
 | `--skip-classify` | Skip Stage 2; use existing classifications |
 | `--output <DIR>` | Override `output.directory` from config |
+| `--weeks <N>` | Limit collection to the last N weeks (overrides config `start_date`) |
 
 ```bash
 # Full pipeline
@@ -164,17 +169,19 @@ Stage 1: extract commits from git repositories into the database.
 
 ```bash
 tga collect [--config <PATH>] [--database <PATH>]
-            [--repos <NAME,...>] [--since <DATE>] [--until <DATE>]
+            [--repos <NAME,...>] [--since <DATE>] [--until <DATE>] [--weeks <N>]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--repos <NAME,...>` | Comma-separated list of repository names to collect; others are skipped |
-| `--since <DATE>` | Collect commits on or after this ISO 8601 date (overrides config) |
+| `--since <DATE>` | Collect commits on or after this ISO 8601 date (overrides config and `--weeks`) |
 | `--until <DATE>` | Collect commits on or before this ISO 8601 date (overrides config) |
+| `--weeks <N>` | Limit collection to the last N weeks; `--since` takes precedence if both supplied |
 
 ```bash
 tga collect --repos my-project --since 2024-01-01 --until 2024-03-31
+tga collect --weeks 4   # collect last 4 weeks across all repos
 ```
 
 ### tga classify
@@ -219,8 +226,9 @@ tga report --output ./q1-reports --formats csv,json
 git repos ──┐
              │  tga-collect   SQLite (tga.db)  tga-classify   SQLite   tga-report
 GitHub API ──┼─────────────► [commits]        ──────────────► [classif]─────────► CSV
-JIRA API ───┘  (libgit2,      [authors]          (rules +              ► JSON
-                reqwest)      [pull_requests]     LLM fallback)        ► Markdown
+JIRA API ────┤  (libgit2,     [authors]          (rules +              ► JSON
+Linear API ──┤  reqwest)      [pull_requests]    LLM fallback)        ► Markdown
+ADO API  ───┘
 ```
 
 **Stage 1 — collect** (`tga-collect`): opens each repository with libgit2, walks the configured branch, extracts commit metadata and diff stats, resolves author identities, optionally fetches GitHub PR metadata via the REST API, and writes everything to SQLite.
@@ -419,13 +427,15 @@ The GitHub Actions workflow (`ci.yml`) requires:
 
 ## Crate Structure
 
-| Crate | Purpose | crates.io |
-|-------|---------|-----------|
-| `tga-core` | Shared types, config, DB schema, migrations, error types | `tga-core` |
-| `tga-collect` | Stage 1: git extraction (libgit2), GitHub/JIRA clients | `tga-collect` |
-| `tga-classify` | Stage 2: four-tier classification cascade | `tga-classify` |
-| `tga-report` | Stage 3: CSV/JSON/Markdown output | `tga-report` |
-| `tga-cli` | Binary entry point (`tga`), clap CLI | `tga-cli` |
+Single `tga` crate (consolidated from the original 5-crate workspace):
+
+| Module | Path | Purpose |
+|--------|------|---------|
+| `tga::core` | `src/core/` | Shared types, config, DB schema, migrations, error types |
+| `tga::collect` | `src/collect/` | Stage 1: git extraction (libgit2), GitHub/JIRA/Linear/ADO clients, `PmAdapter` trait |
+| `tga::classify` | `src/classify/` | Stage 2: four-tier classification cascade |
+| `tga::report` | `src/report/` | Stage 3: CSV/JSON/Markdown output |
+| `commands` (binary-private) | `src/commands/` | Subcommand handlers wired into `src/main.rs` |
 
 ## License
 
