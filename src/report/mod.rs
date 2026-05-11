@@ -16,10 +16,12 @@ pub mod formatters;
 pub mod models;
 pub mod pipeline;
 pub mod templates;
+pub mod ticketed_stats;
 
 pub use errors::{ReportError, Result};
 pub use models::ReportData;
 pub use pipeline::{ReportPipeline, ReportStats};
+pub use ticketed_stats::{compute_ticketed_stats, TicketedStats};
 
 #[cfg(test)]
 mod tests {

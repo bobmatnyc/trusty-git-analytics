@@ -52,6 +52,13 @@ pub struct Commit {
 
     /// True for merge commits (parents > 1).
     pub is_merge: bool,
+
+    /// True if the commit message references a known ticket system
+    /// (JIRA/Linear-style `PROJ-123`, GitHub `fixes #123`, or bare `#123`).
+    ///
+    /// Computed at extraction time by [`crate::collect::ticket::is_ticketed`]
+    /// and persisted on the `commits` row.
+    pub ticketed: bool,
 }
 
 /// A canonical author / developer identity.

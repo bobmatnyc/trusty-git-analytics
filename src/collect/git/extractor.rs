@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::git::diff::{compute_commit_diff, CommitDiff};
+use crate::collect::ticket::is_ticketed;
 use crate::core::config::{expand_path, RepositoryConfig};
 use crate::core::db::Database;
 
@@ -163,11 +164,13 @@ impl GitCollector {
             let message = commit.message().unwrap_or("").to_string();
             let sha_str = oid.to_string();
 
+            let ticketed = is_ticketed(&message);
+
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO commits \
                  (sha, author_name, author_email, timestamp, message, repository, \
-                  files_changed, insertions, deletions, is_merge) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  files_changed, insertions, deletions, is_merge, ticketed) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     sha_str,
                     author_name,
@@ -179,6 +182,7 @@ impl GitCollector {
                     diff.insertions as i64,
                     diff.deletions as i64,
                     is_merge as i64,
+                    ticketed as i64,
                 ],
             )?;
 

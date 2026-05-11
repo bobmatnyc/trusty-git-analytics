@@ -36,6 +36,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "linear_issues",
         sql: include_str!("sql/0002_linear_issues.sql"),
     },
+    Migration {
+        version: 3,
+        name: "commits_ticketed",
+        sql: include_str!("sql/0003_commits_ticketed.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

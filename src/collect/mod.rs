@@ -10,6 +10,7 @@
 //! - [`github`] — GitHub REST client (PRs)
 //! - [`jira`] — JIRA REST client (issues)
 //! - [`linear`] — Linear GraphQL client (issues)
+//! - [`ticket`] — ticket-reference detection on commit messages
 //! - [`collector`] — end-to-end pipeline orchestrator
 //! - [`errors`] — module-level error type ([`CollectError`])
 
@@ -20,6 +21,7 @@ pub mod github;
 pub mod identity;
 pub mod jira;
 pub mod linear;
+pub mod ticket;
 
 pub use collector::{CollectionPipeline, CollectionStats};
 pub use errors::{CollectError, Result};
