@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Stage 3 (reporting) for trusty-git-analytics: CSV, JSON, and Markdown report generation."
 
 [dependencies]
-tga-core = { path = "../tga-core" }
+tga-core = { path = "../tga-core", version = "0.1" }
 tokio.workspace = true
 rayon.workspace = true
 chrono.workspace = true

@@ -1,38 +1,117 @@
 # Publishing to crates.io
 
-Step-by-step guide for releasing trusty-git-analytics crates.
+> **Publishing is fully automated.** Every push to `main` triggers the
+> continuous-delivery pipeline (`.github/workflows/cd.yml`) which:
+> 1. Runs the full smoke-test suite (fmt + clippy + tests + release build).
+> 2. Bumps the workspace patch version (`X.Y.Z` → `X.Y.Z+1`).
+> 3. Commits the bump as `chore: bump version to X.Y.Z [skip ci]`, tags `vX.Y.Z`, and pushes.
+> 4. Publishes all five crates to crates.io in dependency order:
+>    `tga-core` → (`tga-collect` ‖ `tga-classify` ‖ `tga-report`) → `tga-cli`.
+>
+> You should not need to run any of the manual steps below in normal operation.
+> They are documented for first-time bootstrapping and emergency recovery only.
 
-## Pre-publish Checklist
+## How the CD Pipeline Works
 
-Before creating any release tag:
+The pipeline is defined in `.github/workflows/cd.yml` and consists of three
+sequential job groups:
 
-1. **All tests pass** on the target crate and the workspace:
+### 1. `gate` — Smoke Test Gate
+
+Runs on every push to `main` *except* the bot's own version-bump commits. The
+guard is two-fold:
+
+- The bot's commit message ends with `[skip ci]`, which GitHub Actions honors.
+- The `if:` condition on the job additionally rejects pushes whose actor is
+  `github-actions[bot]`.
+
+Steps:
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace -- -D warnings`
+- `cargo test --workspace -- --skip collect_duetto_frontend` (skips live integration tests)
+- `cargo build --release --bin tga`
+
+### 2. `bump` — Patch-Bump and Tag
+
+Reads the current version from the root `Cargo.toml`, increments the patch
+component, updates the manifest, commits as
+`chore: bump version to X.Y.Z [skip ci]`, creates tag `vX.Y.Z`, and pushes both
+the commit and the tag to `origin/main`.
+
+### 3. `publish-core` → `publish-mid` → `publish-cli`
+
+Each publish job checks out the freshly-created tag and runs
+`cargo publish -p <crate>`. The mid-tier jobs run in parallel via a matrix on
+`{tga-collect, tga-classify, tga-report}`. A 30-second sleep between stages
+gives the crates.io sparse index time to propagate.
+
+## Version Constraints in Path Dependencies
+
+The dependent crates (`tga-collect`, `tga-classify`, `tga-report`, `tga-cli`)
+specify both a path and a version on every internal dependency:
+
+```toml
+tga-core = { path = "../tga-core", version = "0.1" }
+```
+
+The `version = "0.1"` constraint is minor-compatible (`>=0.1.0, <0.2.0`), so
+patch bumps from the CD pipeline never require manifest edits. When the workspace
+crosses a minor boundary (e.g. `0.1.x` → `0.2.0`) these constraints must be
+bumped by hand before the next release.
+
+## Required Repository Secrets
+
+| Secret | Purpose |
+|--------|---------|
+| `CARGO_REGISTRY_TOKEN` | Authenticates `cargo publish` to crates.io. |
+| `GITHUB_TOKEN` | Provided automatically; used to push the bump commit and tag. |
+
+Generate a crates.io token at https://crates.io/settings/tokens with the
+`publish-new` and `publish-update` scopes. Add it under
+**Settings → Secrets and variables → Actions** as `CARGO_REGISTRY_TOKEN`.
+
+## First-Time Bootstrap
+
+The very first publish of each crate must be done manually, because the CD
+pipeline assumes the crate already exists on crates.io. Run from a clean,
+up-to-date `main`:
+
+```bash
+cargo login                          # only once per developer machine
+cargo publish -p tga-core
+sleep 30                             # let the index settle
+cargo publish -p tga-collect
+cargo publish -p tga-classify
+cargo publish -p tga-report
+sleep 30
+cargo publish -p tga-cli
+```
+
+After this bootstrap, every subsequent push to `main` will auto-publish.
+
+## Manual Publish (Emergency Fallback)
+
+If the CD workflow is broken or you need to publish out-of-band, perform the
+steps below by hand. The same dependency order applies.
+
+### Pre-flight Checklist
+
+1. All tests pass on the workspace:
    ```bash
    cargo test --workspace
    ```
-
-2. **Clippy is clean** (zero warnings):
+2. Clippy is clean:
    ```bash
    cargo clippy --workspace --all-targets -- -D warnings
    ```
-
-3. **Formatting is clean**:
+3. Formatting is clean:
    ```bash
    cargo fmt --check
    ```
+4. The version in the root `Cargo.toml` is the version you intend to publish,
+   and there is no existing tag with that number.
 
-4. **Docs build clean**:
-   ```bash
-   RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-   ```
-
-5. **CHANGELOG.md** has an entry for the version under `## [x.y.z]`.
-
-6. **Version number** in the workspace `Cargo.toml` `[workspace.package]` section matches what you intend to publish.
-
-## Publish Order
-
-The crate dependency graph dictates the order. A crate cannot be published until all of its dependencies are already on crates.io with the version it requires.
+### Publish Order
 
 ```
 1. tga-core           (no internal deps)
@@ -44,116 +123,49 @@ The crate dependency graph dictates the order. A crate cannot be published until
 3. tga-cli            (depends on all four)
 ```
 
-## Updating Path Dependencies Before Publishing
-
-The workspace `Cargo.toml` uses `version.workspace = true` for all crates. When publishing a dependent crate (e.g. `tga-cli`), its `Cargo.toml` has path dependencies like:
-
-```toml
-tga-core = { path = "../tga-core" }
-```
-
-Before publishing `tga-cli` you must also specify the version so crates.io can resolve the dependency for downstream users who do not have the path available:
-
-```toml
-tga-core = { path = "../tga-core", version = "0.1.0" }
-```
-
-The publish workflow handles this for `tga-core` automatically. For the other crates, make sure `tga-core`'s crates.io version matches the `version` field in the path dependency before pushing the publish tag.
-
-## Tag Naming Convention
-
-Each crate has its own tag, matching the pattern `<crate-name>-v<semver>`:
-
-| Crate | Example tag |
-|-------|-------------|
-| `tga-core` | `tga-core-v0.1.0` |
-| `tga-collect` | `tga-collect-v0.1.0` |
-| `tga-classify` | `tga-classify-v0.1.0` |
-| `tga-report` | `tga-report-v0.1.0` |
-| `tga-cli` | `tga-cli-v0.1.0` |
-
-Create a tag locally and push it to trigger the publish workflow:
+### Commands
 
 ```bash
-git tag tga-core-v0.1.0
-git push origin tga-core-v0.1.0
-```
+# Bump the workspace version manually
+# Edit Cargo.toml: [workspace.package] version = "X.Y.Z"
+git commit -am "chore: bump version to X.Y.Z"
+git tag "vX.Y.Z"
+git push origin main --follow-tags
 
-## GitHub Actions: Which Workflow Triggers on Which Tag
-
-Currently only `tga-core` has an automated publish workflow (`publish-tga-core.yml`). It triggers on `tga-core-v*` tag pushes.
-
-The other four crates (`tga-collect`, `tga-classify`, `tga-report`, `tga-cli`) do not yet have publish workflows and must be published manually (see below). Add a `publish-<crate>.yml` for each following the same pattern as `publish-tga-core.yml`.
-
-### publish-tga-core.yml pipeline
-
-1. **Dry-run gate**: `cargo publish --dry-run -p tga-core` — catches missing metadata, license issues, file size limits.
-2. **Clippy gate**: `cargo clippy -p tga-core -- -D warnings` — ensures the published crate compiles cleanly.
-3. **Publish**: `cargo publish -p tga-core --no-verify` — `--no-verify` skips the local build (already done in step 1); `CARGO_REGISTRY_TOKEN` is read from the `CARGO_REGISTRY_TOKEN` repository secret.
-
-### Manual dry-run
-
-To test a publish without uploading, use `workflow_dispatch` with `dry_run: true`, or run locally:
-
-```bash
+# Publish in order
 cargo publish --dry-run -p tga-core
+cargo publish           -p tga-core
+sleep 30                                       # allow index propagation
+
+cargo publish --dry-run -p tga-collect && cargo publish -p tga-collect
+cargo publish --dry-run -p tga-classify && cargo publish -p tga-classify
+cargo publish --dry-run -p tga-report && cargo publish -p tga-report
+sleep 30
+
+cargo publish --dry-run -p tga-cli && cargo publish -p tga-cli
 ```
-
-## Manual Publish Steps (for crates without a workflow)
-
-```bash
-# Ensure you are on main and everything is clean
-git checkout main
-git pull
-
-# Verify the dry run passes
-cargo publish --dry-run -p tga-collect
-
-# Publish
-cargo publish -p tga-collect
-
-# Repeat for tga-classify and tga-report (can be done in either order,
-# both only depend on tga-core which is already published)
-
-cargo publish --dry-run -p tga-classify
-cargo publish -p tga-classify
-
-cargo publish --dry-run -p tga-report
-cargo publish -p tga-report
-
-# After all three are on crates.io, publish tga-cli
-cargo publish --dry-run -p tga-cli
-cargo publish -p tga-cli
-```
-
-## Required Repository Secrets
-
-| Secret | Used by |
-|--------|---------|
-| `CARGO_REGISTRY_TOKEN` | `publish-tga-core.yml`; required for all publish workflows |
-
-Generate a token at https://crates.io/settings/tokens with the "publish-new" and "publish-update" scopes. Add it in GitHub under Settings → Secrets and variables → Actions.
 
 ## Verifying a Successful Publish
-
-After the workflow completes (or `cargo publish` returns without error):
 
 ```bash
 # Search crates.io index (may take a minute to propagate)
 cargo search tga-core
 
-# Or check directly
+# Or open the page directly
 open https://crates.io/crates/tga-core
 ```
 
-Verify the version number and README content on the crates.io page match expectations.
+Verify the version number and README content on the crates.io page match
+expectations.
 
-## Version Bumping Workflow
+## Loop Prevention
 
-1. Update `[workspace.package] version` in the root `Cargo.toml` to the new version.
-2. Update `CHANGELOG.md`: move `[Unreleased]` content to `[x.y.z] - YYYY-MM-DD`.
-3. Commit: `git commit -m "chore: bump version to x.y.z"`.
-4. Push the commit.
-5. Tag and push in publish order (core first, then parallel crates, then cli).
+The CD workflow could in principle trigger itself when it pushes the bump
+commit. Two independent guards prevent this:
 
-Because all crates share `version.workspace = true`, a single version bump in the workspace manifest applies to all five crates simultaneously.
+1. **Commit-message marker**: the bump commit ends with `[skip ci]`, which
+   GitHub Actions treats as a signal to skip workflow runs.
+2. **Actor check**: the `gate` job's `if:` rejects pushes whose actor is
+   `github-actions[bot]`.
+
+Both guards must be present. Removing either one risks a publish loop.

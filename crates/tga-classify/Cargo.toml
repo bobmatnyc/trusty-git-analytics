@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Stage 2 (classification) for trusty-git-analytics: four-tier rules + LLM commit classification cascade."
 
 [dependencies]
-tga-core = { path = "../tga-core" }
+tga-core = { path = "../tga-core", version = "0.1" }
 reqwest.workspace = true
 tokio.workspace = true
 rayon.workspace = true

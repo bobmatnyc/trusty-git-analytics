@@ -1,0 +1,164 @@
+# Continuous Delivery — runs on every push to main.
+#
+# Pipeline:
+#   1. gate       — run full test suite (smoke test)
+#   2. bump       — patch-bump workspace version, commit, push, create tag
+#   3. publish    — publish crates to crates.io in dependency order
+#
+# Loop prevention: the version-bump commit message is "chore: bump version to X.Y.Z [skip ci]"
+# GitHub Actions skips workflows triggered by commits containing [skip ci] in the message.
+# Additionally, we check that the triggering actor is not 'github-actions[bot]'.
+
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+# Cancel superseded runs (same as ci.yml pattern)
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Job 1: Smoke Test Gate ────────────────────────────────────────────────
+  gate:
+    name: Smoke Test Gate
+    # Skip if this push was the version-bump commit itself
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && github.actor != 'github-actions[bot]'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Tests (skip live integration tests)
+        run: cargo test --workspace -- --skip collect_duetto_frontend
+
+      - name: Build release binary
+        run: cargo build --release --bin tga
+
+  # ── Job 2: Version Bump ──────────────────────────────────────────────────
+  bump:
+    name: Bump Patch Version
+    needs: gate
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          # Read current version from workspace Cargo.toml
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Current version: $CURRENT"
+
+          # Bump patch (e.g. 0.1.4 → 0.1.5)
+          MAJOR=$(echo $CURRENT | cut -d. -f1)
+          MINOR=$(echo $CURRENT | cut -d. -f2)
+          PATCH=$(echo $CURRENT | cut -d. -f3)
+          NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "New version: $NEW"
+
+          # Update workspace Cargo.toml
+          sed -i "s/^version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml
+
+          # Update Cargo.lock to reflect new version
+          cargo update --workspace
+
+          # Commit and tag
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to $NEW [skip ci]"
+          git tag "v$NEW"
+          git push origin main --follow-tags
+
+          echo "new_version=$NEW" >> $GITHUB_OUTPUT
+          echo "tag=v$NEW" >> $GITHUB_OUTPUT
+
+  # ── Job 3a: Publish tga-core ─────────────────────────────────────────────
+  publish-core:
+    name: Publish tga-core
+    needs: bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish tga-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p tga-core
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+  # ── Job 3b: Publish mid-tier crates (parallel) ───────────────────────────
+  publish-mid:
+    name: Publish ${{ matrix.crate }}
+    needs: [bump, publish-core]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        crate: [tga-collect, tga-classify, tga-report]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish ${{ matrix.crate }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p ${{ matrix.crate }}
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+  # ── Job 3c: Publish tga-cli ───────────────────────────────────────────────
+  publish-cli:
+    name: Publish tga-cli
+    needs: [bump, publish-mid]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish tga-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p tga-cli

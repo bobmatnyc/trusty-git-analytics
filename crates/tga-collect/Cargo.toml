@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Stage 1 (collection) for trusty-git-analytics: git extraction via libgit2 and HTTP clients for GitHub/JIRA."
 
 [dependencies]
-tga-core = { path = "../tga-core" }
+tga-core = { path = "../tga-core", version = "0.1" }
 rusqlite.workspace = true
 git2.workspace = true
 reqwest.workspace = true

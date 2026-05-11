@@ -12,10 +12,10 @@ name = "tga"
 path = "src/main.rs"
 
 [dependencies]
-tga-core = { path = "../tga-core" }
-tga-collect = { path = "../tga-collect" }
-tga-classify = { path = "../tga-classify" }
-tga-report = { path = "../tga-report" }
+tga-core = { path = "../tga-core", version = "0.1" }
+tga-collect = { path = "../tga-collect", version = "0.1" }
+tga-classify = { path = "../tga-classify", version = "0.1" }
+tga-report = { path = "../tga-report", version = "0.1" }
 clap.workspace = true
 tokio.workspace = true
 serde.workspace = true
