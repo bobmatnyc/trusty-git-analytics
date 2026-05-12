@@ -242,6 +242,13 @@ Target coverage: 90% on parsers and classifiers; 80% overall.
 These are aspirational and will be validated with benchmark suites in `crates/tga-*/benches/`
 using `criterion`.
 
+## Architecture Decision Records
+
+Significant design decisions are documented as ADRs in `docs/adr/`. See
+`docs/adr/README.md` for the format. New ADRs should be written for: library
+choices, schema decisions, performance trade-offs, and any decision that
+future contributors would otherwise have to reverse-engineer.
+
 ## Future Improvements
 
 - **gitoxide migration**: once its diff API stabilizes, evaluate replacement for `git2`

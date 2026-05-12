@@ -217,6 +217,11 @@ impl<'a> ConfigValidator<'a> {
         let (config_key, env_keys): (Option<&str>, &[&str]) = match provider {
             "openrouter" => (cls.openrouter_api_key.as_deref(), &["OPENROUTER_API_KEY"]),
             "openai" => (None, &["OPENAI_API_KEY"]),
+            // Bedrock uses the AWS default credential chain (env vars, shared
+            // config, IAM role, etc.) — no single API-key check applies. Skip
+            // the missing-key validation; the SDK will surface auth errors at
+            // call time.
+            "bedrock" => return,
             // "auto" — accept either provider's key.
             _ => (
                 cls.openrouter_api_key.as_deref(),

@@ -26,6 +26,11 @@ use crate::commands::pr_metrics::PrMetricsArgs;
 #[command(
     name = "tga",
     about = "trusty-git-analytics — developer productivity analytics",
+    long_about = "trusty-git-analytics — developer productivity analytics.\n\n\
+        Three-stage pipeline: collect → classify → report. Run `tga analyze` \
+        for the full pipeline, or invoke each stage individually.\n\n\
+        Architecture decisions are documented in docs/adr/. See \
+        docs/adr/README.md for the format and process.",
     version,
     propagate_version = true
 )]
