@@ -9,15 +9,25 @@
 //! API key results in `None` so the pipeline can fall back to
 //! "uncategorized" rather than crashing.
 
+use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::classify::tiers::ClassificationResult;
 use crate::core::models::ClassificationMethod;
 
 /// OpenAI-compatible chat completion endpoint.
 const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+
+/// OpenRouter chat completion endpoint (OpenAI-compatible schema).
+const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
+
+/// Project identity sent to OpenRouter as `HTTP-Referer` (for usage analytics).
+const OPENROUTER_REFERER: &str = "https://github.com/bobmatnyc/trusty-git-analytics";
+
+/// Project identity sent to OpenRouter as `X-Title`.
+const OPENROUTER_TITLE: &str = "trusty-git-analytics";
 
 /// System prompt instructing the model to return strict JSON.
 const SYSTEM_PROMPT: &str = "You are a git commit classifier. Respond with ONLY a JSON \
@@ -30,10 +40,13 @@ pub struct LlmClassifier {
     model: String,
     api_key: Option<String>,
     endpoint: String,
+    /// Provider-specific extra headers (e.g. OpenRouter attribution).
+    extra_headers: HeaderMap,
 }
 
 impl LlmClassifier {
-    /// Construct a new LLM classifier.
+    /// Construct a new LLM classifier targeting the OpenAI chat-completions
+    /// endpoint.
     ///
     /// `model` is provider-specific (e.g. `"gpt-4o-mini"`). If `api_key` is
     /// `None`, classification calls will return `None` immediately.
@@ -43,6 +56,64 @@ impl LlmClassifier {
             model: model.to_string(),
             api_key,
             endpoint: DEFAULT_ENDPOINT.to_string(),
+            extra_headers: HeaderMap::new(),
+        }
+    }
+
+    /// Construct an LLM classifier configured for a specific provider.
+    ///
+    /// `provider` accepts:
+    /// - `"openrouter"` — uses the OpenRouter endpoint. API key comes from
+    ///   `openrouter_api_key` if `Some`, else the `OPENROUTER_API_KEY`
+    ///   environment variable. Adds the `HTTP-Referer` / `X-Title` headers
+    ///   that OpenRouter uses for attribution.
+    /// - `"openai"` — uses the OpenAI endpoint. API key comes from
+    ///   `OPENAI_API_KEY`.
+    /// - `"auto"` (default) — tries OpenRouter first, falls back to OpenAI.
+    ///
+    /// If no API key can be resolved, the classifier is still constructed
+    /// but every `classify` call will short-circuit to `None`.
+    pub fn from_provider(provider: &str, model: &str, openrouter_api_key: Option<String>) -> Self {
+        let normalized = provider.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "openrouter" => Self::build_openrouter(model, openrouter_api_key),
+            "openai" => Self::new(model, std::env::var("OPENAI_API_KEY").ok()),
+            "auto" | "" => {
+                let or_key =
+                    openrouter_api_key.or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+                if or_key.is_some() {
+                    info!("LLM provider auto-selected: openrouter");
+                    Self::build_openrouter(model, or_key)
+                } else {
+                    info!("LLM provider auto-selected: openai");
+                    Self::new(model, std::env::var("OPENAI_API_KEY").ok())
+                }
+            }
+            other => {
+                warn!(
+                    provider = %other,
+                    "unknown LLM provider; falling back to OpenAI endpoint"
+                );
+                Self::new(model, std::env::var("OPENAI_API_KEY").ok())
+            }
+        }
+    }
+
+    /// Internal helper: build an OpenRouter-configured classifier with
+    /// attribution headers set.
+    fn build_openrouter(model: &str, api_key: Option<String>) -> Self {
+        let key = api_key.or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+        let mut headers = HeaderMap::new();
+        // These are static, valid ASCII strings — `from_static` cannot panic
+        // on them at runtime.
+        headers.insert("HTTP-Referer", HeaderValue::from_static(OPENROUTER_REFERER));
+        headers.insert("X-Title", HeaderValue::from_static(OPENROUTER_TITLE));
+        Self {
+            client: Client::new(),
+            model: model.to_string(),
+            api_key: key,
+            endpoint: OPENROUTER_ENDPOINT.to_string(),
+            extra_headers: headers,
         }
     }
 
@@ -81,6 +152,7 @@ impl LlmClassifier {
             .client
             .post(&self.endpoint)
             .bearer_auth(api_key)
+            .headers(self.extra_headers.clone())
             .json(&body)
             .send()
             .await

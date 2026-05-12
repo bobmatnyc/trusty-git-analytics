@@ -236,7 +236,7 @@ pub struct OutputConfig {
 }
 
 /// Classification cascade configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassificationConfig {
     /// Path to user-supplied rules YAML/JSON.
     #[serde(default)]
@@ -249,6 +249,18 @@ pub struct ClassificationConfig {
     /// LLM model identifier (provider-specific).
     #[serde(default)]
     pub llm_model: Option<String>,
+
+    /// LLM provider: `"openrouter"`, `"openai"`, or `"auto"` (default `"auto"`).
+    ///
+    /// `"auto"` prefers OpenRouter when `OPENROUTER_API_KEY` is set, then
+    /// falls back to OpenAI when `OPENAI_API_KEY` is set.
+    #[serde(default = "default_llm_provider")]
+    pub llm_provider: String,
+
+    /// Optional OpenRouter API key. If unset the environment variable
+    /// `OPENROUTER_API_KEY` is consulted.
+    #[serde(default)]
+    pub openrouter_api_key: Option<String>,
 
     /// Minimum confidence required to accept a classification.
     #[serde(default = "default_confidence_threshold")]
@@ -286,6 +298,25 @@ fn default_confidence_threshold() -> f64 {
 
 fn default_min_coverage_pct() -> f64 {
     20.0
+}
+
+fn default_llm_provider() -> String {
+    "auto".to_string()
+}
+
+impl Default for ClassificationConfig {
+    fn default() -> Self {
+        Self {
+            rules_file: None,
+            use_llm: false,
+            llm_model: None,
+            llm_provider: default_llm_provider(),
+            openrouter_api_key: None,
+            confidence_threshold: default_confidence_threshold(),
+            custom_categories: Vec::new(),
+            min_coverage_pct: default_min_coverage_pct(),
+        }
+    }
 }
 
 fn default_true() -> bool {

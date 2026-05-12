@@ -1,10 +1,10 @@
 //! `tga collect` — stage 1 (git extraction) entry point.
 
-use chrono::{Duration, Utc};
 use tga::collect::CollectionPipeline;
 use tga::core::config::Config;
 use tga::core::db::Database;
 
+use crate::commands::date_range::resolve_date_range;
 use crate::CollectArgs;
 
 /// Run the collection stage against the provided database.
@@ -34,24 +34,34 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
         }
     }
 
-    // `--weeks N` is computed first and may be superseded by an explicit `--since`.
-    let weeks_since = args.weeks.map(weeks_to_since);
-    let effective_since = args.since.clone().or(weeks_since);
+    // Resolve the (since, until) window from --weeks, --from/--to, --since/--until,
+    // or the config fallback. Priority: --weeks > --from/--to > legacy --since/--until > config.
+    let legacy_since = args.since.clone();
+    let (resolved_since, resolved_until) = resolve_date_range(
+        args.weeks,
+        args.from.as_deref(),
+        args.to.as_deref(),
+        legacy_since.as_deref(),
+    )?;
+    let effective_until = resolved_until.or_else(|| args.until.clone());
 
     // Apply date overrides to every selected repository.
-    if let Some(since) = effective_since.as_ref() {
+    if let Some(since) = resolved_since.as_ref() {
         tracing::info!(since = %since, "applying collection lower bound");
         for repo in &mut cfg.repositories {
             repo.since_date = Some(since.clone());
         }
     }
-    if let Some(until) = args.until.as_ref() {
+    if let Some(until) = effective_until.as_ref() {
+        tracing::info!(until = %until, "applying collection upper bound");
         for repo in &mut cfg.repositories {
             repo.until_date = Some(until.clone());
         }
     }
 
-    let pipeline = CollectionPipeline::new(cfg).with_force(args.force);
+    let pipeline = CollectionPipeline::new(cfg)
+        .with_force(args.force)
+        .with_no_fetch(args.no_fetch);
 
     // In dry-run mode, redirect all writes to an ephemeral in-memory
     // database. The real `db` is never opened for write.
@@ -94,13 +104,4 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
         }
     }
     Ok(())
-}
-
-/// Convert a `--weeks N` value to an RFC3339 `since` timestamp.
-///
-/// Returns `(now - N weeks)` formatted as an RFC3339 string, which the
-/// git extractor accepts as a lower bound on commit author time.
-fn weeks_to_since(weeks: u32) -> String {
-    let cutoff = Utc::now() - Duration::weeks(i64::from(weeks));
-    cutoff.to_rfc3339()
 }

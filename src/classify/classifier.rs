@@ -26,6 +26,11 @@ pub struct ClassificationEngineConfig {
     pub use_llm: bool,
     /// LLM model identifier (provider-specific).
     pub llm_model: String,
+    /// LLM provider: `"openrouter"`, `"openai"`, or `"auto"`.
+    pub llm_provider: String,
+    /// Optional OpenRouter API key. If `None`, the env var
+    /// `OPENROUTER_API_KEY` is consulted at engine-build time.
+    pub openrouter_api_key: Option<String>,
     /// Minimum confidence required to accept a verdict.
     ///
     /// Verdicts below this threshold are returned as-is (so the caller
@@ -39,6 +44,8 @@ impl Default for ClassificationEngineConfig {
         Self {
             use_llm: false,
             llm_model: "gpt-4o-mini".to_string(),
+            llm_provider: "auto".to_string(),
+            openrouter_api_key: None,
             confidence_threshold: 0.7,
         }
     }
@@ -105,8 +112,11 @@ impl ClassificationEngine {
         let regex = RegexMatcher::new(&ruleset.rules)?;
         let fuzzy = FuzzyClassifier;
         let llm = if config.use_llm {
-            let api_key = std::env::var("OPENAI_API_KEY").ok();
-            Some(LlmClassifier::new(&config.llm_model, api_key))
+            Some(LlmClassifier::from_provider(
+                &config.llm_provider,
+                &config.llm_model,
+                config.openrouter_api_key.clone(),
+            ))
         } else {
             None
         };

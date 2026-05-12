@@ -1,12 +1,12 @@
 //! `tga analyze` — run the full pipeline (collect → classify → report).
 
-use chrono::{Duration, Utc};
 use tga::classify::ClassificationPipeline;
 use tga::collect::CollectionPipeline;
 use tga::core::config::Config;
 use tga::core::db::Database;
 use tga::report::ReportPipeline;
 
+use crate::commands::date_range::resolve_date_range;
 use crate::AnalyzeArgs;
 
 /// Run all three pipeline stages in sequence, honoring `--skip-collect`
@@ -38,12 +38,19 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
         cfg.output = Some(out);
     }
 
-    // `--weeks N` overrides any `start_date` configured per-repository.
-    if let Some(weeks) = args.weeks {
-        let since = weeks_to_since(weeks);
-        tracing::info!(weeks, since = %since, "applying --weeks collection window");
+    // Resolve --weeks / --from / --to into a (since, until) pair.
+    let (resolved_since, resolved_until) =
+        resolve_date_range(args.weeks, args.from.as_deref(), args.to.as_deref(), None)?;
+    if let Some(since) = resolved_since.as_ref() {
+        tracing::info!(since = %since, "applying collection lower bound");
         for repo in &mut cfg.repositories {
             repo.since_date = Some(since.clone());
+        }
+    }
+    if let Some(until) = resolved_until.as_ref() {
+        tracing::info!(until = %until, "applying collection upper bound");
+        for repo in &mut cfg.repositories {
+            repo.until_date = Some(until.clone());
         }
     }
 
@@ -51,6 +58,7 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
         tracing::info!("stage 1: collect");
         let collect_stats = CollectionPipeline::new(cfg.clone())
             .with_force(args.force)
+            .with_no_fetch(args.no_fetch)
             .run(db)
             .await?;
         println!(
@@ -97,13 +105,4 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
     }
 
     Ok(())
-}
-
-/// Convert a `--weeks N` value to an RFC3339 `since` timestamp.
-///
-/// Returns `(now - N weeks)` formatted as an RFC3339 string, which the
-/// git extractor accepts as a lower bound on commit author time.
-fn weeks_to_since(weeks: u32) -> String {
-    let cutoff = Utc::now() - Duration::weeks(i64::from(weeks));
-    cutoff.to_rfc3339()
 }

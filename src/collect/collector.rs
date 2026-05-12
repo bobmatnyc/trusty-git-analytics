@@ -40,6 +40,7 @@ pub struct CollectionStats {
 pub struct CollectionPipeline {
     config: Config,
     force: bool,
+    no_fetch: bool,
 }
 
 impl CollectionPipeline {
@@ -48,6 +49,7 @@ impl CollectionPipeline {
         Self {
             config,
             force: false,
+            no_fetch: false,
         }
     }
 
@@ -56,6 +58,15 @@ impl CollectionPipeline {
     /// for it.
     pub fn with_force(mut self, force: bool) -> Self {
         self.force = force;
+        self
+    }
+
+    /// If `true`, skip the pre-walk `git fetch origin` on each repository.
+    ///
+    /// Default is `false` (i.e. always fetch). Useful for offline runs or
+    /// when the caller has already fetched.
+    pub fn with_no_fetch(mut self, no_fetch: bool) -> Self {
+        self.no_fetch = no_fetch;
         self
     }
 
@@ -80,7 +91,7 @@ impl CollectionPipeline {
 
         for repo_cfg in &self.config.repositories {
             let collector = match GitCollector::new(repo_cfg) {
-                Ok(c) => c,
+                Ok(c) => c.no_fetch(self.no_fetch),
                 Err(e) => {
                     let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
                     warn!("{msg}");

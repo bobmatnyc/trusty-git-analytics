@@ -106,6 +106,8 @@ impl ClassificationPipeline {
             Some(c) => ClassificationEngineConfig {
                 use_llm: c.use_llm,
                 llm_model: c.llm_model.clone().unwrap_or_else(|| "gpt-4o-mini".into()),
+                llm_provider: c.llm_provider.clone(),
+                openrouter_api_key: c.openrouter_api_key.clone(),
                 confidence_threshold: c.confidence_threshold,
             },
             None => ClassificationEngineConfig::default(),

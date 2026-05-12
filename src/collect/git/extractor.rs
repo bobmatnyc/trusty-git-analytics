@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::git::diff::{compute_commit_diff, CommitDiff};
+use crate::collect::git::fetch::fetch_remote;
 use crate::collect::ticket::is_ticketed;
 use crate::core::config::{expand_path, RepositoryConfig};
 use crate::core::db::Database;
@@ -33,6 +34,10 @@ pub struct GitCollector {
     until: Option<DateTime<Utc>>,
     /// If true, merge commits are not written to the DB.
     skip_merges: bool,
+    /// If true, skip the pre-walk `git fetch` step.
+    no_fetch: bool,
+    /// Remote name to fetch from prior to the walk (default "origin").
+    remote_name: String,
 }
 
 impl GitCollector {
@@ -75,12 +80,27 @@ impl GitCollector {
             since,
             until,
             skip_merges: false,
+            no_fetch: false,
+            remote_name: "origin".to_string(),
         })
     }
 
     /// Set whether to skip merge commits during extraction.
     pub fn skip_merges(mut self, skip: bool) -> Self {
         self.skip_merges = skip;
+        self
+    }
+
+    /// Disable the pre-walk `git fetch` (useful for offline / CI scenarios
+    /// or when the caller has already fetched out-of-band).
+    pub fn no_fetch(mut self, no_fetch: bool) -> Self {
+        self.no_fetch = no_fetch;
+        self
+    }
+
+    /// Override the remote name used for the pre-walk fetch (default `"origin"`).
+    pub fn with_remote(mut self, remote: impl Into<String>) -> Self {
+        self.remote_name = remote.into();
         self
     }
 
@@ -118,6 +138,21 @@ impl GitCollector {
             ?until,
             "starting commit extraction"
         );
+
+        // Optional pre-walk remote fetch. Soft-fails on auth/transport so a
+        // misconfigured remote doesn't break collection on local history.
+        if !self.no_fetch {
+            if let Err(e) = fetch_remote(&repo, &self.remote_name) {
+                warn!(
+                    repo = %self.name,
+                    remote = %self.remote_name,
+                    error = %e,
+                    "pre-walk fetch returned an error; continuing with local refs"
+                );
+            }
+        } else {
+            debug!(repo = %self.name, "skipping pre-walk fetch (--no-fetch)");
+        }
 
         let mut revwalk = repo.revwalk()?;
         revwalk.set_sorting(Sort::TIME)?;
