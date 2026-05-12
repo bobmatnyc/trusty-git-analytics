@@ -82,10 +82,13 @@ Re-running the same date range is idempotent — already-collected weeks are ski
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config <PATH>` / `-c` | `./config.yaml` | YAML config path |
-| `--log <LEVEL>` | `info` | `error` / `warn` / `info` / `debug` / `trace` |
-| `--no-color` | false | Disable ANSI color |
+| `--database <PATH>` / `-d` | `./tga.db` | SQLite database path |
+| `--log <LEVEL>` | `warn` | `error` / `warn` / `info` / `debug` / `trace` (overrides `-v`) |
+| `-v` / `-vv` / `-vvv` | — | Shortcut: `info` / `debug` / `trace` |
 | `--help` | — | Print help |
 | `--version` | — | Print version |
+
+Set `RUST_LOG` to override both flags (e.g. `RUST_LOG=tga::collect=debug,warn`).
 
 ### ISO week targeting (mutually exclusive across subcommands)
 

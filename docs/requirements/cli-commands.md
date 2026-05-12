@@ -11,11 +11,16 @@ Global flags:
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--config <PATH>` | path | Path to config YAML (default: `./config.yaml`) |
-| `--log <LEVEL>` | enum | `error` / `warn` / `info` / `debug` / `trace` (default: `info`) |
-| `--no-color` | bool | Disable colored output |
+| `--config <PATH>` / `-c` | path | Path to config YAML (default: `./config.yaml`) |
+| `--database <PATH>` / `-d` | path | Path to SQLite database (default: `./tga.db`) |
+| `--log <LEVEL>` | enum | `error` / `warn` / `info` / `debug` / `trace` (default: `warn`). Overrides `-v`. |
+| `-v` / `-vv` / `-vvv` | count | Verbosity shortcut: `info` / `debug` / `trace` |
 | `--help` | | Print help |
 | `--version` | | Print version |
+
+The `RUST_LOG` environment variable, when set, takes precedence over both
+`--log` and `-v` (supports the standard `tracing-subscriber` `EnvFilter`
+syntax, e.g. `RUST_LOG=tga::collect=debug,warn`).
 
 ## ISO Week Targeting
 
@@ -63,7 +68,7 @@ Stage 1 only — extract git data and external APIs into SQLite cache.
 | `--from <DATE>` | — | |
 | `--to <DATE>` | — | |
 | `--force` | false | Override `weekly_fetch_status` immutability |
-| `--log <LEVEL>` | info | |
+| `--log <LEVEL>` | warn | (global) |
 
 ### `tga classify`
 
@@ -77,7 +82,7 @@ Stage 2 only — run classification cascade against cached commits.
 | `--from <DATE>` | — | |
 | `--to <DATE>` | — | |
 | `--reclassify` | false | Re-classify previously-classified commits |
-| `--log <LEVEL>` | info | |
+| `--log <LEVEL>` | warn | (global) |
 | `--show-jira-signals` | false | Emit JIRA signal diagnostics per commit |
 | `--validate-coverage` | false | Exit non-zero if coverage below threshold |
 | `--coverage-threshold <PCT>` | 20.0 | Minimum classification coverage % |
@@ -96,7 +101,7 @@ Stage 3 only — generate reports from cache.
 | `--output <PATH>` | from config | Output directory |
 | `--generate-csv` | true | |
 | `--anonymize` | from config | |
-| `--log <LEVEL>` | info | |
+| `--log <LEVEL>` | warn | (global) |
 
 ### `tga fetch`
 

@@ -206,8 +206,13 @@ The aggregated error list is printed at the end of each run.
 
 ### Logging
 
-`tga` uses the `tracing` crate. Verbosity is controlled by `-v` flag
-count (warn / info / debug / trace) rather than a `--log-level` string.
+`tga` uses the `tracing` crate. Verbosity can be controlled two ways:
+
+- `--log <LEVEL>` — explicit level (`error` / `warn` / `info` / `debug` / `trace`)
+- `-v` / `-vv` / `-vvv` — shortcut for `info` / `debug` / `trace`
+
+The `RUST_LOG` environment variable, if set, takes precedence over both
+flags (e.g. `RUST_LOG=tga::collect=debug,warn`). Default is `warn`.
 
 ---
 

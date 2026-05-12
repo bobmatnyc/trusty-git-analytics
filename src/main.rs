@@ -9,7 +9,8 @@ mod commands;
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use tracing_subscriber::EnvFilter;
 
 use tga::core::config::{Config, ConfigValidator};
 use tga::core::db::Database;
@@ -37,12 +38,46 @@ struct Cli {
     #[arg(short, long, default_value = "tga.db", global = true)]
     database: PathBuf,
 
-    /// Verbosity level (-v, -vv, -vvv).
+    /// Verbosity level (-v, -vv, -vvv). Shortcut for `--log`.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
+    /// Log level: error, warn, info, debug, trace. Overrides `-v`.
+    /// The `RUST_LOG` environment variable, if set, takes precedence
+    /// over this flag.
+    #[arg(long, value_name = "LEVEL", global = true)]
+    log: Option<LogLevel>,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Log level values accepted by the `--log` global flag.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+#[clap(rename_all = "lower")]
+enum LogLevel {
+    /// Errors only.
+    Error,
+    /// Warnings and errors.
+    Warn,
+    /// Informational messages and above.
+    Info,
+    /// Debug messages and above.
+    Debug,
+    /// Trace (most verbose).
+    Trace,
+}
+
+impl From<LogLevel> for tracing::Level {
+    fn from(l: LogLevel) -> Self {
+        match l {
+            LogLevel::Error => tracing::Level::ERROR,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Trace => tracing::Level::TRACE,
+        }
+    }
 }
 
 /// Top-level subcommands.
@@ -208,14 +243,21 @@ fn run_validation(config: &Config, no_validate: bool, validate_only: bool) -> an
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing based on verbosity flag count.
-    let level = match cli.verbose {
-        0 => tracing::Level::WARN,
-        1 => tracing::Level::INFO,
-        2 => tracing::Level::DEBUG,
-        _ => tracing::Level::TRACE,
+    // Initialize tracing. Precedence: RUST_LOG env var > --log flag > -v count.
+    // Default (no flags) is WARN.
+    let level: tracing::Level = if let Some(l) = cli.log {
+        l.into()
+    } else {
+        match cli.verbose {
+            0 => tracing::Level::WARN,
+            1 => tracing::Level::INFO,
+            2 => tracing::Level::DEBUG,
+            _ => tracing::Level::TRACE,
+        }
     };
-    tracing_subscriber::fmt().with_max_level(level).init();
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level.to_string()));
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     // Load configuration (fall back to default if file is missing).
     let config = if cli.config.exists() {
