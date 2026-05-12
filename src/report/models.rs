@@ -291,6 +291,22 @@ pub struct ReportData {
     pub boilerplate_count: usize,
     /// Total revert commits detected.
     pub revert_count: usize,
+    /// Number of repositories analyzed for this report (i.e. distinct
+    /// `commits.repository` values observed). Surfaced so downstream
+    /// consumers can detect undercounting when the configured repo roster
+    /// is narrower than the actual portfolio (see issue #67).
+    #[serde(default)]
+    pub repository_coverage: usize,
+    /// Number of commits whose author identity could not be resolved to a
+    /// canonical team member (see issue #68). These commits still appear in
+    /// the commit totals but are tracked separately so developer counts are
+    /// not silently inflated by phantom identities.
+    #[serde(default)]
+    pub unresolved_author_commits: usize,
+    /// Number of distinct author identities that did not resolve to a
+    /// configured canonical team member (see issue #68).
+    #[serde(default)]
+    pub unresolved_authors: usize,
 }
 
 impl ReportData {
@@ -317,6 +333,9 @@ impl ReportData {
             quality: None,
             boilerplate_count: 0,
             revert_count: 0,
+            repository_coverage: 0,
+            unresolved_author_commits: 0,
+            unresolved_authors: 0,
         }
     }
 }

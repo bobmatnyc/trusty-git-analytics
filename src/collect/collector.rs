@@ -105,6 +105,21 @@ impl CollectionPipeline {
         // Backfill authors from observed commits.
         stats.authors_resolved = self.upsert_observed_authors(db, &resolver)?;
 
+        // Issue #68: any commit with NULL author_id after identity resolution
+        // is "phantom" — it would be counted as a distinct developer in
+        // reports. Surface the count so the operator can extend the alias map.
+        if let Ok(unresolved) = count_unresolved_commits(db) {
+            if unresolved > 0 {
+                let msg = format!(
+                    "WARNING: {unresolved} commits have unresolved author identities and may \
+                     inflate developer counts. Run `tga aliases list` to review, or extend \
+                     `developer_aliases` in the config to map missing identities."
+                );
+                warn!("{msg}");
+                eprintln!("{msg}");
+            }
+        }
+
         // Optional: GitHub PR fetch.
         if let Some(gh_cfg) = &self.config.github {
             if gh_cfg.fetch_prs {
@@ -344,7 +359,10 @@ impl CollectionPipeline {
                     println!("Collected W{week_no:02} {year}: {n} commits [{repo_name}]");
                     stats.commits_collected += n;
                     stats.weeks_collected += 1;
-                    if let Err(e) = db::record_collection_run(db, &repo_name, year, week_no, n) {
+                    let repo_count = self.config.repositories.len();
+                    if let Err(e) =
+                        db::record_collection_run(db, &repo_name, year, week_no, n, repo_count)
+                    {
                         let msg = format!(
                             "failed to record collection_run for {repo_name} W{week_no} {year}: {e}"
                         );
@@ -518,6 +536,27 @@ fn naive_date_start_utc(d: NaiveDate) -> DateTime<Utc> {
         .and_hms_opt(0, 0, 0)
         .expect("00:00:00 is always a valid time");
     Utc.from_utc_datetime(&ndt)
+}
+
+/// Count commits where `author_id IS NULL` — these are commits whose author
+/// identity could not be linked to a row in the `authors` table.
+///
+/// Why: see issue #68. Phantom identities silently inflate developer counts
+/// in downstream reports, so we want to surface their existence loudly.
+/// What: returns the COUNT(*) of NULL-author-id commits, or `Err` on a SQL
+/// failure (callers should treat the error as best-effort and not abort).
+/// Test: seed an in-memory DB with one commit whose author_id is NULL and
+/// one with author_id set; assert the count is 1.
+fn count_unresolved_commits(db: &Database) -> Result<usize> {
+    let n: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM commits WHERE author_id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(crate::core::TgaError::from)?;
+    Ok(n as usize)
 }
 
 /// Convert a calendar date to the UTC instant at 23:59:59 on that day.

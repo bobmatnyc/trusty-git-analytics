@@ -66,6 +66,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "azdo_iterations",
         sql: include_str!("sql/0008_azdo_iterations.sql"),
     },
+    Migration {
+        version: 9,
+        name: "collection_runs_repo_count",
+        sql: include_str!("sql/0009_collection_runs_repo_count.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

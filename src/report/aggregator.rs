@@ -124,10 +124,67 @@ impl Aggregator {
     /// # Errors
     ///
     /// Returns [`crate::report::ReportError::Core`] if the underlying queries fail.
-    pub fn build(db: &Database, _config: &Config) -> Result<ReportData> {
+    pub fn build(db: &Database, config: &Config) -> Result<ReportData> {
         let rows = Self::load_rows(db)?;
         let prs = Self::load_prs(db).unwrap_or_default();
-        Ok(Self::aggregate(rows, prs))
+        let unresolved_db = Self::count_unresolved_author_commits(db).unwrap_or(0);
+        let mut data = Self::aggregate(rows, prs);
+
+        // Issue #68 / #67: surface coverage and unresolved-identity counts
+        // so consumers know the scope of the report. `repository_coverage`
+        // counts distinct repositories observed in the data (not the size
+        // of the configured roster, so that a misconfigured `repositories[]`
+        // entry that produced no commits is not double-counted).
+        data.repository_coverage = data.repositories.len();
+
+        // Aggregate the configured-alias set so we can flag author summaries
+        // whose canonical email is not part of any configured identity. These
+        // are "phantom" identities that inflate distinct-developer counts.
+        let alias_set = configured_alias_emails(config);
+        let unresolved_authors = if alias_set.is_empty() {
+            // Without a configured alias map there is no signal — every
+            // author is "unresolved" in that sense, which would be noise.
+            // Surface zero so downstream consumers don't double-count.
+            0
+        } else {
+            data.authors
+                .iter()
+                .filter(|a| !alias_set.contains(&a.email.to_lowercase()))
+                .count()
+        };
+        data.unresolved_authors = unresolved_authors;
+        data.unresolved_author_commits = unresolved_db;
+
+        // Issue #69: warn when adjacent weeks have different repository
+        // coverage in `collection_runs`. This detects baseline drift that
+        // would otherwise silently break week-over-week deltas.
+        check_weekly_coverage_drift(db, &data.weekly_metrics);
+
+        if unresolved_db > 0 {
+            tracing::warn!(
+                count = unresolved_db,
+                "WARNING: {unresolved_db} commits have unresolved author identities and may \
+                 inflate developer counts. Run `tga aliases list` to review, or extend \
+                 `developer_aliases` in the config to map missing identities."
+            );
+        }
+        Ok(data)
+    }
+
+    /// Count commits where `author_id IS NULL` — the canonical "unresolved"
+    /// signal. This is distinct from `unresolved_authors` (configured-alias
+    /// membership): an `author_id IS NULL` commit means identity resolution
+    /// never ran for it, so it is silently treated as its own developer.
+    fn count_unresolved_author_commits(db: &Database) -> Result<usize> {
+        let conn = db.connection();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE author_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(crate::core::TgaError::from)?;
+        Ok(n as usize)
     }
 
     /// Load PR rows for velocity / DORA computations.
@@ -842,6 +899,109 @@ fn dora_level(deploys_per_week: f64, lead_h: f64, cfr: f64, mttr_h: f64) -> Stri
         return "medium".to_string();
     }
     "low".to_string()
+}
+
+/// Parse an ISO week label of the form `"YYYY-Www"` into `(year, week)`.
+///
+/// Returns `None` for malformed labels — callers should skip the entry
+/// rather than abort the entire report.
+fn parse_iso_week_label(label: &str) -> Option<(i32, u32)> {
+    let (year_s, week_s) = label.split_once("-W")?;
+    let year: i32 = year_s.parse().ok()?;
+    let week: u32 = week_s.parse().ok()?;
+    Some((year, week))
+}
+
+/// Emit a warning when adjacent weekly metric rows were collected with
+/// different repository counts (issue #69). Coverage drift between weeks
+/// makes week-over-week deltas misleading.
+///
+/// Why: weekly snapshots collected at different times may have different
+/// `repositories[]` rosters; without surfacing this, WoW deltas look like
+/// engineering changes when they're really configuration changes.
+/// What: walks consecutive `weekly_metrics` entries, looks up the recorded
+/// `repo_count` per week via [`crate::core::db::repo_count_for_week`], and
+/// warns when the values disagree.
+/// Test: seed `collection_runs` with two weeks at different repo_counts,
+/// build a report, assert a warning is logged (smoke-tested via the
+/// public `Aggregator::build` path).
+fn check_weekly_coverage_drift(
+    db: &Database,
+    weekly_metrics: &[crate::report::models::WeeklyMetrics],
+) {
+    if weekly_metrics.len() < 2 {
+        return;
+    }
+    let mut prev: Option<(String, i64)> = None;
+    for wm in weekly_metrics {
+        let (year, week) = match parse_iso_week_label(&wm.week) {
+            Some(v) => v,
+            None => continue,
+        };
+        let count = match crate::core::db::repo_count_for_week(db, year, week) {
+            Ok(Some(n)) => n,
+            // No recorded count for this week — either pre-migration data or
+            // legacy `record_collection_run` calls. Skip silently; the user
+            // will see normal output and we avoid noisy warnings on fresh
+            // databases.
+            _ => continue,
+        };
+        if let Some((prev_label, prev_count)) = &prev {
+            if *prev_count != count {
+                tracing::warn!(
+                    prev_week = %prev_label,
+                    prev_repo_count = prev_count,
+                    week = %wm.week,
+                    repo_count = count,
+                    "WARNING: Week-over-week comparison may be inaccurate — W{prev} was \
+                     collected with {n_prev} repos, W{cur} with {n_cur} repos. Re-run \
+                     `tga collect --force --from <week-start> --to <week-end>` for the \
+                     prior week to normalize coverage.",
+                    prev = prev_label,
+                    n_prev = prev_count,
+                    cur = wm.week,
+                    n_cur = count,
+                );
+            }
+        }
+        prev = Some((wm.week.clone(), count));
+    }
+}
+
+/// Collect every email address referenced by the configured alias map
+/// (`developer_aliases` + `team.members.email` + `team.members.aliases`)
+/// for "is this author in the configured roster?" lookups.
+///
+/// Why: see issue #68 — when an author's canonical email is not in the
+/// configured alias map they are a "phantom" identity that inflates the
+/// developer count.
+/// What: returns a set of lowercased email addresses; non-email aliases
+/// (login handles) are filtered out so case-insensitive email comparison
+/// is sufficient.
+/// Test: build a `Config` with one developer_aliases entry, assert the
+/// returned set contains the lowercased email.
+fn configured_alias_emails(config: &Config) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    for entries in config.developer_aliases.values() {
+        for e in entries {
+            if e.contains('@') {
+                out.insert(e.to_lowercase());
+            }
+        }
+    }
+    if let Some(team) = &config.team {
+        for m in &team.members {
+            if m.email.contains('@') {
+                out.insert(m.email.to_lowercase());
+            }
+            for a in &m.aliases {
+                if a.contains('@') {
+                    out.insert(a.to_lowercase());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Format an ISO week label such as `"2024-W03"` from a UTC timestamp.

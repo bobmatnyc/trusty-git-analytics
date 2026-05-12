@@ -41,7 +41,7 @@ pub mod migrations;
 pub mod work_items;
 
 pub use azdo_iterations::{list_iterations, upsert_iteration};
-pub use collection_runs::{is_week_collected, record_collection_run};
+pub use collection_runs::{is_week_collected, record_collection_run, repo_count_for_week};
 pub use work_items::{
     get_work_item, get_work_items_for_commit, link_commit_work_item, list_work_items,
     upsert_work_item, WorkItemRow,
