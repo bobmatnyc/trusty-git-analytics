@@ -18,8 +18,13 @@ use crate::core::errors::{Result, TgaError};
 
 pub mod collection_runs;
 pub mod migrations;
+pub mod work_items;
 
 pub use collection_runs::{is_week_collected, record_collection_run};
+pub use work_items::{
+    get_work_item, get_work_items_for_commit, link_commit_work_item, list_work_items,
+    upsert_work_item, WorkItemRow,
+};
 
 /// Wrapper around a [`rusqlite::Connection`] with project-standard pragmas
 /// applied and migrations run.

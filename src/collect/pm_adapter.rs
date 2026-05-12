@@ -333,12 +333,9 @@ impl PmAdapter for JiraAdapter {
 /// PM adapter wrapping [`crate::collect::github::GitHubClient`].
 ///
 /// GitHub's `Issues` API is a superset of its `Pulls` API — both share the
-/// `#N` namespace. Stub-level support for now: `fetch_ticket` always returns
-/// `Ok(None)` because the underlying client only fetches PRs in bulk, not
-/// individual issues by number. Wire-up will follow once an
-/// `IssuesClient::fetch_issue` method exists.
+/// `#N` namespace. `fetch_ticket` accepts either `"#42"` or `"42"` and
+/// delegates to [`crate::collect::github::GitHubClient::fetch_issue`].
 pub struct GitHubAdapter {
-    #[allow(dead_code)]
     inner: crate::collect::github::GitHubClient,
 }
 
@@ -359,10 +356,35 @@ impl PmAdapter for GitHubAdapter {
         PmSource::GitHub
     }
 
-    async fn fetch_ticket(&self, _ticket_id: &str) -> Result<Option<PmTicket>, PmError> {
-        // TODO: wire to GET /repos/{owner}/{repo}/issues/{number} once the
-        // GitHubClient grows an individual-issue endpoint.
-        Ok(None)
+    async fn fetch_ticket(&self, ticket_id: &str) -> Result<Option<PmTicket>, PmError> {
+        // GitHub ticket refs may carry a leading `#`. Strip it so callers
+        // can pass either `#42` or `42`. A non-numeric id is treated as
+        // "not a GitHub issue" → `Ok(None)`.
+        let numeric = ticket_id.trim_start_matches('#');
+        let number: u64 = match numeric.parse() {
+            Ok(n) => n,
+            Err(_) => return Ok(None),
+        };
+
+        match self.inner.fetch_issue(number).await {
+            Ok(Some(issue)) => {
+                let labels: Vec<String> = issue.labels.iter().map(|l| l.name.clone()).collect();
+                let url = issue.html_url.clone();
+                let raw = serde_json::to_value(&issue)?;
+                Ok(Some(PmTicket {
+                    id: format!("#{}", issue.number),
+                    title: issue.title,
+                    status: issue.state,
+                    ticket_type: "issue".into(),
+                    labels,
+                    url: Some(url),
+                    source: PmSource::GitHub,
+                    raw,
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(collect_err_to_pm("github", e)),
+        }
     }
 
     fn detect_ticket_refs(&self, text: &str) -> Vec<String> {
@@ -690,6 +712,59 @@ mod tests {
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].name(), "azure_devops");
         assert_eq!(adapters[0].source(), PmSource::AzureDevOps);
+    }
+
+    /// Verify the `GitHubIssue` → `PmTicket` mapping used inside
+    /// `GitHubAdapter::fetch_ticket`. Constructed directly so the test
+    /// does not depend on network access.
+    ///
+    /// Why: protects the contract that `id` is re-prefixed with `#`,
+    /// labels are flattened to strings, and `ticket_type` is `"issue"`.
+    /// What: builds a `GitHubIssue`, runs the same mapping, asserts fields.
+    /// Test: pass when `id == "#42"`, labels are `["bug", "p1"]`, type is
+    /// `"issue"`, status mirrors `state`.
+    #[test]
+    fn github_issue_maps_to_pm_ticket() {
+        use crate::collect::github::{GhLabel, GitHubIssue};
+
+        let issue = GitHubIssue {
+            number: 42,
+            title: "Crash".into(),
+            state: "open".into(),
+            html_url: "https://github.com/o/r/issues/42".into(),
+            labels: vec![
+                GhLabel { name: "bug".into() },
+                GhLabel { name: "p1".into() },
+            ],
+            body: Some("repro".into()),
+        };
+
+        // Replicate the mapping inside fetch_ticket.
+        let labels: Vec<String> = issue.labels.iter().map(|l| l.name.clone()).collect();
+        let url = issue.html_url.clone();
+        let raw = serde_json::to_value(&issue).expect("raw serializes");
+        let ticket = PmTicket {
+            id: format!("#{}", issue.number),
+            title: issue.title.clone(),
+            status: issue.state.clone(),
+            ticket_type: "issue".into(),
+            labels,
+            url: Some(url),
+            source: PmSource::GitHub,
+            raw,
+        };
+
+        assert_eq!(ticket.id, "#42");
+        assert_eq!(ticket.title, "Crash");
+        assert_eq!(ticket.status, "open");
+        assert_eq!(ticket.ticket_type, "issue");
+        assert_eq!(ticket.labels, vec!["bug".to_string(), "p1".to_string()]);
+        assert_eq!(
+            ticket.url.as_deref(),
+            Some("https://github.com/o/r/issues/42")
+        );
+        assert_eq!(ticket.source, PmSource::GitHub);
+        assert!(ticket.raw.get("body").is_some());
     }
 
     /// Smoke-test: an adapter built behind `dyn PmAdapter` can still call

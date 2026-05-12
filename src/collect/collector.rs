@@ -119,8 +119,7 @@ impl CollectionPipeline {
             }
         }
 
-        // Optional: Azure DevOps connection probe (non-fatal).
-        // Phase 2 only verifies the PAT; work-item fetch lands in Phase 6.
+        // Optional: Azure DevOps connection probe + work-item enrichment.
         if let Some(azdo_cfg) = self.config.azure_devops_config() {
             let client = AzureDevOpsClient::new(azdo_cfg.clone());
             match client.test_connection().await {
@@ -129,7 +128,16 @@ impl CollectionPipeline {
                     org = %info.organization_url,
                     "Azure DevOps connection verified",
                 ),
-                Err(e) => warn!("Azure DevOps connection failed (non-fatal): {e}"),
+                Err(e) => {
+                    warn!("Azure DevOps connection failed (non-fatal): {e}");
+                }
+            }
+            if azdo_cfg.fetch_on_reference {
+                if let Err(e) = self.fetch_and_persist_azdo_work_items(db, &client).await {
+                    stats
+                        .errors
+                        .push(format!("ADO work item persistence failed: {e}"));
+                }
             }
         }
 
@@ -332,6 +340,119 @@ impl CollectionPipeline {
             count += 1;
         }
         Ok(count)
+    }
+
+    /// Scan stored commit messages for `AB#N` references, batch-fetch the
+    /// referenced ADO work items, and persist them in `work_items` and
+    /// `commit_work_items`.
+    ///
+    /// The pipeline pulls `(sha, message)` from `commits`, computes the unique
+    /// set of referenced IDs, calls
+    /// [`AzureDevOpsClient::get_work_items`] in batches of up to 200, then
+    /// upserts the resulting rows and inserts join-table links.
+    ///
+    /// All work-item linking is done in a single transaction so that a partial
+    /// failure doesn't leave dangling rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::collect::CollectError`] if reading commits, calling
+    /// ADO, or writing to SQLite fails.
+    async fn fetch_and_persist_azdo_work_items(
+        &self,
+        db: &mut Database,
+        client: &AzureDevOpsClient,
+    ) -> Result<()> {
+        use crate::collect::azdo::extract_work_item_refs;
+        use std::collections::{BTreeSet, HashMap};
+
+        // 1. Pull (sha, message) pairs from the database.
+        let rows: Vec<(String, String)> = {
+            let conn = db.connection();
+            let mut stmt = conn.prepare("SELECT sha, message FROM commits")?;
+            let mapped = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut out = Vec::new();
+            for r in mapped {
+                out.push(r?);
+            }
+            out
+        };
+
+        // 2. Build commit -> [work_item_id] map and the unique ID set.
+        let mut commit_refs: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut all_ids: BTreeSet<u32> = BTreeSet::new();
+        for (sha, msg) in &rows {
+            let ids = extract_work_item_refs(msg);
+            if !ids.is_empty() {
+                for id in &ids {
+                    all_ids.insert(*id);
+                }
+                commit_refs.insert(sha.clone(), ids);
+            }
+        }
+
+        if all_ids.is_empty() {
+            info!("No AB# references found in commit messages; skipping ADO work item fetch");
+            return Ok(());
+        }
+
+        // 3. Batch-fetch the referenced work items.
+        let ids: Vec<u32> = all_ids.iter().copied().collect();
+        let items = match client.get_work_items(&ids).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("ADO get_work_items failed: {e}");
+                return Ok(());
+            }
+        };
+        info!(
+            fetched = items.len(),
+            commits = commit_refs.len(),
+            "Fetched ADO work items for commits",
+        );
+
+        // 4. Persist work items and commit links in a single transaction.
+        let tx = db.connection_mut().transaction()?;
+        let fetched_ids: std::collections::HashSet<u32> = items.iter().map(|w| w.id).collect();
+        for w in &items {
+            let raw_json = serde_json::to_string(w).ok();
+            let tags_csv = if w.tags.is_empty() {
+                None
+            } else {
+                Some(w.tags.join(","))
+            };
+            let row = crate::core::db::WorkItemRow {
+                id: w.id.to_string(),
+                source: "azdo".to_string(),
+                title: w.title.clone(),
+                status: w.state.clone(),
+                item_type: w.work_item_type.clone(),
+                tags: tags_csv,
+                project: Some(w.team_project.clone()),
+                url: w.url.clone(),
+                raw_json,
+            };
+            crate::core::db::work_items::upsert_work_item(&tx, &row)?;
+        }
+        for (sha, ref_ids) in &commit_refs {
+            for id in ref_ids {
+                // Skip refs that ADO didn't return (deleted, scope-restricted)
+                // to avoid FK violations on the join table.
+                if !fetched_ids.contains(id) {
+                    continue;
+                }
+                crate::core::db::work_items::link_commit_work_item(
+                    &tx,
+                    sha,
+                    &id.to_string(),
+                    "azdo",
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 

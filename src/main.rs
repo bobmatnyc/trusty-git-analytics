@@ -70,6 +70,9 @@ pub struct AnalyzeArgs {
     /// Limit collection to the last N weeks of commits (overrides config start_date).
     #[arg(long, value_name = "N")]
     pub weeks: Option<u32>,
+    /// Perform all steps except writing to the database (log intent only).
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `tga collect`.
@@ -90,6 +93,9 @@ pub struct CollectArgs {
     /// Limit collection to the last N weeks of commits (overrides config start_date).
     #[arg(long, value_name = "N")]
     pub weeks: Option<u32>,
+    /// Perform all steps except writing to the database (log intent only).
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `tga classify`.

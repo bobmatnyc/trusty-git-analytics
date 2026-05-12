@@ -11,8 +11,25 @@ use crate::AnalyzeArgs;
 
 /// Run all three pipeline stages in sequence, honoring `--skip-collect`
 /// and `--skip-classify` flags to allow partial re-runs.
+///
+/// When `args.dry_run` is set, the entire pipeline executes against a
+/// transient in-memory SQLite database. The git walk, API calls, and
+/// classification still run so the user sees what *would* have happened,
+/// but the on-disk database is untouched.
 pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow::Result<()> {
     let mut cfg = config;
+
+    // Redirect writes to an in-memory database in dry-run mode. Note that
+    // `--dry-run` implies starting from an empty state, so `--skip-collect`
+    // becomes effectively a no-op (the shadow DB has no prior data).
+    let mut shadow_db;
+    let db: &mut Database = if args.dry_run {
+        tracing::info!("Dry run — no database writes will occur");
+        shadow_db = Database::open_in_memory()?;
+        &mut shadow_db
+    } else {
+        db
+    };
 
     // Apply output override up front so the final report stage sees it.
     if let Some(output) = args.output {
@@ -73,6 +90,10 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
     );
     for f in &report_stats.files_written {
         println!("  {}", f.display());
+    }
+
+    if args.dry_run {
+        println!("Dry run complete. No changes persisted to the on-disk database.");
     }
 
     Ok(())

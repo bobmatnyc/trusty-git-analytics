@@ -2,4 +2,4 @@
 
 pub mod client;
 
-pub use client::GitHubClient;
+pub use client::{GhLabel, GitHubClient, GitHubIssue};

@@ -45,6 +45,36 @@ struct ApiUser {
     login: String,
 }
 
+/// A GitHub issue as returned by the REST API.
+///
+/// This is the normalized payload returned by
+/// [`GitHubClient::fetch_issue`]. Only the subset of fields used by the
+/// project-management adapter are deserialized.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct GitHubIssue {
+    /// Issue number (the `N` in `#N`).
+    pub number: u64,
+    /// Issue title / summary.
+    pub title: String,
+    /// Workflow state — `"open"` or `"closed"`.
+    pub state: String,
+    /// Web URL to the issue on github.com.
+    pub html_url: String,
+    /// Labels applied to the issue.
+    #[serde(default)]
+    pub labels: Vec<GhLabel>,
+    /// Issue body / description (Markdown). May be absent or empty.
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// A GitHub label as returned alongside a [`GitHubIssue`].
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct GhLabel {
+    /// Label name (e.g. `"bug"`, `"enhancement"`).
+    pub name: String,
+}
+
 impl GitHubClient {
     /// Build a client from a [`GithubConfig`].
     ///
@@ -197,5 +227,94 @@ impl GitHubClient {
     /// Whether this client was constructed with an authentication token.
     pub fn has_token(&self) -> bool {
         self.token.is_some()
+    }
+
+    /// Fetch a single issue by number from the GitHub REST API.
+    ///
+    /// Hits `GET /repos/{owner}/{repo}/issues/{number}`. Uses the same
+    /// `Bearer` token (if any) as the bulk PR fetch.
+    ///
+    /// Returns `Ok(None)` when the API responds with `404 Not Found`
+    /// (deleted or invisible issue). All other non-success statuses, as
+    /// well as transport and JSON-parse failures, are propagated as
+    /// [`CollectError`].
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::Http`] on transport or non-`404` non-success HTTP
+    ///   responses.
+    /// - [`CollectError::Json`] on payload parse failures.
+    pub async fn fetch_issue(&self, number: u64) -> Result<Option<GitHubIssue>> {
+        let url = format!(
+            "{GITHUB_API_BASE}/repos/{}/{}/issues/{number}",
+            self.owner, self.repo
+        );
+        debug!(url = %url, "GET");
+        let resp = self.client.get(&url).send().await?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        let resp = resp.error_for_status()?;
+        let issue: GitHubIssue = resp.json().await?;
+        Ok(Some(issue))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Confirm that the wire shape returned by the GitHub Issues API
+    /// deserializes into `GitHubIssue` exactly.
+    ///
+    /// Why: protects against silent schema drift if GitHub renames or
+    /// nests one of the fields we depend on.
+    /// What: parses a representative JSON document.
+    /// Test: assert that all six fields round-trip with expected values.
+    #[test]
+    fn github_issue_deserializes_full_payload() {
+        let json = r#"{
+            "number": 42,
+            "title": "Crash on startup",
+            "state": "open",
+            "html_url": "https://github.com/o/r/issues/42",
+            "labels": [
+                {"name": "bug"},
+                {"name": "high-priority"}
+            ],
+            "body": "Stack trace: ..."
+        }"#;
+        let issue: GitHubIssue = serde_json::from_str(json).expect("parses");
+        assert_eq!(issue.number, 42);
+        assert_eq!(issue.title, "Crash on startup");
+        assert_eq!(issue.state, "open");
+        assert_eq!(issue.html_url, "https://github.com/o/r/issues/42");
+        assert_eq!(issue.labels.len(), 2);
+        assert_eq!(issue.labels[0].name, "bug");
+        assert_eq!(issue.labels[1].name, "high-priority");
+        assert_eq!(issue.body.as_deref(), Some("Stack trace: ..."));
+    }
+
+    /// `body` and `labels` may be missing — GitHub omits empty arrays in
+    /// some response shapes. Confirm the deserializer tolerates that.
+    ///
+    /// Why: serde defaults must apply, otherwise real API responses fail
+    /// to parse.
+    /// What: parses a minimal JSON document missing the optional fields.
+    /// Test: assert defaults for `labels` (empty) and `body` (`None`).
+    #[test]
+    fn github_issue_tolerates_missing_optional_fields() {
+        let json = r#"{
+            "number": 7,
+            "title": "Q",
+            "state": "closed",
+            "html_url": "https://github.com/o/r/issues/7"
+        }"#;
+        let issue: GitHubIssue = serde_json::from_str(json).expect("parses");
+        assert_eq!(issue.number, 7);
+        assert!(issue.labels.is_empty());
+        assert!(issue.body.is_none());
     }
 }
