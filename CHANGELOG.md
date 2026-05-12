@@ -5,6 +5,31 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-05-12
+
+### Added
+- **Classification**: Tier 0 manual override lookup (`classification_overrides` table), Tier 1.5 issue-type classifier (12-entry map, 0.90 confidence), Tier 3 JIRA project key mapping (0.95 confidence), classification coverage metrics persisted to DB, `--validate-coverage` flag
+- **LLM**: OpenRouter provider with required headers (`HTTP-Referer`, `X-Title`); AWS Bedrock provider feature-gated (`--features bedrock`, model `anthropic.claude-3-haiku-20240307-v1:0`)
+- **Reports**: 9 CSV reports (weekly_metrics, developer_activity_summary, summary, untracked_commits, weekly_categorization, weekly_velocity, weekly_dora_metrics), DORA 4-band classifier, velocity/PR cycle time, composite activity scoring, quality/revert detection, boilerplate filter; `velocity_summary.json`, `quality_summary.json`, `dora_summary.json`
+- **GitHub client**: `fetch_pr_reviews`, `fetch_pr_commits`, `list_issues`; exponential backoff on 5xx/429
+- **JIRA client**: `search_issues` (batch JQL, 50/page), `get_story_point_field`; `JiraIssue.story_points`
+- **Azure DevOps Phase 4**: `get_iterations`, `get_users`, `feed_azdo_users`→IdentityResolver; `azdo_iterations` table (migration v8)
+- **Azure DevOps Phase 5**: `get_work_item_comments`, `get_work_item_extended` (custom fields, iteration/area path), `get_work_item_commit_links`
+- **CLI**: `tga override add|list|remove`, `tga pr-metrics`, `tga install` wizard, `tga aliases list|merge`, `tga backfill ai-detection|revert-flags|ticket-ids`
+- **git remote fetch** before revwalk with non-interactive SSH auth; `--no-fetch` to skip
+- **`--from`/`--to`** date flags on `collect` and `analyze`; mutual exclusivity with `--weeks` enforced
+- **`--dry-run`** on `collect` and `analyze` — routes writes to in-memory DB
+- **`--validate-only`/`--no-validate`** flags; `ConfigValidator` with 9 error variants
+- **SQLite tuning**: `cache_size=-65536`, `temp_store=MEMORY`, `mmap_size=268435456`, `synchronous=NORMAL`, `foreign_keys=ON`; documented in `docs/adr/0001-sqlite-tuning.md`
+- **Criterion benchmarks**: 5 groups in `benches/tga_bench.rs` (classify throughput, aho-corasick, CSV gen, identity resolution, ISO weeks)
+- **Cross-compilation** release workflow: 4 targets (x86_64/aarch64 Linux musl, macOS Intel/Apple Silicon)
+- `docs/migration-from-python.md`, `docs/adr/0002-performance-hotspots.md`
+
+### Fixed
+- `since_date` config / `--weeks` flag now correctly limits git revwalk (was collecting full history)
+- `weekly_fetch_status` incremental skip now works — bounded path entered for `(since, None)` range
+- Warning + spinner emitted when full-history traversal is about to occur
+
 ## [0.2.0] — 2026-05-11
 
 ### Added
