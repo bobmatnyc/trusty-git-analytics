@@ -356,7 +356,7 @@ pub fn write_weekly_dora_csv(data: &ReportData, output_dir: &Path) -> Result<Pat
 /// the CSV cell is stable and machine-parseable.
 fn serialize_categories(map: &std::collections::HashMap<String, usize>) -> String {
     let mut entries: Vec<(&String, &usize)> = map.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries.sort_by_key(|e| e.0);
     entries
         .into_iter()
         .map(|(k, v)| format!("{k}={v}"))

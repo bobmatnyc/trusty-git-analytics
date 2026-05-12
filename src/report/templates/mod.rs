@@ -3,7 +3,7 @@
 //! Templates are embedded as `const &str` rather than loaded from disk so
 //! the report formatters work in any deployment without external files.
 
-/// Markdown summary template. See [`crate::formatters::markdown`].
+/// Markdown summary template. See [`crate::report::formatters::markdown`].
 pub const MARKDOWN_REPORT: &str = r#"# Git Activity Report
 
 Generated: {{ generated_at }}

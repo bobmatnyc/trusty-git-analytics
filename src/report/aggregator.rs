@@ -496,14 +496,14 @@ impl Aggregator {
                 last_commit: a.last.to_rfc3339(),
             })
             .collect();
-        author_summaries.sort_by(|x, y| y.commit_count.cmp(&x.commit_count));
+        author_summaries.sort_by_key(|a| std::cmp::Reverse(a.commit_count));
 
         // Materialize repositories.
         let mut repo_summaries: Vec<RepositorySummary> = repos
             .into_iter()
             .map(|(name, r)| {
                 let mut top: Vec<(String, usize)> = r.categories.into_iter().collect();
-                top.sort_by(|a, b| b.1.cmp(&a.1));
+                top.sort_by_key(|t| std::cmp::Reverse(t.1));
                 RepositorySummary {
                     name,
                     commit_count: r.commits,
@@ -514,7 +514,7 @@ impl Aggregator {
                 }
             })
             .collect();
-        repo_summaries.sort_by(|x, y| y.commit_count.cmp(&x.commit_count));
+        repo_summaries.sort_by_key(|r| std::cmp::Reverse(r.commit_count));
 
         // Build email → canonical display name map from the author summaries
         // so that the weekly activity rows display the same canonical name as
@@ -567,7 +567,7 @@ impl Aggregator {
         for (week, wt) in &week_totals {
             let total = wt.commits as f64;
             let mut entries: Vec<(&String, &usize)> = wt.categories.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
+            entries.sort_by_key(|e| e.0);
             for (cat, count) in entries {
                 weekly_categorization.push(WeeklyCategorization {
                     week: week.clone(),

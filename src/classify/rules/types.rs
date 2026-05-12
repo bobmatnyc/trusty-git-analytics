@@ -75,7 +75,7 @@ impl RuleSet {
     /// declaration order for rules with equal priority.
     pub fn by_priority(&self) -> Vec<&Rule> {
         let mut refs: Vec<&Rule> = self.rules.iter().collect();
-        refs.sort_by(|a, b| b.priority.cmp(&a.priority));
+        refs.sort_by_key(|r| std::cmp::Reverse(r.priority));
         refs
     }
 }

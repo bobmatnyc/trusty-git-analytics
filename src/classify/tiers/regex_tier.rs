@@ -32,7 +32,7 @@ impl RegexMatcher {
                 compiled.push((re, rule.clone()));
             }
         }
-        compiled.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
+        compiled.sort_by_key(|c| std::cmp::Reverse(c.1.priority));
         Ok(Self { compiled })
     }
 

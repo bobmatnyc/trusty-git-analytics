@@ -148,7 +148,7 @@ impl IdentityResolver {
     /// canonical name as authoritative.
     ///
     /// If `canonical_name` matches an existing canonical name on a member
-    /// in [`Self::members`], `resolve()` will return that member's
+    /// in `members`, `resolve()` will return that member's
     /// canonical email. Otherwise the canonical name is preserved but no
     /// canonical email is registered (callers can resolve by name only).
     ///

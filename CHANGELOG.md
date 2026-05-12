@@ -5,6 +5,60 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-05-12
+
+Final pre-release polish: data-quality guards for multi-repo analysis,
+identity-resolution honesty, and a clean CI gate.
+
+### Added
+
+- **Multi-repo coverage warning (#67)** — `ReportData` now carries a
+  `repository_coverage` field counting the distinct `commits.repository`
+  values observed in a run. The `analyze` command warns when this is
+  smaller than the configured `repositories[]` roster, so a misconfigured
+  scope no longer silently undercounts the portfolio.
+- **Phantom-developer guard (#68)** — `unresolved_authors` and
+  `unresolved_author_commits` are now tracked separately from the headline
+  developer counts. Commits whose author identity does not resolve to a
+  configured canonical team member are surfaced rather than inflating
+  active-developer tallies.
+- **WoW baseline drift detection (#69)** — `collection_runs` gains a
+  `repo_count` column (migration `0009_collection_runs_repo_count.sql`)
+  recording the size of `repositories[]` at the moment each row was
+  written. Week-over-week comparisons can now detect when the prior
+  baseline week was collected against a different repository roster and
+  refuse to draw spurious deltas.
+- **Restored `--log` flag (#66)** — `tga --log <path>` re-introduces the
+  pre-consolidation log redirection contract; all `tracing` output is
+  written to the supplied file in addition to stderr.
+
+### Fixed
+
+- **Clippy `unnecessary_sort_by`** — 8 closures of the shape
+  `sort_by(|a, b| a.field.cmp(&b.field))` rewritten as `sort_by_key`,
+  using `std::cmp::Reverse` for descending sorts. `cargo clippy
+  --all-targets -- -D warnings` is now clean.
+- **Rustdoc broken intra-doc links** — Fixed eight stale links left over
+  from the workspace consolidation. All references to `crate::models`,
+  `crate::aggregator`, and `crate::formatters` now point at their
+  consolidated paths under `crate::report::*`; bare `TopLevelCategory` and
+  `CollectError` references are fully qualified; private items
+  (`Self::members`, `Database::apply_pragmas`) use code formatting instead
+  of doc-links. `cargo doc --no-deps` is now warning-free.
+- **`duetto_contractors_config_resolves` identity resolver test** —
+  Verified passing against the bundled `configs/duetto-contractors.yaml`
+  fixture; "Andre Ramos" and the other listed contractors resolve
+  correctly via the configured alias map.
+
+### Documentation
+
+- `docs/requirements/database-schema.md` — Added the `collection_runs`
+  table definition and the new `repo_count` column; documented the Rust
+  port's re-indexed migrations (`0001`–`0009`).
+- `docs/requirements/reporting.md` — Documented the new
+  `repository_coverage`, `unresolved_authors`, and
+  `unresolved_author_commits` fields on `ReportData`.
+
 ## [1.0.0] — 2026-05-12
 
 First stable release. `trusty-git-analytics` is now feature-complete as a Rust port of

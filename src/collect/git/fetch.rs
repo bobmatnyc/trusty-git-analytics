@@ -32,7 +32,7 @@ use crate::collect::errors::Result;
 ///
 /// # Errors
 ///
-/// Currently returns [`CollectError`] only for unexpected libgit2 errors
+/// Currently returns [`crate::collect::CollectError`] only for unexpected libgit2 errors
 /// that aren't classified as auth/transport failures.
 pub fn fetch_remote(repo: &Repository, remote_name: &str) -> Result<()> {
     let mut remote = match repo.find_remote(remote_name) {

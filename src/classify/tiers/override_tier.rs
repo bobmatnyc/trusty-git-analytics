@@ -38,7 +38,7 @@ impl OverrideTier {
     /// Construct a new tier bound to `conn`.
     ///
     /// Uses the built-in taxonomy registry to resolve the override's
-    /// `change_type` back to a [`TopLevelCategory`]. Callers wanting to
+    /// `change_type` back to a [`crate::classify::taxonomy::TopLevelCategory`]. Callers wanting to
     /// honor user-defined subcategories should use [`Self::with_taxonomy`].
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
         Self {

@@ -1,7 +1,7 @@
 //! SQLite database access layer.
 //!
 //! All databases opened by this crate are configured with the following
-//! pragmas on every connection open (see [`Database::apply_pragmas`]):
+//! pragmas on every connection open (see `Database::apply_pragmas`):
 //!
 //! - `journal_mode = WAL` — concurrent reads during write-heavy collection
 //! - `synchronous = NORMAL` — durability with reasonable performance

@@ -164,6 +164,19 @@ Generated via `tera` template engine. Templates ship in `tga-report/templates/`.
 | `quality_summary.json` | Quality output data |
 | `comprehensive_export_{date}.json` | Full export for downstream consumers |
 
+### Coverage and unresolved-author fields
+
+`ReportData` carries three top-level integers that surface scope and
+identity-resolution health alongside the headline totals:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `repository_coverage` | `usize` | Number of distinct `commits.repository` values observed in this run. Use this to detect undercounting when the configured `repositories[]` roster is narrower than the actual portfolio (issue #67). |
+| `unresolved_authors` | `usize` | Count of distinct author identities (name/email pairs) that did not resolve to a configured canonical team member (issue #68). Guards against "phantom developers" silently inflating active-developer counts. |
+| `unresolved_author_commits` | `usize` | Count of commits whose author identity could not be resolved to a canonical team member (issue #68). These commits still appear in totals but are tracked separately. |
+
+All three fields are emitted in `comprehensive_export_{date}.json`.
+
 ---
 
 ## Anonymization

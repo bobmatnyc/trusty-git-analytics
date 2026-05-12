@@ -236,6 +236,26 @@ Migration tracking.
 | `applied_at` | DATETIME | |
 | `description` | TEXT | |
 
+### `collection_runs`
+
+Per-(repo, ISO-week) collection bookkeeping. One row per successfully
+collected `(repository, iso_year, iso_week)` tuple. The presence of a row
+signals to the per-week backfill iterator that this week is already
+collected (skip unless `--force` is supplied).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PK | Auto-increment |
+| `repo_name` | TEXT | |
+| `iso_year` | INTEGER | |
+| `iso_week` | INTEGER | |
+| `collected_at` | TEXT | ISO-8601 timestamp |
+| `commit_count` | INTEGER | Defaults to 0 |
+| `repo_count` | INTEGER | Size of `repositories[]` at write time. Added in migration v9 (#69). Defaults to 0 for legacy rows (treated as "unknown coverage"). |
+
+**Constraints**: UNIQUE(`repo_name`, `iso_year`, `iso_week`).
+**Indexes**: INDEX(`repo_name`, `iso_year`, `iso_week`).
+
 ### Additional Tables
 
 - `detailed_tickets` — full JIRA ticket detail snapshots
@@ -312,6 +332,20 @@ sequence of versioned SQL migrations at startup. Summary:
 | v16 | Add `weekly_fetch_status` immutability |
 | v17 | Add `ticketing_activity_cache` |
 | v18 | Add `confluence_page_cache` |
+
+### Rust port migrations (re-indexed `0001`–`0009`)
+
+| File | Description |
+|------|-------------|
+| `0001_initial_schema.sql` | Core tables for the Rust port |
+| `0002_linear_issues.sql` | Linear PM source |
+| `0003_commits_ticketed.sql` | `ticketed` flag on commits |
+| `0004_collection_runs.sql` | Per-(repo, ISO-week) bookkeeping |
+| `0005_work_items.sql` | Unified PM work-item table |
+| `0006_classification_overrides.sql` | Tier-0 manual overrides |
+| `0007_pr_metrics_and_backfill.sql` | PR metrics + ticket backfill |
+| `0008_azdo_iterations.sql` | Azure DevOps iterations |
+| `0009_collection_runs_repo_count.sql` | Issue #69 — `repo_count` column on `collection_runs` for WoW baseline drift detection |
 
 Future migrations (v19+) will be added for Rust-specific improvements.
 

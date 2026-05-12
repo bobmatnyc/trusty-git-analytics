@@ -1,8 +1,8 @@
 //! Report-specific aggregated data structures.
 //!
-//! These structs are populated by [`crate::aggregator::Aggregator`] from
+//! These structs are populated by [`crate::report::aggregator::Aggregator`] from
 //! database queries and then consumed by the formatters in
-//! [`crate::formatters`]. They are `serde`-friendly so that the JSON
+//! [`crate::report::formatters`]. They are `serde`-friendly so that the JSON
 //! formatter can emit [`ReportData`] directly.
 
 use std::collections::HashMap;
