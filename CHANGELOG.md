@@ -5,6 +5,19 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-11
+
+### Added
+- Unified `PmAdapter` trait abstracting JIRA, GitHub, Linear, and Azure DevOps behind a common `fetch_ticket` / `detect_ticket_refs` / `health_check` interface (`src/collect/pm_adapter.rs`)
+- Azure DevOps Phases 3–6: work item types, WIQL queries, batch fetch (200/chunk), AB# reference detection and enrichment; `AzureDevOpsAdapter::fetch_ticket` now fully implemented
+- `--weeks N` flag on `collect` and `analyze` subcommands — limits collection to the last N weeks (overrides config `start_date`)
+- `GitHubAdapter::fetch_ticket` — real implementation fetching individual GitHub Issues via REST API (was stub)
+- `--dry-run` flag on `collect` and `analyze` — runs the full pipeline against an in-memory DB, making no on-disk writes
+- SQLite persistence for work items: `work_items` table (migration v5), `commit_work_items` join table, and `upsert_work_item` / `link_commit_work_item` / `get_work_items_for_commit` / `list_work_items` DB operations
+
+### Changed
+- `AzureDevOpsAdapter::fetch_ticket` no longer stubs — returns populated `PmTicket` from batch work item fetch
+
 ## [Unreleased]
 
 ## [2026-05-11]
