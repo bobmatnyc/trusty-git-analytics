@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Utc};
 use git2::{Repository, Sort};
 use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::params;
@@ -180,6 +180,18 @@ impl GitCollector {
         );
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
+        // Derive date-only bounds from the (UTC) timestamps. The collector
+        // accepts UTC bounds for compatibility, but the user-facing semantic
+        // is a calendar window: `since_date` and `until_date` in the config
+        // are calendar dates, and a commit "belongs" to the calendar week of
+        // its *local* (authoring) date — not the UTC date the instant maps
+        // to. Issue #70: a commit at 2026-05-03 23:43 -0700 lives in UTC on
+        // 2026-05-04, but it is a Saturday W18 commit, not a Sunday W19
+        // commit. Compare by local date to fix both timezone drift across
+        // week boundaries and end-of-day inclusivity of `until_date`.
+        let since_date: Option<NaiveDate> = since.map(|s| s.date_naive());
+        let until_date: Option<NaiveDate> = until.map(|u| u.date_naive());
+
         let mut written = 0usize;
         let mut walked = 0usize;
         let tx = db.connection_mut().transaction()?;
@@ -205,22 +217,38 @@ impl GitCollector {
                     continue;
                 }
             };
+            let local_date = match commit_local_date(&commit) {
+                Some(d) => d,
+                None => {
+                    warn!(sha = %oid, "skipping commit with invalid local timestamp");
+                    continue;
+                }
+            };
 
             // Since commits are ordered newest-first by Sort::TIME, once we
-            // cross below `since` we can stop walking entirely. This is the
-            // primary fix for full-history traversal when --weeks/--from is
-            // set: prior code walked every commit then filtered post-hoc.
+            // cross below `since` we can stop walking entirely. The cutoff
+            // uses the UTC instant (Sort::TIME orders by UTC) but allows a
+            // 1-day grace so that a commit whose UTC instant is before
+            // `since` but whose *local* date still falls on/after `since`
+            // is not prematurely cut off.
             if let Some(s) = since {
-                if ts < s {
+                if ts < s - chrono::Duration::days(1) {
                     debug!(sha = %oid, ts = %ts, since = %s, "reached since bound; stopping revwalk");
                     break;
                 }
             }
-            if let Some(u) = until {
-                if ts > u {
-                    // Newer than upper bound — still need to keep walking
-                    // because we're going backwards and earlier commits
-                    // may still fall in range.
+
+            // Filter by local calendar date against the [since_date,
+            // until_date] window. Both bounds inclusive.
+            if let Some(sd) = since_date {
+                if local_date < sd {
+                    continue;
+                }
+            }
+            if let Some(ud) = until_date {
+                if local_date > ud {
+                    // Newer than upper bound — keep walking because earlier
+                    // commits may still fall in range.
                     continue;
                 }
             }
@@ -323,8 +351,286 @@ fn parse_iso_date(s: Option<&str>) -> Result<Option<DateTime<Utc>>> {
     )))
 }
 
+/// Convert a git commit author time to the *local* calendar date as recorded
+/// in the commit itself (i.e. using the author's timezone offset, not UTC).
+///
+/// Why: ISO-week assignment must respect the author's local date, otherwise
+/// commits made late in the evening in negative-UTC timezones get bumped
+/// into the next ISO week. See issue #70.
+fn commit_local_date(commit: &git2::Commit<'_>) -> Option<NaiveDate> {
+    let t = commit.time();
+    let offset = FixedOffset::east_opt(t.offset_minutes() * 60)?;
+    let local = offset.timestamp_opt(t.seconds(), 0).single()?;
+    Some(local.date_naive())
+}
+
 /// Convert a git commit author time to UTC `DateTime`.
 fn commit_time_utc(commit: &git2::Commit<'_>) -> Option<DateTime<Utc>> {
     let t = commit.time();
     Utc.timestamp_opt(t.seconds(), 0).single()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for issue #70: ISO-week boundary correctness across timezones
+    //! and end-of-day inclusivity of `until_date`.
+    //!
+    //! These tests build a small ephemeral git repository on disk with
+    //! commits at hand-crafted timestamps + timezone offsets, then run the
+    //! collector against it.
+
+    use super::*;
+    use crate::core::config::RepositoryConfig;
+    use crate::core::db::Database;
+    use chrono::NaiveDateTime;
+    use git2::{Repository, Signature, Time};
+    use std::path::{Path, PathBuf};
+
+    /// Compute the unix timestamp (in seconds) of a UTC wall-clock instant.
+    /// Tests express bounds in UTC and a separate offset, so the recorded
+    /// commit time has a known `(seconds, offset)` pair.
+    fn utc_seconds(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
+        let ndt = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(y, mo, d).expect("valid date"),
+            chrono::NaiveTime::from_hms_opt(h, mi, s).expect("valid time"),
+        );
+        Utc.from_utc_datetime(&ndt).timestamp()
+    }
+
+    struct TempRepo {
+        path: PathBuf,
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn unique_dir(label: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let unique = format!(
+            "tga-extractor-{}-{}-{}-{label}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            // Counter so multiple commits within the same nanosecond stay
+            // unique (path uniqueness, not commit uniqueness).
+            rand_like(),
+        );
+        p.push(unique);
+        p
+    }
+
+    fn rand_like() -> u64 {
+        // Cheap monotonically-increasing-ish nonce. We just need uniqueness
+        // within a single test run, not cryptographic randomness.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        N.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Build a fresh empty repository on disk.
+    fn init_repo(label: &str) -> (TempRepo, Repository) {
+        let path = unique_dir(label);
+        std::fs::create_dir_all(&path).expect("mkdir");
+        let repo = Repository::init(&path).expect("git init");
+        // Set a stable identity so commits don't depend on global config.
+        let mut cfg = repo.config().expect("repo config");
+        cfg.set_str("user.name", "Test").expect("set user.name");
+        cfg.set_str("user.email", "t@example.com")
+            .expect("set user.email");
+        (TempRepo { path }, repo)
+    }
+
+    /// Create a commit with the given (unix seconds, offset minutes) author
+    /// time. The commit touches a unique file so its tree is distinct from
+    /// every other commit (otherwise git would dedupe identical trees and
+    /// our walk wouldn't iterate over distinct shas).
+    fn commit_at(
+        repo: &Repository,
+        repo_path: &Path,
+        seconds: i64,
+        offset_minutes: i32,
+        msg: &str,
+    ) -> git2::Oid {
+        let filename = format!("f-{}.txt", rand_like());
+        let filepath = repo_path.join(&filename);
+        std::fs::write(&filepath, msg).expect("write file");
+        let mut index = repo.index().expect("index");
+        index
+            .add_path(Path::new(&filename))
+            .expect("index add_path");
+        index.write().expect("index write");
+        let tree_oid = index.write_tree().expect("write_tree");
+        let tree = repo.find_tree(tree_oid).expect("find_tree");
+
+        let time = Time::new(seconds, offset_minutes);
+        let sig =
+            Signature::new("Test", "t@example.com", &time).expect("signature with explicit time");
+
+        let parents: Vec<git2::Commit<'_>> = match repo.head() {
+            Ok(head) => vec![head.peel_to_commit().expect("peel")],
+            Err(_) => vec![],
+        };
+        let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
+
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+            .expect("commit")
+    }
+
+    fn open_in_memory_db() -> Database {
+        Database::open_in_memory().expect("open in-memory db")
+    }
+
+    /// Helper: collect all commit timestamps stored in the DB.
+    fn db_commit_timestamps(db: &Database) -> Vec<String> {
+        let conn = db.connection();
+        let mut stmt = conn
+            .prepare("SELECT timestamp FROM commits ORDER BY timestamp")
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query_map");
+        rows.map(|r| r.expect("row")).collect()
+    }
+
+    fn make_collector(path: &Path, since: Option<&str>, until: Option<&str>) -> GitCollector {
+        let cfg = RepositoryConfig {
+            name: Some("test-repo".to_string()),
+            path: path.to_path_buf(),
+            branch: None,
+            since_date: since.map(str::to_string),
+            until_date: until.map(str::to_string),
+        };
+        GitCollector::new(&cfg)
+            .expect("collector::new")
+            .no_fetch(true)
+    }
+
+    /// Issue #70 (cause #2): a commit timestamped late on the last day of an
+    /// ISO week in a negative-UTC timezone must remain assigned to *that*
+    /// week, not bump into the next.
+    ///
+    /// 2026-05-03 23:43:52 -0700  ==  2026-05-04 06:43:52 UTC
+    /// The commit's *local* date (W18 Sunday) must win when we filter on a
+    /// W18-aligned window [2026-04-27, 2026-05-03].
+    #[test]
+    fn commit_late_saturday_local_stays_in_iso_week() {
+        let (_t, repo) = init_repo("iso-week-boundary");
+        // 2026-05-03 23:43:52 -0700  ==  2026-05-04 06:43:52 UTC
+        let seconds = utc_seconds(2026, 5, 4, 6, 43, 52);
+        let offset_minutes = -7 * 60;
+        commit_at(
+            &repo,
+            _t.path.as_path(),
+            seconds,
+            offset_minutes,
+            "late sat",
+        );
+
+        // W18 2026 window: Mon 2026-04-27 .. Sun 2026-05-03 (inclusive,
+        // local-calendar). Express the bounds the same way the by-week
+        // collector does: YYYY-MM-DD strings.
+        let collector = make_collector(_t.path.as_path(), Some("2026-04-27"), Some("2026-05-03"));
+        let mut db = open_in_memory_db();
+        let written = collector.collect(&mut db).expect("collect");
+        assert_eq!(
+            written, 1,
+            "commit at 23:43 -0700 on Sun 2026-05-03 must be assigned \
+             to W18, not bumped into W19 by UTC drift"
+        );
+    }
+
+    /// `until_date` must be inclusive: a commit on the exact `until_date`
+    /// (in its own local timezone) must be collected.
+    #[test]
+    fn until_date_is_inclusive_end_of_day() {
+        let (_t, repo) = init_repo("until-inclusive");
+        // 2026-05-10 23:30:00 +0200  ==  2026-05-10 21:30:00 UTC
+        let seconds = utc_seconds(2026, 5, 10, 21, 30, 0);
+        let offset_minutes = 2 * 60;
+        commit_at(
+            &repo,
+            _t.path.as_path(),
+            seconds,
+            offset_minutes,
+            "late sun",
+        );
+
+        let collector = make_collector(_t.path.as_path(), Some("2026-05-04"), Some("2026-05-10"));
+        let mut db = open_in_memory_db();
+        let written = collector.collect(&mut db).expect("collect");
+        assert_eq!(
+            written, 1,
+            "commit on the exact until_date must be included (inclusive bound)"
+        );
+
+        let rows = db_commit_timestamps(&db);
+        assert_eq!(rows.len(), 1, "exactly one row written");
+    }
+
+    /// A commit on the first day of a week (Monday) must be included when
+    /// the window starts on that Monday.
+    #[test]
+    fn first_day_of_week_is_inclusive() {
+        let (_t, repo) = init_repo("first-day-inclusive");
+        // 2026-04-27 00:30:00 UTC — first commit of W18 at minute 30.
+        let seconds = utc_seconds(2026, 4, 27, 0, 30, 0);
+        commit_at(&repo, _t.path.as_path(), seconds, 0, "monday early");
+
+        let collector = make_collector(_t.path.as_path(), Some("2026-04-27"), Some("2026-05-03"));
+        let mut db = open_in_memory_db();
+        let written = collector.collect(&mut db).expect("collect");
+        assert_eq!(
+            written, 1,
+            "commit on the exact since_date must be included (inclusive bound)"
+        );
+    }
+
+    /// A commit strictly outside the window must be filtered out.
+    #[test]
+    fn commit_after_until_date_is_excluded() {
+        let (_t, repo) = init_repo("after-until");
+        // 2026-05-11 12:00 UTC — strictly after until_date 2026-05-10.
+        let seconds = utc_seconds(2026, 5, 11, 12, 0, 0);
+        commit_at(&repo, _t.path.as_path(), seconds, 0, "next monday");
+
+        let collector = make_collector(_t.path.as_path(), Some("2026-05-04"), Some("2026-05-10"));
+        let mut db = open_in_memory_db();
+        let written = collector.collect(&mut db).expect("collect");
+        assert_eq!(written, 0, "commit on 2026-05-11 must NOT be in W19 window");
+    }
+
+    /// Direct unit test of `commit_local_date`: a commit at 2026-05-03
+    /// 23:43:52 -0700 must report local date 2026-05-03 (not 2026-05-04).
+    #[test]
+    fn commit_local_date_uses_authoring_timezone() {
+        let (_t, repo) = init_repo("local-date-helper");
+        // 2026-05-04 06:43:52 UTC = 2026-05-03 23:43:52 -0700.
+        let seconds = utc_seconds(2026, 5, 4, 6, 43, 52);
+        let offset_minutes = -7 * 60;
+        let oid = commit_at(
+            &repo,
+            _t.path.as_path(),
+            seconds,
+            offset_minutes,
+            "late sat",
+        );
+        let commit = repo.find_commit(oid).expect("find_commit");
+        let local = commit_local_date(&commit).expect("local date");
+        assert_eq!(
+            local,
+            NaiveDate::from_ymd_opt(2026, 5, 3).expect("valid"),
+            "commit_local_date must respect the author's recorded offset"
+        );
+        // Sanity: UTC date would have been 2026-05-04.
+        let utc = commit_time_utc(&commit).expect("utc");
+        assert_eq!(
+            utc.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 5, 4).unwrap()
+        );
+    }
 }
