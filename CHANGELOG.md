@@ -5,6 +5,12 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-05-12
+
+### Fixed
+- **Timezone-aware ISO week assignment** (#70): commits timestamped late on the last day of an ISO week in a negative UTC offset timezone (e.g. -0700) were incorrectly placed in the following week due to UTC conversion. Collection window now uses the commit's local calendar date.
+- **`until_date` inclusivity**: date range upper bound is now treated as end-of-day inclusive.
+
 ## [1.0.1] — 2026-05-12
 
 Final pre-release polish: data-quality guards for multi-repo analysis,
