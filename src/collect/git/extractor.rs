@@ -132,45 +132,66 @@ impl GitCollector {
             None => revwalk.push_head()?,
         }
 
-        // Collect candidate OIDs first so we have a progress total.
-        let oids: Vec<git2::Oid> = revwalk.filter_map(|r| r.ok()).collect();
-        let pb = ProgressBar::new(oids.len() as u64);
+        // Spinner-style progress bar — we stream the revwalk so we don't
+        // know the total in advance. This is intentional: materialising
+        // every OID up-front on a 58K-commit monolith eats memory AND
+        // forces a full-history walk before the time filter can take
+        // effect. With Sort::TIME the walk yields newest-first, so we can
+        // safely break the moment we cross the `since` boundary.
+        let pb = ProgressBar::new_spinner();
         pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner} [{bar:40.cyan/blue}] {pos}/{len} commits {msg}",
-            )
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+            ProgressStyle::with_template("{spinner} {pos} commits walked {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
         );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         let mut written = 0usize;
+        let mut walked = 0usize;
         let tx = db.connection_mut().transaction()?;
-        for oid in &oids {
-            let commit = repo.find_commit(*oid)?;
+        for oid_res in revwalk {
+            let oid = match oid_res {
+                Ok(o) => o,
+                Err(e) => {
+                    warn!(error = %e, "revwalk yielded error; stopping traversal");
+                    break;
+                }
+            };
+            walked += 1;
+            pb.set_position(walked as u64);
+            if walked % 1000 == 0 {
+                info!(repo = %self.name, walked, written, "extraction progress");
+            }
+
+            let commit = repo.find_commit(oid)?;
             let ts = match commit_time_utc(&commit) {
                 Some(t) => t,
                 None => {
                     warn!(sha = %oid, "skipping commit with invalid timestamp");
-                    pb.inc(1);
                     continue;
                 }
             };
 
+            // Since commits are ordered newest-first by Sort::TIME, once we
+            // cross below `since` we can stop walking entirely. This is the
+            // primary fix for full-history traversal when --weeks/--from is
+            // set: prior code walked every commit then filtered post-hoc.
             if let Some(s) = since {
                 if ts < s {
-                    pb.inc(1);
-                    continue;
+                    debug!(sha = %oid, ts = %ts, since = %s, "reached since bound; stopping revwalk");
+                    break;
                 }
             }
             if let Some(u) = until {
                 if ts > u {
-                    pb.inc(1);
+                    // Newer than upper bound — still need to keep walking
+                    // because we're going backwards and earlier commits
+                    // may still fall in range.
                     continue;
                 }
             }
 
             let is_merge = commit.parent_count() > 1;
             if self.skip_merges && is_merge {
-                pb.inc(1);
                 continue;
             }
 
@@ -227,10 +248,9 @@ impl GitCollector {
                 }
                 written += 1;
             }
-            pb.inc(1);
         }
         tx.commit()?;
-        pb.finish_with_message(format!("done ({written} new)"));
+        pb.finish_with_message(format!("done ({walked} walked, {written} new)"));
         debug!(repo = %self.name, written, "commit extraction complete");
         Ok(written)
     }

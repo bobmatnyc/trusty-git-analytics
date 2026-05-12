@@ -221,14 +221,59 @@ impl CollectionPipeline {
         let repo_name = collector.name().to_string();
 
         // Derive the [from, to] NaiveDate window from the collector's
-        // configured since/until. If no bounds are set, fall back to
-        // collecting the entire history in one shot.
+        // configured since/until. The week-level skip mechanism (the
+        // `collection_runs` table) is the only reason re-running on a
+        // 58K-commit repo is tolerable, so we want to take the bounded
+        // path whenever AT LEAST a `since` bound is available, defaulting
+        // `to` to "today" when `until` is absent (the common case for
+        // --weeks / --from).
+        //
+        // The fully-unbounded path (no `since` at all) is dangerous on
+        // large monorepos: full-history traversal + no week bookkeeping
+        // means a re-run repeats the entire walk. We keep it for
+        // backwards compatibility but warn loudly.
         let (from, to) = match (collector.since(), collector.until()) {
             (Some(s), Some(u)) => (s.date_naive(), u.date_naive()),
-            _ => {
-                // No date bounds → bypass week-level bookkeeping. This
-                // preserves prior behaviour for repos configured without
-                // since/until dates.
+            (Some(s), None) => (s.date_naive(), Utc::now().date_naive()),
+            (None, Some(u)) => {
+                // Unusual: `until` without `since`. Treat the window as
+                // open-ended on the lower side and walk full history up
+                // to `until` — emit the same warning as the fully
+                // unbounded case so the user knows.
+                warn!(
+                    repo = %repo_name,
+                    "until_date set without since_date — collecting full git history. \
+                     Use --weeks N or set analysis.since_date in config to limit scope."
+                );
+                eprintln!(
+                    "warning: [{repo_name}] no since_date / --weeks — collecting FULL git history. \
+                     Set analysis.since_date or pass --weeks N to limit scope."
+                );
+                match collector.collect_window(db, None, Some(u)) {
+                    Ok(n) => {
+                        info!(repo = %repo_name, commits = n, "extracted (until-only)");
+                        stats.commits_collected += n;
+                    }
+                    Err(e) => {
+                        let msg = format!("collection failed for {repo_name}: {e}");
+                        warn!("{msg}");
+                        stats.errors.push(msg);
+                    }
+                }
+                return;
+            }
+            (None, None) => {
+                // Fully unbounded — full history traversal with no week
+                // bookkeeping. Warn explicitly per Bug #65.
+                warn!(
+                    repo = %repo_name,
+                    "no since_date or --weeks flag set — collecting full git history. \
+                     Use --weeks N or set analysis.since_date in config to limit scope."
+                );
+                eprintln!(
+                    "warning: [{repo_name}] no since_date / --weeks — collecting FULL git history. \
+                     Set analysis.since_date or pass --weeks N to limit scope."
+                );
                 match collector.collect(db) {
                     Ok(n) => {
                         info!(repo = %repo_name, commits = n, "extracted (unbounded)");
