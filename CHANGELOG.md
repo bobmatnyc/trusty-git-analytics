@@ -5,6 +5,12 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-05-12
+
+### Fixed
+- **GitHub PR fetch resilience (#73)** — `fetch_pull_requests` now routes through the same `retry_request` helper used by every other paginated GitHub endpoint. A single 429 or 5xx response no longer fails the entire PR collection run; transient errors are retried with exponential backoff.
+- **Pull-request deduplication (#71)** — `INSERT OR REPLACE INTO pull_requests` was a silent no-op: the existing `idx_pull_requests_pr_number` index was non-UNIQUE, so SQLite's conflict resolution never fired and PRs accumulated on every re-run. Migration `0010_pull_requests_provider.sql` adds a `provider` column (default `'github'`) and a UNIQUE index on `(provider, pr_number)`. `store_pull_requests` now writes the provider explicitly so deduplication works correctly per provider.
+
 ## [1.0.4] - 2026-05-12
 
 ### Added
