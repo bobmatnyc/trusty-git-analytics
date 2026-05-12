@@ -36,23 +36,31 @@ mapping, database differences, and a step-by-step checklist.
 
 ### Current Limitations of tga (honest)
 
-These features exist in gfa but are not yet in tga. If you depend on them, run gfa alongside tga
-(see [section 8](#8-running-both-in-parallel)) or wait for a future tga release.
+As of v1.0.0, `tga` reproduces every analytical output that `gfa` produces. The following
+gfa-era gaps have been **closed in v1.0.0**:
 
-- DORA metrics (`lead_time`, `deployment_frequency`, `change_failure_rate`, `mttr`)
-- ML categorization (spaCy-based)
-- Story point extraction (`jira.fetch_story_points`, `story_point_fields`)
-- `ticketing_score` column and compliance reporting
-- Override management (`gfa override set/list/clear`)
-- Interactive identity wizard (`gfa identities`)
-- `gfa aliases export` / import wizard
-- `--weeks N` flag (use explicit ISO date range instead)
-- Data anonymization / pseudonymization
-- Org-wide repo discovery
-- AWS Bedrock LLM provider (tga is OpenAI-only)
-- `backfill-*` subcommands for retroactive enrichment
+- DORA metrics (`lead_time`, `deployment_frequency`, `change_failure_rate`, `mttr`) — now
+  emitted as `weekly_dora_metrics.csv` + `dora_summary.json`
+- Story point extraction — `jira_integration.fetch_story_points` + `story_point_fields`
+  supported; `qualitative_commits.story_points` populated
+- Override management — `tga override add|list|remove` (Tier 0 manual overrides)
+- AWS Bedrock LLM provider — available behind the `bedrock` cargo feature; OpenRouter is
+  the default
+- `--weeks N` flag — supported on `analyze` / `collect` / `classify` / `report` /
+  `fetch` / `pr-metrics`
+- `backfill-*` subcommands — `tga backfill ai-detection|revert-flags|ticket-ids`
+- Identity merge — `tga aliases merge` and `tga identities merge`
+
+The following gfa features remain not yet implemented in tga (run gfa alongside tga or open
+an issue if you depend on them):
+
+- ML categorization via spaCy / scikit-learn (tga uses rule-based + LLM only)
+- Interactive identity consolidation wizard (tga has CLI commands, not an interactive UI)
+- Data anonymization / pseudonymization pipeline at report time (tga has `--anonymize`
+  identity masking; full pseudonymization pipeline is not yet ported)
+- Org-wide repo discovery without an explicit repo list
 - ClickUp ticket pattern detection
-- Confluence integration
+- Full Confluence integration (schema stubbed, fetcher not implemented)
 
 ---
 

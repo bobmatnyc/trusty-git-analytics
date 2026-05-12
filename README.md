@@ -4,7 +4,7 @@ Analyze git repositories to measure developer productivity — classify commit w
 
 ## What It Does
 
-`tga` walks one or more local git repositories, collects every commit into a SQLite database, classifies each commit into a work category (feature, bugfix, refactor, etc.) using a four-tier rule cascade, then aggregates the results into per-author and per-week reports. It is a Rust port of [gitflow-analytics](https://github.com/bobmatnyc/gitflow-analytics) with the same YAML config schema and the same SQLite schema — existing config files work without modification.
+`tga` walks one or more local git repositories, collects every commit into a SQLite database, classifies each commit into a work category (feature, bugfix, refactor, etc.) using a seven-tier classification cascade, then aggregates the results into per-author, per-week, DORA, velocity, and quality reports. It is a feature-complete Rust port of [gitflow-analytics](https://github.com/bobmatnyc/gitflow-analytics) with the same YAML config schema and the same SQLite schema — existing config files work without modification.
 
 ## Installation
 
@@ -237,32 +237,38 @@ tga report --output ./q1-reports --formats csv,json
 
 ```
 git repos ──┐
-             │  tga-collect   SQLite (tga.db)  tga-classify   SQLite   tga-report
-GitHub API ──┼─────────────► [commits]        ──────────────► [classif]─────────► CSV
-JIRA API ────┤  (libgit2,     [authors]          (rules +              ► JSON
-Linear API ──┤  reqwest)      [pull_requests]    LLM fallback)        ► Markdown
-ADO API  ───┘
+             │   collect      SQLite (tga.db)   classify       SQLite    report
+GitHub API ──┼──────────────► [commits]        ──────────────► [classif]─────────► CSV (×9)
+JIRA API ────┤   (libgit2,    [authors]         (7-tier                 ► JSON
+Linear API ──┤   reqwest)     [pull_requests]   cascade,                ► Markdown
+ADO API  ────┘                [work_items]      Rayon-parallel)
 ```
 
-**Stage 1 — collect** (`tga-collect`): opens each repository with libgit2, walks the configured branch, extracts commit metadata and diff stats, resolves author identities, optionally fetches GitHub PR metadata via the REST API, and writes everything to SQLite.
+**Stage 1 — collect** (`tga::collect`): opens each repository with libgit2, walks the configured branch, extracts commit metadata and diff stats, resolves author identities, fetches GitHub PR / JIRA issue / Linear / Azure DevOps work item metadata via REST/GraphQL, and writes everything to SQLite.
 
-**Stage 2 — classify** (`tga-classify`): reads unclassified commits from the database, runs each message through the four-tier cascade (see below), and writes a classification verdict back. Tiers 1–3 execute in parallel via Rayon.
+**Stage 2 — classify** (`tga::classify`): reads unclassified commits from the database, runs each message through the seven-tier cascade (see below), and writes a classification verdict back. Rule-based tiers execute in parallel via Rayon.
 
-**Stage 3 — report** (`tga-report`): reads the classified database, aggregates per-author and per-week statistics, and writes the configured output formats to the output directory.
+**Stage 3 — report** (`tga::report`): reads the classified database, aggregates per-author, per-week, DORA, velocity, and quality statistics, and writes the configured output formats to the output directory.
 
 ## Classification
 
-### Four-Tier Cascade
+### Seven-Tier Cascade
 
-Each commit message is tested against tiers in order. The first match wins.
+Each commit message is tested against tiers in order. The first tier to produce a confident result wins.
 
-**Tier 1 — Exact (Aho-Corasick)**: builds a single finite-state machine from all keyword lists across all rules, then scans the message in O(n) time. Matches `feat:`, `fix:`, `chore:`, etc. Confidence: 0.85–0.95.
+**Tier 0 — Manual Override** (confidence 1.0): looks up the `(commit_hash, repo_path)` pair in the `classification_overrides` table. Managed via `tga override add|list|remove`.
 
-**Tier 2 — Regex**: applies pre-compiled regex patterns from rules. Handles anchored conventional-commit patterns (`^feat(\([^)]*\))?!?:`) and JIRA ticket IDs (`\b[A-Z][A-Z0-9]+-\d+\b`).
+**Tier 1.5 — Issue Type** (confidence 0.90): when the commit has ticket references resolving to rows in `issue_cache`, maps the upstream issue type (`bug`, `story`, `task`, `spike`, etc.) directly to a `change_type`.
 
-**Tier 3 — Fuzzy heuristics**: detects merge commits (via `is_merge` flag or "Merge pull request" prefix) and reverts (via "Revert" prefix). No external dependencies.
+**Tier 3 — JIRA Project Mapping** (confidence 0.95): when `jira_project_mappings` is configured, maps the JIRA project key prefix of any `[A-Z]+-\d+` reference to a `change_type`.
 
-**Tier 4 — LLM fallback** (optional, async): calls an OpenAI-compatible API when tiers 1–3 all fail. Reads `OPENAI_API_KEY` from the environment. Disabled by default; enable with `classification.use_llm: true` or `--use-llm`.
+**Tier 4 — Exact (Aho-Corasick)**: builds a single finite-state machine from every keyword list across every rule and scans the message in O(n) time. Matches `feat:`, `fix:`, `chore:`, etc. Confidence 0.85–0.95.
+
+**Tier 5 — Regex**: applies pre-compiled regex patterns from the rule set. Handles anchored conventional-commit patterns (`^feat(\([^)]*\))?!?:`) and JIRA ticket IDs (`\b[A-Z][A-Z0-9]+-\d+\b`).
+
+**Tier 6 — Fuzzy heuristics**: detects merge commits (via `is_merge` flag or `Merge pull request` prefix) and reverts (via `Revert` prefix). No external dependencies.
+
+**Tier 7 — LLM fallback** (optional, async): calls an OpenAI-compatible API (**OpenRouter** by default, **AWS Bedrock** behind the `bedrock` cargo feature) when tiers 0–6 leave a commit in a fallthrough category. Disabled by default; enable with `analysis.llm_classification.enabled: true` or `--use-llm`. Results are only accepted when `confidence >= confidence_threshold` (default 0.7).
 
 ### Default Rules
 
@@ -433,10 +439,10 @@ tga analyze --config configs/example-config.yaml --database tga.db
 ### CI Gates
 
 The GitHub Actions workflow (`ci.yml`) requires:
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
-- `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
+- `cargo fmt -- --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
+- `cargo doc --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 
 ## Crate Structure
 
@@ -446,7 +452,7 @@ Single `tga` crate (consolidated from the original 5-crate workspace):
 |--------|------|---------|
 | `tga::core` | `src/core/` | Shared types, config, DB schema, migrations, error types |
 | `tga::collect` | `src/collect/` | Stage 1: git extraction (libgit2), GitHub/JIRA/Linear/ADO clients, `PmAdapter` trait |
-| `tga::classify` | `src/classify/` | Stage 2: four-tier classification cascade |
+| `tga::classify` | `src/classify/` | Stage 2: seven-tier classification cascade |
 | `tga::report` | `src/report/` | Stage 3: CSV/JSON/Markdown output |
 | `commands` (binary-private) | `src/commands/` | Subcommand handlers wired into `src/main.rs` |
 

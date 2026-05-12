@@ -5,6 +5,53 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-05-12
+
+First stable release. `trusty-git-analytics` is now feature-complete as a Rust port of
+[`gitflow-analytics`](https://github.com/bobmatnyc/gitflow-analytics): every analytical
+output the Python tool produces is reproduced by `tga` from the same YAML config, against
+the same SQLite schema, with materially better performance and a single static binary.
+
+### Highlights
+
+- **Single `tga` crate** — consolidated from the original 5-crate workspace into one
+  library + binary for faster builds, simpler dependency graph, and a cleaner public API.
+- **8 CLI subcommands**: `analyze`, `collect`, `classify`, `report`, `init`,
+  `validate-config`, `migrate`, `override` (plus auxiliary `aliases`, `backfill`,
+  `pr-metrics`, `identities`, `install`, `fetch`).
+- **7-tier classification cascade**: manual override → issue type → JIRA project mapping
+  → exact (Aho-Corasick) → regex → fuzzy heuristics → LLM fallback, with both **AWS
+  Bedrock** and **OpenRouter** as supported LLM providers (Bedrock behind the `bedrock`
+  cargo feature).
+- **9 CSV reports** plus DORA, velocity, and quality summaries:
+  `weekly_metrics`, `developer_activity_summary`, `summary`, `untracked_commits`,
+  `weekly_categorization`, `weekly_velocity`, `weekly_dora_metrics`, `authors`,
+  `weekly_activity` — with `velocity_summary.json`, `quality_summary.json`, and
+  `dora_summary.json` alongside.
+- **Full data collection layer**: libgit2 commit extraction, identity resolution
+  (exact + Jaro-Winkler fuzzy + email local-part normalized), GitHub REST client
+  (PRs, reviews, commits, issues), JIRA Cloud client (JQL batch search, story points),
+  Linear GraphQL client, Azure DevOps REST client (work items, iterations, users,
+  comments, custom fields, commit links).
+- **SQLite with WAL** on every open: `journal_mode=WAL`, `synchronous=NORMAL`,
+  `foreign_keys=ON`, `cache_size=-65536`, `temp_store=MEMORY`, `mmap_size=256 MiB`.
+- **Schema migration runner** applying versioned SQL migrations v1–v18 (ported from
+  Python predecessor) plus Rust-era additions, recorded transactionally in
+  `schema_migrations`.
+- **247 tests passing** — unit, integration, and doctests — with zero clippy warnings
+  and `cargo fmt --check` clean.
+- **Cross-platform release binaries** published from CI for five targets:
+  `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
+  `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
+
+### Compatibility
+
+- Config files written for `gitflow-analytics` load without modification — unknown keys
+  are silently ignored.
+- The on-disk SQLite schema is the same shape; existing `gitflow_cache.db` files from
+  `gfa` can be opened by `tga` and auto-migrated forward.
+- Classification rule files (YAML/JSON) are portable in both directions.
+
 ## [0.3.0] — 2026-05-12
 
 ### Added

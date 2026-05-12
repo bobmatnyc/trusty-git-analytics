@@ -9,15 +9,16 @@ document is a dense technical reference for AI agents operating autonomously.
 
 **What tga does**: Three-stage pipeline over git repositories:
 
-1. **Collect** — extract commits via `git2`, correlate with GitHub PRs/JIRA tickets, resolve
-   developer identities, persist to SQLite
-2. **Classify** — assign each commit a `change_type` via a four-tier cascade (overrides →
-   issue type → JIRA mapping → LLM → rule-based fallback)
-3. **Report** — aggregate into CSV/JSON/Markdown outputs
+1. **Collect** — extract commits via `git2`, correlate with GitHub PRs / JIRA tickets /
+   Linear issues / ADO work items, resolve developer identities, persist to SQLite
+2. **Classify** — assign each commit a `change_type` via a seven-tier cascade (override →
+   issue type → JIRA mapping → exact → regex → fuzzy → LLM fallback)
+3. **Report** — aggregate into CSV (×9) / JSON / Markdown outputs, including DORA,
+   velocity, and quality summaries
 
 **Binary**: `tga` — single Rust binary, also ships as `tga::*` library crate  
 **Build output**: `target/release/tga`  
-**Crates.io**: `tga` v0.1.0  
+**Crates.io**: `tga` v1.0.0  
 **DB**: SQLite (`gitflow_cache.db` + `identities.db`); WAL mode enabled automatically on open  
 **Python predecessor**: `gitflow-analytics` at `/Users/masa/Projects/gitflow-analytics`
 (GitHub: `bobmatnyc/gitflow-analytics`)
@@ -465,7 +466,7 @@ output:
 
 ## 5. Classification System
 
-### Four-tier cascade
+### Seven-tier cascade
 
 The first tier to produce a result wins. Every commit receives a classification — there is
 no unclassified state.
@@ -475,8 +476,11 @@ no unclassified state.
 | 0 | **Manual Override** | 1.0 | `classification_overrides` table has entry for `(commit_hash, repo_path)` |
 | 1.5 | **Issue Type** | 0.90 | Commit has `ticket_references` resolving to `issue_cache` rows |
 | 3 | **JIRA Project Mapping** | 0.95 | `jira_project_mappings` configured AND commit refs match `[A-Z]+-\d+` |
-| 4 | **LLM** | configurable (default 0.7) | LLM enabled; result accepted only when `confidence >= confidence_threshold` |
-| — | **Rule-Based Fallback** | varies | Always available; Aho-Corasick multi-pattern matching |
+| 4 | **Exact (Aho-Corasick)** | 0.85–0.95 | Multi-pattern keyword match across all rules |
+| 5 | **Regex** | rule-defined | Pre-compiled `Regex` patterns from rule set |
+| 6 | **Fuzzy heuristics** | 0.70–0.85 | Merge / revert detection, prefix heuristics |
+| 7 | **LLM** | configurable (default 0.7) | LLM enabled; result accepted only when `confidence >= confidence_threshold`. Providers: **OpenRouter** (default), **AWS Bedrock** (with `--features bedrock`) |
+| — | **Rule-Based Fallback** | 0.30–0.50 | Always available catch-all; defaults to `maintenance` |
 
 **Tier 1.5 — Issue type → change_type map**
 
@@ -992,7 +996,7 @@ tga classify \
 cd /Users/masa/Projects/trusty-git-analytics
 cargo build                         # debug build
 cargo build --release               # release binary
-cargo test                          # all tests (31 unit + 1 gated integration)
+cargo test                          # all tests (247 total: unit + integration + doctests)
 cargo clippy -- -D warnings         # must be zero warnings for CI
 cargo fmt --check                   # formatting gate
 ```
