@@ -28,9 +28,11 @@ use crate::core::errors::{Result, TgaError};
 
 pub mod aliases;
 pub mod azdo;
+pub mod validator;
 
 pub use aliases::{AliasFile, DeveloperAliasEntry};
 pub use azdo::AzureDevOpsConfig;
+pub use validator::{ConfigError, ConfigValidator};
 
 /// Top-level configuration root.
 ///

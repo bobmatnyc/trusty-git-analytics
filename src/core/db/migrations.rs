@@ -61,6 +61,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "pr_metrics_and_backfill",
         sql: include_str!("sql/0007_pr_metrics_and_backfill.sql"),
     },
+    Migration {
+        version: 8,
+        name: "azdo_iterations",
+        sql: include_str!("sql/0008_azdo_iterations.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

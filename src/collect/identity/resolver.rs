@@ -139,6 +139,45 @@ impl IdentityResolver {
         self
     }
 
+    /// Register an alias → canonical-name mapping after construction.
+    ///
+    /// Used by external-system ingestion helpers (e.g.
+    /// [`crate::collect::azdo::feed_azdo_users`]) to seed the resolver with
+    /// directory-derived identities discovered at runtime. Aliases are
+    /// stored lowercased; subsequent [`Self::resolve`] calls treat the
+    /// canonical name as authoritative.
+    ///
+    /// If `canonical_name` matches an existing canonical name on a member
+    /// in [`Self::members`], `resolve()` will return that member's
+    /// canonical email. Otherwise the canonical name is preserved but no
+    /// canonical email is registered (callers can resolve by name only).
+    ///
+    /// Empty `alias` or `canonical_name` values are ignored.
+    ///
+    /// If `canonical_name` is not already known as a member, a synthetic
+    /// member entry is registered with the alias as its canonical email
+    /// (if the alias looks like an email — i.e. contains `@`) so that
+    /// [`Self::resolve`] can return the canonical pair. If no existing
+    /// member is found and the alias is not an email, the synthetic
+    /// member is registered with an empty email.
+    pub fn add_alias(&mut self, alias: &str, canonical_name: &str) {
+        let alias = alias.trim();
+        let canonical = canonical_name.trim();
+        if alias.is_empty() || canonical.is_empty() {
+            return;
+        }
+        self.aliases
+            .insert(alias.to_lowercase(), canonical.to_string());
+        if self.find_member_by_name(canonical).is_none() {
+            let canonical_email = if alias.contains('@') {
+                alias.to_string()
+            } else {
+                String::new()
+            };
+            self.members.push((canonical.to_string(), canonical_email));
+        }
+    }
+
     /// Resolve a raw `(name, email)` pair to canonical form.
     ///
     /// Returns the input unchanged if no rule matches.

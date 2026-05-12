@@ -174,6 +174,46 @@ pub struct WiqlResult {
     pub work_items: Vec<WorkItemRef>,
 }
 
+/// ADO iteration / sprint descriptor (Phase 4 ext).
+///
+/// Returned by `GET {org}/{project}/_apis/work/teamsettings/iterations`.
+/// Dates are kept as ISO 8601 strings rather than `chrono` types to keep
+/// the wire format faithful and to avoid timezone-translation surprises;
+/// callers that need typed dates can parse on the way out.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AzdoIteration {
+    /// Iteration GUID. Globally unique across the org.
+    pub id: String,
+    /// Display name (e.g. `"Sprint 23"`).
+    pub name: String,
+    /// Iteration path (e.g. `"MyProject\\Release 1\\Sprint 23"`).
+    pub path: String,
+    /// ISO 8601 start date, if scheduled.
+    pub start_date: Option<String>,
+    /// ISO 8601 finish date, if scheduled.
+    pub finish_date: Option<String>,
+    /// Time frame as reported by ADO: `"current"`, `"past"`, or `"future"`.
+    pub time_frame: String,
+}
+
+/// ADO user descriptor (Phase 4 ext).
+///
+/// Returned by the Graph API:
+/// `GET https://vssps.dev.azure.com/{org}/_apis/graph/users`. Requires
+/// the `vso.graph` PAT scope. `mail_address` and `principal_name` are
+/// optional because external (Live ID) users may not expose them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AzdoUser {
+    /// Stable subject descriptor (the Graph API's primary identifier).
+    pub descriptor: String,
+    /// Display name as shown in the ADO UI.
+    pub display_name: String,
+    /// Primary email, if visible.
+    pub mail_address: Option<String>,
+    /// UPN / login name (e.g. `"alice@contoso.com"`), if visible.
+    pub principal_name: Option<String>,
+}
+
 /// ADO project descriptor (Phase 2 — list-projects shape).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AzdoProject {
@@ -298,6 +338,43 @@ struct WorkItemRaw {
     fields: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     url: Option<String>,
+}
+
+/// Iteration list response (Phase 4 ext).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IterationRaw {
+    id: String,
+    name: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    attributes: IterationAttributesRaw,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct IterationAttributesRaw {
+    #[serde(default)]
+    start_date: Option<String>,
+    #[serde(default)]
+    finish_date: Option<String>,
+    #[serde(default)]
+    time_frame: String,
+}
+
+/// Graph user response (Phase 4 ext).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserRaw {
+    #[serde(default)]
+    descriptor: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    mail_address: Option<String>,
+    #[serde(default)]
+    principal_name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -761,6 +838,149 @@ impl AzureDevOpsClient {
 
         Ok(all)
     }
+
+    /// Fetch all iterations (sprints) for a project (Phase 4 ext).
+    ///
+    /// Calls
+    /// `GET {org}/{project}/_apis/work/teamsettings/iterations?api-version=7.1`.
+    ///
+    /// Returns iterations in the order ADO returns them — typically
+    /// chronological by start date but not guaranteed.
+    ///
+    /// # Errors
+    ///
+    /// Same set as [`Self::test_connection`].
+    pub async fn get_iterations(&self, project: &str) -> Result<Vec<AzdoIteration>, AzdoError> {
+        self.validate_credentials()?;
+
+        let client = build_client()?;
+        let url = format!(
+            "{}/{}/_apis/work/teamsettings/iterations?api-version=7.1",
+            self.org_url(),
+            encode_path_segment(project),
+        );
+        tracing::debug!(url = %url, "GET iterations");
+
+        let resp = client
+            .get(&url)
+            .basic_auth("", Some(&self.config.pat))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_status(resp).await);
+        }
+
+        let body: ListEnvelope<IterationRaw> = resp
+            .json()
+            .await
+            .map_err(|e| AzdoError::Parse(e.to_string()))?;
+
+        Ok(body
+            .value
+            .into_iter()
+            .map(|it| AzdoIteration {
+                id: it.id,
+                name: it.name,
+                path: it.path,
+                start_date: it.attributes.start_date,
+                finish_date: it.attributes.finish_date,
+                time_frame: it.attributes.time_frame,
+            })
+            .collect())
+    }
+
+    /// Fetch all users from the ADO organisation Graph API (Phase 4 ext).
+    ///
+    /// Calls
+    /// `GET https://vssps.dev.azure.com/{org}/_apis/graph/users?api-version=7.1-preview.1`.
+    /// Requires the `vso.graph` PAT scope; missing scope surfaces as
+    /// [`AzdoError::Forbidden`].
+    ///
+    /// The Graph endpoint lives on `vssps.dev.azure.com`, not the
+    /// `dev.azure.com/{org}` endpoint used by the rest of the client. The
+    /// organisation slug is extracted from the configured
+    /// `organization_url` — supports both `https://dev.azure.com/{org}` and
+    /// `https://{org}.visualstudio.com` formats.
+    ///
+    /// # Errors
+    ///
+    /// * [`AzdoError::InvalidUrl`] if the organisation URL is unrecognised.
+    /// * Otherwise the same set as [`Self::test_connection`].
+    pub async fn get_users(&self) -> Result<Vec<AzdoUser>, AzdoError> {
+        self.validate_credentials()?;
+
+        let graph_url = self.graph_users_url()?;
+        let client = build_client()?;
+        tracing::debug!(url = %graph_url, "GET graph users");
+
+        let resp = client
+            .get(&graph_url)
+            .basic_auth("", Some(&self.config.pat))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_status(resp).await);
+        }
+
+        let body: ListEnvelope<UserRaw> = resp
+            .json()
+            .await
+            .map_err(|e| AzdoError::Parse(e.to_string()))?;
+
+        Ok(body
+            .value
+            .into_iter()
+            .map(|u| AzdoUser {
+                descriptor: u.descriptor,
+                display_name: u.display_name,
+                mail_address: u.mail_address,
+                principal_name: u.principal_name,
+            })
+            .collect())
+    }
+
+    /// Build the Graph users URL for this client's organisation.
+    ///
+    /// Supports two organisation URL forms:
+    /// - `https://dev.azure.com/{org}` →
+    ///   `https://vssps.dev.azure.com/{org}/_apis/graph/users?...`
+    /// - `https://{org}.visualstudio.com` →
+    ///   `https://vssps.dev.azure.com/{org}/_apis/graph/users?...`
+    ///
+    /// Tests use a mock server URL (e.g. `http://127.0.0.1:1234`); in that
+    /// case we route the Graph call to the same mock host with an
+    /// `/_graph` prefix so wiremock can intercept it.
+    fn graph_users_url(&self) -> Result<String, AzdoError> {
+        let org = self.org_url();
+        let lower = org.to_lowercase();
+        // Test/mock fallback — wiremock servers don't have the
+        // vssps subdomain, so we synthesize a path-prefixed URL on the
+        // same host and let the test mount a matching mock.
+        if !lower.contains("dev.azure.com") && !lower.contains(".visualstudio.com") {
+            return Ok(format!("{org}/_graph/users?api-version=7.1-preview.1"));
+        }
+        let org_slug = if let Some(rest) = lower.strip_prefix("https://dev.azure.com/") {
+            // Strip trailing slashes / query just in case.
+            rest.trim_end_matches('/').split('/').next().unwrap_or("")
+        } else if let Some(rest) = lower.strip_prefix("https://") {
+            // {org}.visualstudio.com form.
+            rest.split('.').next().unwrap_or("")
+        } else {
+            return Err(AzdoError::InvalidUrl(format!(
+                "cannot derive org slug from {org}"
+            )));
+        };
+        if org_slug.is_empty() {
+            return Err(AzdoError::InvalidUrl(format!(
+                "cannot derive org slug from {org}"
+            )));
+        }
+        Ok(format!(
+            "https://vssps.dev.azure.com/{org_slug}/_apis/graph/users?api-version=7.1-preview.1"
+        ))
+    }
 }
 
 /// Project a raw ADO work item (with arbitrary fields map) into our
@@ -816,6 +1036,32 @@ pub fn extract_work_item_refs(text: &str) -> Vec<u32> {
         }
     }
     out
+}
+
+/// Feed ADO Graph users into an [`crate::collect::identity::IdentityResolver`].
+///
+/// For each user with a non-empty `mail_address`, registers the email
+/// address as an alias for the user's display name via the resolver's
+/// alias map. Users without an email are skipped — there is no reliable
+/// canonical join key to register them under.
+///
+/// This is a one-shot ingestion helper; it does not mutate the resolver
+/// after construction. Callers that need a long-lived ingestion loop should
+/// roll their own using the resolver's public alias-update APIs.
+pub fn feed_azdo_users(
+    resolver: &mut crate::collect::identity::IdentityResolver,
+    users: &[AzdoUser],
+) {
+    for u in users {
+        let Some(email) = u.mail_address.as_deref() else {
+            continue;
+        };
+        let email = email.trim();
+        if email.is_empty() || u.display_name.trim().is_empty() {
+            continue;
+        }
+        resolver.add_alias(email, &u.display_name);
+    }
 }
 
 /// Scan a list of commit messages (or other text) for `AB#N` references and
@@ -1479,6 +1725,180 @@ mod tests {
     #[test]
     fn encode_path_segment_encodes_slash() {
         assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+    }
+
+    // ----- Phase 4 ext: iterations & users -----
+
+    #[tokio::test]
+    async fn get_iterations_parses_response() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "count": 2,
+            "value": [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "name": "Sprint 1",
+                    "path": "MyProject\\Release 1\\Sprint 1",
+                    "attributes": {
+                        "startDate": "2025-01-01T00:00:00Z",
+                        "finishDate": "2025-01-14T00:00:00Z",
+                        "timeFrame": "past"
+                    }
+                },
+                {
+                    "id": "22222222-2222-2222-2222-222222222222",
+                    "name": "Sprint 2",
+                    "path": "MyProject\\Release 1\\Sprint 2",
+                    "attributes": {
+                        "startDate": null,
+                        "finishDate": null,
+                        "timeFrame": "future"
+                    }
+                }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path("/MyProject/_apis/work/teamsettings/iterations"))
+            .and(query_param("api-version", "7.1"))
+            .and(header("authorization", EXPECTED_AUTH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let iters = client.get_iterations("MyProject").await.expect("200 ok");
+        assert_eq!(iters.len(), 2);
+        assert_eq!(iters[0].name, "Sprint 1");
+        assert_eq!(iters[0].time_frame, "past");
+        assert_eq!(iters[0].start_date.as_deref(), Some("2025-01-01T00:00:00Z"));
+        assert_eq!(iters[1].time_frame, "future");
+        assert!(iters[1].start_date.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_iterations_maps_403() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/MyProject/_apis/work/teamsettings/iterations"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let err = client
+            .get_iterations("MyProject")
+            .await
+            .expect_err("403 should err");
+        assert!(matches!(err, AzdoError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn get_users_parses_response() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "count": 2,
+            "value": [
+                {
+                    "descriptor": "aad.xxx",
+                    "displayName": "Alice Smith",
+                    "mailAddress": "alice@contoso.com",
+                    "principalName": "alice@contoso.com"
+                },
+                {
+                    "descriptor": "msa.yyy",
+                    "displayName": "Bob Jones"
+                    // mailAddress and principalName missing
+                }
+            ]
+        });
+        // The mock-server fallback in `graph_users_url` routes to
+        // `{org}/_graph/users` for non-dev.azure.com hosts.
+        Mock::given(method("GET"))
+            .and(path("/_graph/users"))
+            .and(query_param("api-version", "7.1-preview.1"))
+            .and(header("authorization", EXPECTED_AUTH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let users = client.get_users().await.expect("200 ok");
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].display_name, "Alice Smith");
+        assert_eq!(users[0].mail_address.as_deref(), Some("alice@contoso.com"));
+        assert_eq!(users[1].display_name, "Bob Jones");
+        assert!(users[1].mail_address.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_users_maps_403_for_missing_scope() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_graph/users"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let err = client.get_users().await.expect_err("403 expected");
+        assert!(matches!(err, AzdoError::Forbidden));
+    }
+
+    #[test]
+    fn graph_users_url_dev_azure_form() {
+        let mut cfg = sample_config();
+        cfg.organization_url = "https://dev.azure.com/myorg".into();
+        let client = AzureDevOpsClient::new(cfg);
+        let url = client.graph_users_url().expect("derive url");
+        assert!(
+            url.starts_with("https://vssps.dev.azure.com/myorg/_apis/graph/users"),
+            "got {url}"
+        );
+    }
+
+    #[test]
+    fn graph_users_url_visualstudio_form() {
+        let mut cfg = sample_config();
+        cfg.organization_url = "https://myorg.visualstudio.com".into();
+        let client = AzureDevOpsClient::new(cfg);
+        let url = client.graph_users_url().expect("derive url");
+        assert!(
+            url.starts_with("https://vssps.dev.azure.com/myorg/_apis/graph/users"),
+            "got {url}"
+        );
+    }
+
+    #[test]
+    fn feed_azdo_users_registers_email_aliases() {
+        use crate::collect::identity::IdentityResolver;
+        let mut resolver = IdentityResolver::new(None);
+        let users = vec![
+            AzdoUser {
+                descriptor: "d1".into(),
+                display_name: "Alice Smith".into(),
+                mail_address: Some("alice@contoso.com".into()),
+                principal_name: Some("alice@contoso.com".into()),
+            },
+            AzdoUser {
+                descriptor: "d2".into(),
+                display_name: "Bob Jones".into(),
+                mail_address: None,
+                principal_name: None,
+            },
+            AzdoUser {
+                descriptor: "d3".into(),
+                display_name: "".into(),
+                mail_address: Some("ghost@contoso.com".into()),
+                principal_name: None,
+            },
+        ];
+        feed_azdo_users(&mut resolver, &users);
+        // Alice's email should resolve to her display name.
+        let (name, _) = resolver.resolve("anybody", "alice@contoso.com");
+        assert_eq!(name, "Alice Smith");
+        // Bob and Ghost should not have been registered.
+        let (name, email) = resolver.resolve("Bob Jones", "unknown@x.com");
+        // No alias for that email; resolver passes the input through.
+        assert_eq!(name, "Bob Jones");
+        assert_eq!(email, "unknown@x.com");
     }
 
     #[tokio::test]

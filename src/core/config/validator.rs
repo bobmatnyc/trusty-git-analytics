@@ -1,0 +1,511 @@
+//! Pre-flight configuration validation.
+//!
+//! [`ConfigValidator`] runs a set of cross-field invariants over a loaded
+//! [`Config`] and returns a list of [`ConfigError`] values describing every
+//! problem found (not just the first). This is intentionally non-fatal at
+//! the type level — callers can decide whether to bail out, print warnings,
+//! or filter the error set by category.
+//!
+//! Validation is split into:
+//!
+//! - **Fatal errors** — returned in the result vector; the binary should
+//!   refuse to proceed unless the user passes `--no-validate`.
+//! - **Non-fatal warnings** — emitted via `tracing::warn!` and *not* added
+//!   to the error vector; they describe suspicious-but-runnable
+//!   configurations.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use tga::core::config::{Config, ConfigValidator};
+//!
+//! let cfg = Config::load(std::path::Path::new("config.yaml"))?;
+//! let errors = ConfigValidator::new(&cfg).validate();
+//! if !errors.is_empty() {
+//!     for e in &errors {
+//!         eprintln!("config error: {e}");
+//!     }
+//!     std::process::exit(1);
+//! }
+//! ```
+
+use std::path::Path;
+
+use super::{expand_path, Config};
+
+/// A single configuration validation failure.
+///
+/// Variants are intentionally fine-grained so callers can categorize and
+/// route specific failure modes (e.g. CI may tolerate a missing GitHub
+/// token but not a missing repo path).
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// A configured repository path does not exist on disk.
+    #[error("Repository path does not exist: {path}")]
+    RepoNotFound {
+        /// The configured filesystem path (after `~` expansion).
+        path: String,
+    },
+
+    /// The configured output directory is not writable.
+    #[error("Output directory is not writable: {path}")]
+    OutputNotWritable {
+        /// The configured output directory.
+        path: String,
+    },
+
+    /// GitHub PR fetching is enabled but no token is configured.
+    #[error("GitHub token required when fetch_prs = true")]
+    MissingGitHubToken,
+
+    /// JIRA is partially configured (at least one of url/username/token is
+    /// set, but not all of them).
+    #[error("JIRA config incomplete: {field} is required")]
+    IncompleteJiraConfig {
+        /// The missing field name (`url`, `username`, or `token`).
+        field: String,
+    },
+
+    /// LLM classification is enabled but the chosen provider has no API key
+    /// available (neither in config nor in the environment).
+    #[error("LLM API key missing for provider '{provider}'")]
+    MissingLlmKey {
+        /// Provider name (`openrouter`, `openai`, …).
+        provider: String,
+    },
+
+    /// Two flags or settings contradict each other.
+    #[error("Conflicting config: {message}")]
+    Conflict {
+        /// Human-readable description of the conflict.
+        message: String,
+    },
+}
+
+/// Runs a battery of validation checks against a [`Config`].
+///
+/// Construct with [`ConfigValidator::new`] and call [`Self::validate`] to
+/// collect the (possibly empty) list of errors.
+pub struct ConfigValidator<'a> {
+    config: &'a Config,
+}
+
+impl<'a> ConfigValidator<'a> {
+    /// Wrap a `Config` reference for validation.
+    pub fn new(config: &'a Config) -> Self {
+        Self { config }
+    }
+
+    /// Run every check and return all errors found.
+    ///
+    /// Non-fatal warnings (e.g. a configured-but-empty team roster) are
+    /// emitted via `tracing::warn!` and **not** added to the returned
+    /// vector. An empty result means the config passes validation.
+    pub fn validate(&self) -> Vec<ConfigError> {
+        let mut errors = Vec::new();
+        self.check_repositories(&mut errors);
+        self.check_output_dir(&mut errors);
+        self.check_github_token(&mut errors);
+        self.check_jira_config(&mut errors);
+        self.check_llm_config(&mut errors);
+        self.check_conflicting_flags(&mut errors);
+        errors
+    }
+
+    /// Verify every configured repository path exists on disk.
+    ///
+    /// Empty `repositories` is *not* a fatal validation error here — the
+    /// existing [`Config::validate`] handles the "at least one repo
+    /// required" rule. This check focuses on path-on-disk correctness.
+    fn check_repositories(&self, errors: &mut Vec<ConfigError>) {
+        if self.config.repositories.is_empty() {
+            tracing::warn!("no repositories configured — `tga collect` will be a no-op");
+            return;
+        }
+        for repo in &self.config.repositories {
+            let expanded = expand_path(&repo.path);
+            if !expanded.exists() {
+                errors.push(ConfigError::RepoNotFound {
+                    path: expanded.display().to_string(),
+                });
+            }
+        }
+    }
+
+    /// Verify the output directory (if configured) is writable.
+    ///
+    /// If the directory does not yet exist, attempt to create it; failure
+    /// to create is reported as `OutputNotWritable`.
+    fn check_output_dir(&self, errors: &mut Vec<ConfigError>) {
+        let Some(output) = self.config.output.as_ref() else {
+            return;
+        };
+        let Some(dir) = output.directory.as_ref() else {
+            return;
+        };
+        let expanded = expand_path(dir);
+        if !is_dir_writable(&expanded) {
+            errors.push(ConfigError::OutputNotWritable {
+                path: expanded.display().to_string(),
+            });
+        }
+    }
+
+    /// Verify GitHub is configured with a token when PR fetching is on.
+    fn check_github_token(&self, errors: &mut Vec<ConfigError>) {
+        let Some(gh) = self.config.github.as_ref() else {
+            return;
+        };
+        if gh.fetch_prs {
+            let token_present = gh
+                .token
+                .as_deref()
+                .map(|t| !t.trim().is_empty())
+                .unwrap_or(false);
+            let env_present = std::env::var("GITHUB_TOKEN")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            if !token_present && !env_present {
+                errors.push(ConfigError::MissingGitHubToken);
+            }
+        }
+    }
+
+    /// Verify JIRA configuration is complete *if any field is set*.
+    ///
+    /// A wholly absent JIRA block is fine — the integration is just off.
+    /// A *partially* populated block is almost certainly a typo or a
+    /// missed env-var substitution and is treated as fatal.
+    fn check_jira_config(&self, errors: &mut Vec<ConfigError>) {
+        let Some(jira) = self.config.jira.as_ref() else {
+            return;
+        };
+        let url = jira.url.as_deref().unwrap_or("").trim();
+        let username = jira.username.as_deref().unwrap_or("").trim();
+        let token = jira.token.as_deref().unwrap_or("").trim();
+        let any = !url.is_empty() || !username.is_empty() || !token.is_empty();
+        if !any {
+            return;
+        }
+        if url.is_empty() {
+            errors.push(ConfigError::IncompleteJiraConfig {
+                field: "url".into(),
+            });
+        }
+        if username.is_empty() {
+            errors.push(ConfigError::IncompleteJiraConfig {
+                field: "username".into(),
+            });
+        }
+        if token.is_empty() {
+            errors.push(ConfigError::IncompleteJiraConfig {
+                field: "token".into(),
+            });
+        }
+    }
+
+    /// Verify the LLM provider has an API key available when LLM
+    /// classification is enabled.
+    fn check_llm_config(&self, errors: &mut Vec<ConfigError>) {
+        let Some(cls) = self.config.classification.as_ref() else {
+            return;
+        };
+        if !cls.use_llm {
+            return;
+        }
+        let provider = cls.llm_provider.as_str();
+        let (config_key, env_keys): (Option<&str>, &[&str]) = match provider {
+            "openrouter" => (cls.openrouter_api_key.as_deref(), &["OPENROUTER_API_KEY"]),
+            "openai" => (None, &["OPENAI_API_KEY"]),
+            // "auto" — accept either provider's key.
+            _ => (
+                cls.openrouter_api_key.as_deref(),
+                &["OPENROUTER_API_KEY", "OPENAI_API_KEY"],
+            ),
+        };
+        let cfg_present = config_key.map(|k| !k.trim().is_empty()).unwrap_or(false);
+        let env_present = env_keys.iter().any(|k| {
+            std::env::var(k)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        });
+        if !cfg_present && !env_present {
+            errors.push(ConfigError::MissingLlmKey {
+                provider: provider.to_string(),
+            });
+        }
+    }
+
+    /// Detect contradictory toggle combinations.
+    ///
+    /// Currently checks:
+    /// - Classification confidence threshold is in `[0.0, 1.0]`.
+    /// - Min coverage percentage is in `[0.0, 100.0]`.
+    fn check_conflicting_flags(&self, errors: &mut Vec<ConfigError>) {
+        if let Some(cls) = self.config.classification.as_ref() {
+            if !(0.0..=1.0).contains(&cls.confidence_threshold) {
+                errors.push(ConfigError::Conflict {
+                    message: format!(
+                        "classification.confidence_threshold ({}) must be in [0.0, 1.0]",
+                        cls.confidence_threshold
+                    ),
+                });
+            }
+            if !(0.0..=100.0).contains(&cls.min_coverage_pct) {
+                errors.push(ConfigError::Conflict {
+                    message: format!(
+                        "classification.min_coverage_pct ({}) must be in [0.0, 100.0]",
+                        cls.min_coverage_pct
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// Return true if `path` is a directory that we can write to.
+///
+/// If the directory does not exist, attempt to create it (and its parents);
+/// success implies writability and returns `true`. Failure to create or a
+/// path that exists but is not a directory returns `false`.
+fn is_dir_writable(path: &Path) -> bool {
+    if !path.exists() {
+        // Attempt to create — if we can, it's writable.
+        return std::fs::create_dir_all(path).is_ok();
+    }
+    if !path.is_dir() {
+        return false;
+    }
+    // Probe writability by creating and removing a temp file.
+    let probe = path.join(".tga-write-probe");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::{
+        ClassificationConfig, GithubConfig, JiraConfig, OutputConfig, RepositoryConfig,
+    };
+    use std::path::PathBuf;
+
+    fn empty_config() -> Config {
+        Config::default()
+    }
+
+    #[test]
+    fn empty_config_yields_no_errors() {
+        let cfg = empty_config();
+        let errors = ConfigValidator::new(&cfg).validate();
+        assert!(errors.is_empty(), "got {errors:?}");
+    }
+
+    #[test]
+    fn missing_repo_path_reported() {
+        let mut cfg = empty_config();
+        cfg.repositories.push(RepositoryConfig {
+            path: PathBuf::from("/nonexistent/path/definitely-not-there-12345"),
+            ..Default::default()
+        });
+        let errors = ConfigValidator::new(&cfg).validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::RepoNotFound { .. })),
+            "got {errors:?}"
+        );
+    }
+
+    /// Create a unique temp directory for a test (avoids extra deps).
+    fn unique_tempdir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "tga-validator-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        dir
+    }
+
+    #[test]
+    fn existing_repo_path_passes() {
+        let tmp = unique_tempdir("repo");
+        let mut cfg = empty_config();
+        cfg.repositories.push(RepositoryConfig {
+            path: tmp.clone(),
+            ..Default::default()
+        });
+        let errors = ConfigValidator::new(&cfg).validate();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::RepoNotFound { .. })),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn github_token_required_when_fetch_prs() {
+        // Ensure env var is not set for this test.
+        // SAFETY: setting env in tests is racy across threads; we use a
+        // best-effort save/restore.
+        let prev = std::env::var("GITHUB_TOKEN").ok();
+        // SAFETY: env var manipulation is unsafe in 2024 edition.
+        unsafe {
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+
+        let mut cfg = empty_config();
+        cfg.github = Some(GithubConfig {
+            token: None,
+            org: None,
+            repo: None,
+            fetch_prs: true,
+        });
+        let errors = ConfigValidator::new(&cfg).validate();
+        let found = errors
+            .iter()
+            .any(|e| matches!(e, ConfigError::MissingGitHubToken));
+
+        // Restore env.
+        if let Some(v) = prev {
+            // SAFETY: env var manipulation is unsafe in 2024 edition.
+            unsafe {
+                std::env::set_var("GITHUB_TOKEN", v);
+            }
+        }
+        assert!(found, "got {errors:?}");
+    }
+
+    #[test]
+    fn github_token_in_config_satisfies() {
+        let mut cfg = empty_config();
+        cfg.github = Some(GithubConfig {
+            token: Some("ghp_xxx".into()),
+            org: None,
+            repo: None,
+            fetch_prs: true,
+        });
+        let errors = ConfigValidator::new(&cfg).validate();
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::MissingGitHubToken)),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn partial_jira_config_reports_each_missing_field() {
+        let mut cfg = empty_config();
+        cfg.jira = Some(JiraConfig {
+            url: Some("https://x.atlassian.net".into()),
+            // username & token missing
+            ..Default::default()
+        });
+        let errors = ConfigValidator::new(&cfg).validate();
+        let missing: Vec<&str> = errors
+            .iter()
+            .filter_map(|e| match e {
+                ConfigError::IncompleteJiraConfig { field } => Some(field.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(missing.contains(&"username"), "got {errors:?}");
+        assert!(missing.contains(&"token"), "got {errors:?}");
+    }
+
+    #[test]
+    fn empty_jira_block_is_fine() {
+        let mut cfg = empty_config();
+        cfg.jira = Some(JiraConfig::default());
+        let errors = ConfigValidator::new(&cfg).validate();
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::IncompleteJiraConfig { .. })),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn missing_llm_key_reported() {
+        let prev_or = std::env::var("OPENROUTER_API_KEY").ok();
+        let prev_oa = std::env::var("OPENAI_API_KEY").ok();
+        // SAFETY: env var manipulation is unsafe in 2024 edition.
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+
+        let mut cfg = empty_config();
+        cfg.classification = Some(ClassificationConfig {
+            use_llm: true,
+            llm_provider: "openrouter".into(),
+            openrouter_api_key: None,
+            ..Default::default()
+        });
+        let errors = ConfigValidator::new(&cfg).validate();
+        let found = errors
+            .iter()
+            .any(|e| matches!(e, ConfigError::MissingLlmKey { .. }));
+
+        // SAFETY: env var manipulation is unsafe in 2024 edition.
+        unsafe {
+            if let Some(v) = prev_or {
+                std::env::set_var("OPENROUTER_API_KEY", v);
+            }
+            if let Some(v) = prev_oa {
+                std::env::set_var("OPENAI_API_KEY", v);
+            }
+        }
+        assert!(found, "got {errors:?}");
+    }
+
+    #[test]
+    fn confidence_threshold_out_of_range_reported() {
+        let mut cfg = empty_config();
+        cfg.classification = Some(ClassificationConfig {
+            confidence_threshold: 1.5,
+            ..Default::default()
+        });
+        let errors = ConfigValidator::new(&cfg).validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::Conflict { .. })),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nonexistent_output_dir_is_created_and_passes() {
+        let tmp = unique_tempdir("output");
+        let nested = tmp.join("a/b/c");
+        let mut cfg = empty_config();
+        cfg.output = Some(OutputConfig {
+            directory: Some(nested.clone()),
+            ..Default::default()
+        });
+        let errors = ConfigValidator::new(&cfg).validate();
+        let exists = nested.exists();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::OutputNotWritable { .. })),
+            "got {errors:?}"
+        );
+        assert!(exists, "validator should have created the dir");
+    }
+}

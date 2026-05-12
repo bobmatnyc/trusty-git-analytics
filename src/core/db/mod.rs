@@ -1,12 +1,31 @@
 //! SQLite database access layer.
 //!
-//! All databases opened by this crate are configured with:
+//! All databases opened by this crate are configured with the following
+//! pragmas on every connection open (see [`Database::apply_pragmas`]):
+//!
 //! - `journal_mode = WAL` — concurrent reads during write-heavy collection
 //! - `synchronous = NORMAL` — durability with reasonable performance
 //! - `foreign_keys = ON` — enforce FK constraints
+//! - `cache_size = -65536` — 64 MB page cache (negative = KB)
+//! - `temp_store = MEMORY` — temporary tables / indexes held in RAM
+//! - `mmap_size = 268435456` — 256 MB memory-mapped I/O window
 //!
 //! WAL mode is **mandatory** per project conventions and is set on every
 //! [`Database::open`] call.
+//!
+//! ## Connection pooling
+//!
+//! `tga` is a single-process CLI, not a server. A single
+//! [`rusqlite::Connection`] guarded by `&mut` borrow is sufficient: the
+//! collection / classification / report stages each run sequentially and
+//! never share the connection across threads. We deliberately do **not**
+//! pull in `r2d2-sqlite` — a pool adds locking and threading overhead with
+//! zero benefit at our concurrency level (1). If a future stage needs
+//! parallel SQLite access, prefer `rusqlite`'s built-in
+//! `Connection::open_with_flags` per worker over a pool.
+//!
+//! See `docs/adr/0001-sqlite-tuning.md` for the rationale behind each
+//! pragma value.
 
 use std::path::Path;
 
@@ -16,10 +35,12 @@ use tracing::{debug, info};
 use crate::core::config::expand_path;
 use crate::core::errors::{Result, TgaError};
 
+pub mod azdo_iterations;
 pub mod collection_runs;
 pub mod migrations;
 pub mod work_items;
 
+pub use azdo_iterations::{list_iterations, upsert_iteration};
 pub use collection_runs::{is_week_collected, record_collection_run};
 pub use work_items::{
     get_work_item, get_work_items_for_commit, link_commit_work_item, list_work_items,
@@ -66,14 +87,31 @@ impl Database {
         Ok(db)
     }
 
-    /// Apply the canonical pragma set: WAL journal, normal sync, FK enforcement.
+    /// Apply the canonical pragma set on a fresh connection.
+    ///
+    /// Pragmas applied (see module-level docs for rationale):
+    /// - `journal_mode = WAL`
+    /// - `synchronous = NORMAL`
+    /// - `foreign_keys = ON`
+    /// - `cache_size = -65536` (64 MB)
+    /// - `temp_store = MEMORY`
+    /// - `mmap_size = 268435456` (256 MB)
     fn apply_pragmas(conn: &Connection) -> Result<()> {
         // `journal_mode` is a query-style pragma; use query_row to honor it.
         let mode: String = conn
             .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
             .map_err(TgaError::from)?;
         debug!(journal_mode = %mode, "applied WAL pragma");
-        conn.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")?;
+        // Bundle the remaining pragmas in a single batch — none of them
+        // return rows so `execute_batch` is appropriate.
+        conn.execute_batch(
+            "PRAGMA synchronous = NORMAL; \
+             PRAGMA foreign_keys = ON; \
+             PRAGMA cache_size = -65536; \
+             PRAGMA temp_store = MEMORY; \
+             PRAGMA mmap_size = 268435456;",
+        )?;
+        debug!("applied SQLite tuning pragmas (cache=64MB, mmap=256MB, temp=memory)");
         Ok(())
     }
 
