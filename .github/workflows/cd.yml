@@ -2,12 +2,14 @@
 #
 # Pipeline:
 #   1. gate       — run full test suite (smoke test)
-#   2. bump       — patch-bump package version, commit, push, create tag
-#   3. publish    — publish the single `tga` crate to crates.io
+#   2. publish    — publish the single `tga` crate to crates.io
 #
-# Loop prevention: the version-bump commit message is "chore: bump version to X.Y.Z [skip ci]"
-# GitHub Actions skips workflows triggered by commits containing [skip ci] in the message.
-# Additionally, we check that the triggering actor is not 'github-actions[bot]'.
+# Version management: Engineers bump Cargo.toml manually, commit, tag (vX.Y.Z),
+# and push. The `release.yml` workflow fires on `v*` tag pushes and builds the
+# cross-platform binaries. This CD workflow only publishes to crates.io.
+#
+# Note: The auto-bump step was removed. It required push rights that
+# github-actions[bot] does not have, causing 403 errors on every run.
 
 name: CD
 
@@ -28,8 +30,6 @@ jobs:
   # ── Job 1: Smoke Test Gate ────────────────────────────────────────────────
   gate:
     name: Smoke Test Gate
-    # Skip if this push was the version-bump commit itself
-    if: "!contains(github.event.head_commit.message, '[skip ci]') && github.actor != 'github-actions[bot]'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,65 +52,26 @@ jobs:
       - name: Build release binary
         run: cargo build --release --bin tga
 
-  # ── Job 2: Version Bump ──────────────────────────────────────────────────
-  bump:
-    name: Bump Patch Version
-    needs: gate
-    runs-on: ubuntu-latest
-    outputs:
-      new_version: ${{ steps.bump.outputs.new_version }}
-      tag: ${{ steps.bump.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Bump patch version
-        id: bump
-        run: |
-          # Read current version from Cargo.toml
-          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          echo "Current version: $CURRENT"
-
-          # Bump patch (e.g. 0.1.4 → 0.1.5)
-          MAJOR=$(echo $CURRENT | cut -d. -f1)
-          MINOR=$(echo $CURRENT | cut -d. -f2)
-          PATCH=$(echo $CURRENT | cut -d. -f3)
-          NEW="$MAJOR.$MINOR.$((PATCH + 1))"
-          echo "New version: $NEW"
-
-          # Update Cargo.toml
-          sed -i "s/^version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml
-
-          # Update Cargo.lock to reflect new version
-          cargo update -p tga
-
-          # Commit and tag
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore: bump version to $NEW [skip ci]"
-          git tag "v$NEW"
-          git push origin main --follow-tags
-
-          echo "new_version=$NEW" >> $GITHUB_OUTPUT
-          echo "tag=v$NEW" >> $GITHUB_OUTPUT
-
-  # ── Job 3: Publish to crates.io ──────────────────────────────────────────
+  # ── Job 2: Publish to crates.io ──────────────────────────────────────────
   publish:
     name: Publish to crates.io
-    needs: bump
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.bump.outputs.tag }}
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
+
       - name: Publish tga
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
