@@ -282,18 +282,13 @@ async fn main() -> anyhow::Result<()> {
     // exits with status 0 on success or 1 on errors before opening the DB.
     // `--no-validate` skips the check entirely (for CI environments that
     // mount paths dynamically).
-    match &cli.command {
-        Commands::Analyze(args) => {
-            if run_validation(&config, args.no_validate, args.validate_only)? {
-                return Ok(());
-            }
-        }
-        Commands::Collect(args) => {
-            if run_validation(&config, args.no_validate, args.validate_only)? {
-                return Ok(());
-            }
-        }
-        _ => {}
+    let should_short_circuit = match &cli.command {
+        Commands::Analyze(args) => run_validation(&config, args.no_validate, args.validate_only)?,
+        Commands::Collect(args) => run_validation(&config, args.no_validate, args.validate_only)?,
+        _ => false,
+    };
+    if should_short_circuit {
+        return Ok(());
     }
 
     // Open SQLite database (runs migrations on open).

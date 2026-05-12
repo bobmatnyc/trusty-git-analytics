@@ -34,9 +34,13 @@ serde_yaml = "0.9"
 # Database
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 # Git
-git2 = "0.19"
-# HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+# Disable default ssh+https features to drop the system OpenSSL/libssh2
+# system dependency; vendor libgit2 itself so cross-compiled musl builds
+# don't require libgit2 on the host runner.
+git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+# HTTP client — use rustls and disable default features (which include
+# native-tls/hyper-tls and would re-introduce the OpenSSL system dep).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Parallelism
 rayon = "1"
 # Date/time

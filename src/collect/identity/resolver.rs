@@ -475,24 +475,62 @@ mod tests {
         assert_eq!(e3, "andre.ramos@duettoresearch.com");
     }
 
-    /// Verify resolution against the real `configs/duetto-contractors.yaml`
-    /// alias map. This guards against regressions in the YAML schema or
-    /// resolver wiring that would silently break a deployed config.
+    /// Verify resolution end-to-end through `Config::load` + external
+    /// `aliases_file`, mirroring the shape of the deployed
+    /// `configs/duetto-contractors.yaml` setup. This guards against
+    /// regressions in YAML schema, path resolution, or resolver wiring.
+    ///
+    /// The fixture is materialized into a temp dir so the test is
+    /// hermetic: it does not depend on absolute paths outside the repo
+    /// (which would fail in CI).
     #[test]
     fn duetto_contractors_config_resolves() {
-        use std::path::Path;
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("configs")
-            .join("duetto-contractors.yaml");
-        // Skip silently if the fixture isn't present (keeps the test green
-        // in stripped-down checkouts).
-        if !path.exists() {
-            return;
-        }
-        let cfg = crate::core::config::Config::load(&path).expect("load duetto-contractors yaml");
+        let unique = format!(
+            "tga-duetto-contractors-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let tmp = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&tmp).expect("create tmp");
+
+        // Aliases file with a subset of the real Duetto contractor map,
+        // including the cases the assertions below exercise (case-folding,
+        // fuzzy match on email-local-part, non-email handle alias).
+        let aliases_yaml = r#"
+developers:
+  - name: "Andre Ramos"
+    primary_email: "andre.ramos@duettoresearch.com"
+    aliases:
+      - "129991831+andreramosduetto@users.noreply.github.com"
+  - name: "Akash Arora"
+    primary_email: "akash.arora@duettoresearch.com"
+    aliases:
+      - "Akash.Arora-c@duettoresearch.com"
+      - "akash-duetto"
+  - name: "Janga Vinod Kumar Reddy"
+    primary_email: "janga.reddy@duettoresearch.com"
+    aliases:
+      - "jangareddy-duetto"
+      - "164324948+jangareddy-duetto@users.noreply.github.com"
+"#;
+        let aliases_path = tmp.join("aliases.yaml");
+        std::fs::write(&aliases_path, aliases_yaml).expect("write aliases");
+
+        let config_yaml = format!(
+            "version: \"1.0\"\naliases_file: \"{}\"\n",
+            aliases_path.to_string_lossy()
+        );
+        let config_path = tmp.join("duetto-contractors.yaml");
+        std::fs::write(&config_path, config_yaml).expect("write config");
+
+        let cfg =
+            crate::core::config::Config::load(&config_path).expect("load duetto-contractors yaml");
         let r = IdentityResolver::from_config(&cfg);
 
-        // Known mapping from the YAML.
+        // Known mapping from the YAML (canonical email match).
         let (n, _) = r.resolve("whoever", "andre.ramos@duettoresearch.com");
         assert_eq!(n, "Andre Ramos");
 
@@ -503,6 +541,8 @@ mod tests {
         // Non-email login handle alias.
         let (n, _) = r.resolve("jangareddy-duetto", "noise@nowhere.test");
         assert_eq!(n, "Janga Vinod Kumar Reddy");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
