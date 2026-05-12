@@ -6,3 +6,5 @@
 reports/
 .env
 .env.local
+# Personal/local configs with absolute user paths — keep out of repo
+configs/duetto-*.yaml
