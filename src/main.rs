@@ -11,12 +11,13 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use tga::core::config::Config;
+use tga::core::config::{Config, ConfigValidator};
 use tga::core::db::Database;
 
 use crate::commands::aliases::AliasesArgs;
 use crate::commands::backfill::BackfillArgs;
 use crate::commands::install::InstallArgs;
+use crate::commands::override_cmd::OverrideArgs;
 use crate::commands::pr_metrics::PrMetricsArgs;
 
 /// Top-level CLI parser.
@@ -63,6 +64,8 @@ enum Commands {
     Aliases(AliasesArgs),
     /// Retroactive maintenance operations on existing commit rows.
     Backfill(BackfillArgs),
+    /// Manage manual classification overrides (Tier 0).
+    Override(OverrideArgs),
 }
 
 /// Arguments for `tga analyze`.
@@ -95,6 +98,13 @@ pub struct AnalyzeArgs {
     /// Perform all steps except writing to the database (log intent only).
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
+    /// Run configuration validation and exit (0 on success, 1 on errors).
+    #[arg(long, default_value_t = false)]
+    pub validate_only: bool,
+    /// Skip pre-flight configuration validation (use when paths are mounted
+    /// dynamically by CI).
+    #[arg(long, default_value_t = false)]
+    pub no_validate: bool,
 }
 
 /// Arguments for `tga collect`.
@@ -127,6 +137,13 @@ pub struct CollectArgs {
     /// Perform all steps except writing to the database (log intent only).
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
+    /// Run configuration validation and exit (0 on success, 1 on errors).
+    #[arg(long, default_value_t = false)]
+    pub validate_only: bool,
+    /// Skip pre-flight configuration validation (use when paths are mounted
+    /// dynamically by CI).
+    #[arg(long, default_value_t = false)]
+    pub no_validate: bool,
 }
 
 /// Arguments for `tga classify`.
@@ -149,6 +166,42 @@ pub struct ReportArgs {
     /// Output formats (csv, json, markdown — comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub formats: Vec<String>,
+}
+
+/// Run config validation and decide whether the caller should exit.
+///
+/// Returns `Ok(true)` when the caller should exit cleanly after this call
+/// — i.e. `--validate-only` was passed and validation succeeded. Returns
+/// `Ok(false)` to continue with command execution. Returns `Err` when
+/// validation produced errors *and* `--no-validate` was not set; the
+/// errors are also printed to stderr for the user.
+fn run_validation(config: &Config, no_validate: bool, validate_only: bool) -> anyhow::Result<bool> {
+    if no_validate {
+        if validate_only {
+            tracing::warn!("--no-validate overrides --validate-only; exiting without checks");
+            return Ok(true);
+        }
+        tracing::debug!("--no-validate: skipping configuration pre-flight checks");
+        return Ok(false);
+    }
+
+    let errors = ConfigValidator::new(config).validate();
+    if errors.is_empty() {
+        if validate_only {
+            println!("Configuration OK.");
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+
+    eprintln!("Configuration validation found {} error(s):", errors.len());
+    for e in &errors {
+        eprintln!("  - {e}");
+    }
+    Err(anyhow::anyhow!(
+        "configuration validation failed ({} error(s)); use --no-validate to skip",
+        errors.len()
+    ))
 }
 
 #[tokio::main]
@@ -183,6 +236,24 @@ async fn main() -> anyhow::Result<()> {
         return commands::install::run(config, args);
     }
 
+    // Pre-flight validation for the long-running commands. `--validate-only`
+    // exits with status 0 on success or 1 on errors before opening the DB.
+    // `--no-validate` skips the check entirely (for CI environments that
+    // mount paths dynamically).
+    match &cli.command {
+        Commands::Analyze(args) => {
+            if run_validation(&config, args.no_validate, args.validate_only)? {
+                return Ok(());
+            }
+        }
+        Commands::Collect(args) => {
+            if run_validation(&config, args.no_validate, args.validate_only)? {
+                return Ok(());
+            }
+        }
+        _ => {}
+    }
+
     // Open SQLite database (runs migrations on open).
     tracing::info!(path = %cli.database.display(), "opening database");
     let mut db = Database::open(&cli.database)?;
@@ -195,6 +266,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::PrMetrics(args) => commands::pr_metrics::run(config, &db, args)?,
         Commands::Aliases(args) => commands::aliases::run(config, &mut db, args)?,
         Commands::Backfill(args) => commands::backfill::run(config, &mut db, args)?,
+        Commands::Override(args) => commands::override_cmd::run(config, &mut db, args)?,
         // Handled above — match is exhaustive.
         Commands::Install(_) => unreachable!("install dispatched above"),
     }

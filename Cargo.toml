@@ -65,6 +65,16 @@ tera = "1"
 # Async trait
 async-trait = "0.1"
 
+# Optional: AWS Bedrock runtime client for the Bedrock LLM provider.
+aws-config = { version = "1", optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+
+[features]
+default = []
+# Enable the AWS Bedrock LLM classifier provider. Without this feature,
+# `--provider bedrock` returns a configuration error explaining the build.
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
+
 [dev-dependencies]
 # HTTP mocking for async reqwest tests
 wiremock = "0.6"

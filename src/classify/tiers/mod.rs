@@ -6,6 +6,7 @@
 //! 3. [`fuzzy`] — heuristics (merge/revert detection, etc.).
 //! 4. [`llm`] — optional async LLM fallback.
 
+pub mod bedrock;
 pub mod exact;
 pub mod fuzzy;
 pub mod issue_type_tier;

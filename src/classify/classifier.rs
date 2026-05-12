@@ -112,11 +112,18 @@ impl ClassificationEngine {
         let regex = RegexMatcher::new(&ruleset.rules)?;
         let fuzzy = FuzzyClassifier;
         let llm = if config.use_llm {
-            Some(LlmClassifier::from_provider(
+            match LlmClassifier::from_provider(
                 &config.llm_provider,
                 &config.llm_model,
                 config.openrouter_api_key.clone(),
-            ))
+            ) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    return Err(crate::classify::errors::ClassifyError::Config(format!(
+                        "LLM provider init failed: {e}"
+                    )))
+                }
+            }
         } else {
             None
         };

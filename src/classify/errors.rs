@@ -32,6 +32,11 @@ pub enum ClassifyError {
     /// Filesystem I/O failed.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// A configuration value required for this operation was missing or
+    /// invalid (e.g. unbuildable LLM provider).
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 /// Module-wide `Result` alias.

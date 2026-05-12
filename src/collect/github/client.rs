@@ -1,5 +1,7 @@
 //! Minimal GitHub REST API v3 client for fetching pull requests.
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use rusqlite::params;
@@ -17,6 +19,10 @@ const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 /// Page size for paginated list endpoints (GitHub max is 100).
 const PAGE_SIZE: u32 = 100;
+/// Maximum retry attempts for transient failures (5xx, 429).
+const MAX_RETRIES: u32 = 3;
+/// Base delay (in milliseconds) for exponential backoff: 1s, 2s, 4s.
+const RETRY_BASE_MS: u64 = 1000;
 
 /// Async GitHub REST client.
 pub struct GitHubClient {
@@ -73,6 +79,61 @@ pub struct GitHubIssue {
 pub struct GhLabel {
     /// Label name (e.g. `"bug"`, `"enhancement"`).
     pub name: String,
+}
+
+/// A GitHub user reference as embedded in reviews and other payloads.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct GhUser {
+    /// GitHub login (username).
+    pub login: String,
+}
+
+/// Embedded git author metadata returned with a PR commit payload.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct GhAuthor {
+    /// Author display name from the git object.
+    pub name: String,
+    /// Author email from the git object.
+    pub email: String,
+    /// Author timestamp (ISO8601). May be absent on some endpoints.
+    #[serde(default)]
+    pub date: Option<String>,
+}
+
+/// Inner `commit` object shape returned by the PR commits endpoint.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct GitHubCommitDetail {
+    /// Full commit message (subject + body).
+    pub message: String,
+    /// Optional author block (`name`, `email`, `date`).
+    #[serde(default)]
+    pub author: Option<GhAuthor>,
+}
+
+/// A commit reference returned by the PR commits endpoint
+/// (`GET /repos/{owner}/{repo}/pulls/{number}/commits`).
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct GitHubPrCommit {
+    /// Full 40-char commit SHA.
+    pub sha: String,
+    /// Nested commit metadata (message, author).
+    pub commit: GitHubCommitDetail,
+}
+
+/// A pull-request review as returned by
+/// `GET /repos/{owner}/{repo}/pulls/{number}/reviews`.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct GitHubReview {
+    /// Review id.
+    pub id: u64,
+    /// Review state (`APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, ...).
+    pub state: String,
+    /// Reviewer user (may be absent for deleted accounts).
+    #[serde(default)]
+    pub user: Option<GhUser>,
+    /// ISO8601 submission timestamp. `None` for pending drafts.
+    #[serde(default)]
+    pub submitted_at: Option<String>,
 }
 
 impl GitHubClient {
@@ -260,6 +321,171 @@ impl GitHubClient {
         let issue: GitHubIssue = resp.json().await?;
         Ok(Some(issue))
     }
+
+    /// Send a GET request with exponential backoff on transient failures.
+    ///
+    /// Retries up to [`MAX_RETRIES`] times on HTTP 429 (rate limit) or any
+    /// 5xx response. Delays follow `RETRY_BASE_MS * 2^attempt` — 1s, 2s, 4s
+    /// for the default base.
+    ///
+    /// Why: GitHub occasionally returns 502/504 under load and 429 when the
+    /// per-token rate limit drains; a tiny retry loop avoids surfacing those
+    /// as pipeline failures.
+    /// What: returns the final non-transient response (which may still be
+    /// non-success — the caller is expected to call `.error_for_status()`).
+    /// Test: covered indirectly by callers and by `wiremock` integration tests.
+    async fn retry_request(&self, url: &str) -> Result<reqwest::Response> {
+        let mut last_err: Option<reqwest::Error> = None;
+        for attempt in 0..=MAX_RETRIES {
+            debug!(url = %url, attempt, "GET (with retry)");
+            match self.client.get(url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let transient =
+                        status.as_u16() == 429 || (500..=599).contains(&status.as_u16());
+                    if !transient || attempt == MAX_RETRIES {
+                        return Ok(resp);
+                    }
+                    let delay = RETRY_BASE_MS * (1u64 << attempt);
+                    warn!(
+                        status = %status,
+                        attempt,
+                        delay_ms = delay,
+                        "GitHub returned transient status; retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                Err(e) => {
+                    if attempt == MAX_RETRIES {
+                        return Err(CollectError::Http(e));
+                    }
+                    let delay = RETRY_BASE_MS * (1u64 << attempt);
+                    warn!(error = %e, attempt, delay_ms = delay, "transport error; retrying");
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+            }
+        }
+        // Unreachable in practice: the loop above always returns by
+        // `attempt == MAX_RETRIES`. Fall back to the last seen transport
+        // error if we ever do escape it.
+        Err(CollectError::Http(
+            last_err.expect("retry loop preserved error"),
+        ))
+    }
+
+    /// Fetch all reviews for a given pull request, paginating until exhausted.
+    ///
+    /// Why: review counts, approval status, and review latency are core PR
+    /// metrics; the bulk-PR endpoint omits reviews entirely.
+    /// What: `GET /repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page=100`,
+    /// looping pages until a short page indicates end-of-list.
+    /// Test: deserialization shape covered by `github_review_deserializes`.
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::Http`] on transport / non-success HTTP responses
+    ///   after retries are exhausted.
+    /// - [`CollectError::Json`] on payload parse failures.
+    pub async fn fetch_pr_reviews(&self, pr_number: u64) -> Result<Vec<GitHubReview>> {
+        let mut out = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let url = format!(
+                "{GITHUB_API_BASE}/repos/{}/{}/pulls/{pr_number}/reviews?per_page={PAGE_SIZE}&page={page}",
+                self.owner, self.repo
+            );
+            let resp = self.retry_request(&url).await?.error_for_status()?;
+            let batch: Vec<GitHubReview> = resp.json().await?;
+            let n = batch.len();
+            out.extend(batch);
+            if (n as u32) < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
+
+    /// Fetch all commits attached to a pull request, paginating until exhausted.
+    ///
+    /// Why: PR-level commit lists let us attribute work to the PR author and
+    /// reconstruct review-window churn even when the merge commit alone is
+    /// recorded on the default branch.
+    /// What: `GET /repos/{owner}/{repo}/pulls/{pr_number}/commits?per_page=100`.
+    /// Test: deserialization shape covered by `github_pr_commit_deserializes`.
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::Http`] on transport / non-success HTTP responses
+    ///   after retries are exhausted.
+    /// - [`CollectError::Json`] on payload parse failures.
+    pub async fn fetch_pr_commits(&self, pr_number: u64) -> Result<Vec<GitHubPrCommit>> {
+        let mut out = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let url = format!(
+                "{GITHUB_API_BASE}/repos/{}/{}/pulls/{pr_number}/commits?per_page={PAGE_SIZE}&page={page}",
+                self.owner, self.repo
+            );
+            let resp = self.retry_request(&url).await?.error_for_status()?;
+            let batch: Vec<GitHubPrCommit> = resp.json().await?;
+            let n = batch.len();
+            out.extend(batch);
+            if (n as u32) < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
+
+    /// List issues on the configured repository, paginating until exhausted.
+    ///
+    /// Note: the GitHub `issues` endpoint includes pull requests in its
+    /// response. Callers needing pure issues should call [`Self::fetch_pull_requests`]
+    /// for PR-specific work.
+    ///
+    /// Why: bulk issue listing is needed for backfilling ticket metadata
+    /// when commit messages reference `#NNN` without a project prefix.
+    /// What: `GET /repos/{owner}/{repo}/issues?state={state}&since={since}&per_page=100`.
+    /// Test: integration-tested via the `pm` adapter suite; deserialization
+    /// reuses `GitHubIssue` whose shape is unit-tested above.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` — one of `"open"`, `"closed"`, or `"all"`.
+    /// * `since` — optional ISO8601 timestamp; only issues updated at or
+    ///   after this time are returned.
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::Http`] on transport / non-success HTTP responses
+    ///   after retries are exhausted.
+    /// - [`CollectError::Json`] on payload parse failures.
+    pub async fn list_issues(&self, state: &str, since: Option<&str>) -> Result<Vec<GitHubIssue>> {
+        let mut out = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let mut url = format!(
+                "{GITHUB_API_BASE}/repos/{}/{}/issues?state={state}&per_page={PAGE_SIZE}&page={page}",
+                self.owner, self.repo
+            );
+            if let Some(s) = since {
+                url.push_str("&since=");
+                url.push_str(s);
+            }
+            let resp = self.retry_request(&url).await?.error_for_status()?;
+            let batch: Vec<GitHubIssue> = resp.json().await?;
+            let n = batch.len();
+            out.extend(batch);
+            if (n as u32) < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +530,61 @@ mod tests {
     /// to parse.
     /// What: parses a minimal JSON document missing the optional fields.
     /// Test: assert defaults for `labels` (empty) and `body` (`None`).
+    /// Verify the wire shape of a PR review payload deserializes correctly.
+    ///
+    /// Why: `submitted_at` may be `null` for pending reviews and `user`
+    /// may be absent for deleted accounts — both must tolerate absence.
+    /// What: parses a representative reviews JSON document.
+    /// Test: assert state, user.login, and optional fields parse as expected.
+    #[test]
+    fn github_review_deserializes() {
+        let json = r#"{
+            "id": 12345,
+            "state": "APPROVED",
+            "user": {"login": "octocat"},
+            "submitted_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let r: GitHubReview = serde_json::from_str(json).expect("parses");
+        assert_eq!(r.id, 12345);
+        assert_eq!(r.state, "APPROVED");
+        assert_eq!(r.user.as_ref().map(|u| u.login.as_str()), Some("octocat"));
+        assert_eq!(r.submitted_at.as_deref(), Some("2024-01-01T00:00:00Z"));
+
+        // Missing optional fields tolerated.
+        let pending = r#"{"id": 1, "state": "PENDING"}"#;
+        let r2: GitHubReview = serde_json::from_str(pending).expect("parses pending");
+        assert!(r2.user.is_none());
+        assert!(r2.submitted_at.is_none());
+    }
+
+    /// Verify the wire shape of a PR commit payload deserializes correctly.
+    ///
+    /// Why: PR commit responses nest the message and author under a
+    /// `commit` object — the flat git2 shape doesn't apply here.
+    /// What: parses a representative `/pulls/{n}/commits` element.
+    /// Test: assert sha, message, and author fields all extract.
+    #[test]
+    fn github_pr_commit_deserializes() {
+        let json = r#"{
+            "sha": "deadbeefcafebabe",
+            "commit": {
+                "message": "feat: do the thing",
+                "author": {
+                    "name": "Ada Lovelace",
+                    "email": "ada@example.com",
+                    "date": "2024-01-01T00:00:00Z"
+                }
+            }
+        }"#;
+        let c: GitHubPrCommit = serde_json::from_str(json).expect("parses");
+        assert_eq!(c.sha, "deadbeefcafebabe");
+        assert_eq!(c.commit.message, "feat: do the thing");
+        let author = c.commit.author.expect("author present");
+        assert_eq!(author.name, "Ada Lovelace");
+        assert_eq!(author.email, "ada@example.com");
+        assert_eq!(author.date.as_deref(), Some("2024-01-01T00:00:00Z"));
+    }
+
     #[test]
     fn github_issue_tolerates_missing_optional_fields() {
         let json = r#"{

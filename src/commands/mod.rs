@@ -10,5 +10,6 @@ pub mod classify;
 pub mod collect;
 pub mod date_range;
 pub mod install;
+pub mod override_cmd;
 pub mod pr_metrics;
 pub mod report;

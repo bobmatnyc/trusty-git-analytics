@@ -14,6 +14,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use crate::classify::tiers::bedrock::BedrockClassifier;
 use crate::classify::tiers::ClassificationResult;
 use crate::core::models::ClassificationMethod;
 
@@ -42,6 +43,9 @@ pub struct LlmClassifier {
     endpoint: String,
     /// Provider-specific extra headers (e.g. OpenRouter attribution).
     extra_headers: HeaderMap,
+    /// Bedrock backend, populated only when provider == `"bedrock"`. When
+    /// `Some`, [`Self::classify`] routes through Bedrock instead of HTTP.
+    bedrock: Option<BedrockClassifier>,
 }
 
 impl LlmClassifier {
@@ -57,6 +61,7 @@ impl LlmClassifier {
             api_key,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             extra_headers: HeaderMap::new(),
+            bedrock: None,
         }
     }
 
@@ -73,20 +78,45 @@ impl LlmClassifier {
     ///
     /// If no API key can be resolved, the classifier is still constructed
     /// but every `classify` call will short-circuit to `None`.
-    pub fn from_provider(provider: &str, model: &str, openrouter_api_key: Option<String>) -> Self {
+    pub fn from_provider(
+        provider: &str,
+        model: &str,
+        openrouter_api_key: Option<String>,
+    ) -> Result<Self, String> {
         let normalized = provider.trim().to_ascii_lowercase();
         match normalized.as_str() {
-            "openrouter" => Self::build_openrouter(model, openrouter_api_key),
-            "openai" => Self::new(model, std::env::var("OPENAI_API_KEY").ok()),
+            "openrouter" => Ok(Self::build_openrouter(model, openrouter_api_key)),
+            "openai" => Ok(Self::new(model, std::env::var("OPENAI_API_KEY").ok())),
+            "bedrock" => {
+                // Bedrock requires async SDK initialization. Direct sync
+                // callers get a clear error so they know to use
+                // [`Self::from_provider_async`] (or rebuild without the
+                // feature, depending on the binary configuration).
+                info!(model, "LLM provider: bedrock (requested via sync path)");
+                #[cfg(feature = "bedrock")]
+                {
+                    Err("bedrock provider requires the async constructor; use \
+                         LlmClassifier::from_provider_async"
+                        .to_string())
+                }
+                #[cfg(not(feature = "bedrock"))]
+                {
+                    let _ = model;
+                    Err(
+                        "bedrock feature not compiled in — rebuild with --features bedrock"
+                            .to_string(),
+                    )
+                }
+            }
             "auto" | "" => {
                 let or_key =
                     openrouter_api_key.or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
                 if or_key.is_some() {
                     info!("LLM provider auto-selected: openrouter");
-                    Self::build_openrouter(model, or_key)
+                    Ok(Self::build_openrouter(model, or_key))
                 } else {
                     info!("LLM provider auto-selected: openai");
-                    Self::new(model, std::env::var("OPENAI_API_KEY").ok())
+                    Ok(Self::new(model, std::env::var("OPENAI_API_KEY").ok()))
                 }
             }
             other => {
@@ -94,9 +124,42 @@ impl LlmClassifier {
                     provider = %other,
                     "unknown LLM provider; falling back to OpenAI endpoint"
                 );
-                Self::new(model, std::env::var("OPENAI_API_KEY").ok())
+                Ok(Self::new(model, std::env::var("OPENAI_API_KEY").ok()))
             }
         }
+    }
+
+    /// Async variant of [`Self::from_provider`] that supports the `"bedrock"`
+    /// provider (whose SDK requires async credential resolution).
+    ///
+    /// All other provider strings delegate to the sync constructor.
+    ///
+    /// Why: `from_provider` is called from sync engine setup; only the
+    /// Bedrock arm truly needs `.await`, so the sync entry point handles
+    /// the common case and this exists for async callers needing Bedrock.
+    /// What: matches on `provider`, calls `BedrockClassifier::new(...)` for
+    /// `"bedrock"`, otherwise falls back to sync.
+    /// Test: indirectly via the CLI integration when invoked with
+    /// `--provider bedrock`; the missing-feature path is asserted in the
+    /// `bedrock` module's stub test.
+    pub async fn from_provider_async(
+        provider: &str,
+        model: &str,
+        openrouter_api_key: Option<String>,
+    ) -> Result<Self, String> {
+        if provider.trim().eq_ignore_ascii_case("bedrock") {
+            info!(model, "LLM provider: bedrock (async init)");
+            let bedrock = BedrockClassifier::new(model).await?;
+            return Ok(Self {
+                client: Client::new(),
+                model: model.to_string(),
+                api_key: None,
+                endpoint: String::new(),
+                extra_headers: HeaderMap::new(),
+                bedrock: Some(bedrock),
+            });
+        }
+        Self::from_provider(provider, model, openrouter_api_key)
     }
 
     /// Internal helper: build an OpenRouter-configured classifier with
@@ -114,6 +177,7 @@ impl LlmClassifier {
             api_key: key,
             endpoint: OPENROUTER_ENDPOINT.to_string(),
             extra_headers: headers,
+            bedrock: None,
         }
     }
 
@@ -128,6 +192,14 @@ impl LlmClassifier {
     /// Returns `None` if the LLM is disabled (no API key), the request
     /// fails, or the response cannot be parsed.
     pub async fn classify(&self, message: &str) -> Option<ClassificationResult> {
+        if let Some(bedrock) = &self.bedrock {
+            return bedrock
+                .classify_batch_bedrock(&[message])
+                .await
+                .into_iter()
+                .next()
+                .flatten();
+        }
         let api_key = self.api_key.as_deref()?;
 
         let body = ChatRequest {
