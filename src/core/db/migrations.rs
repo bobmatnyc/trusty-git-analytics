@@ -51,6 +51,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "work_items",
         sql: include_str!("sql/0005_work_items.sql"),
     },
+    Migration {
+        version: 6,
+        name: "classification_overrides",
+        sql: include_str!("sql/0006_classification_overrides.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

@@ -270,10 +270,22 @@ pub struct ClassificationConfig {
     /// ```
     #[serde(default)]
     pub custom_categories: Vec<SubcategoryDef>,
+
+    /// Minimum acceptable classification coverage percentage (0–100).
+    ///
+    /// After a classification run, the pipeline computes the share of
+    /// commits that received a non-null, non-`"uncategorized"` verdict and
+    /// emits a `tracing::warn!` if the result falls below this threshold.
+    #[serde(default = "default_min_coverage_pct")]
+    pub min_coverage_pct: f64,
 }
 
 fn default_confidence_threshold() -> f64 {
     0.7
+}
+
+fn default_min_coverage_pct() -> f64 {
+    20.0
 }
 
 fn default_true() -> bool {
@@ -349,6 +361,19 @@ pub struct JiraConfig {
     /// Project key for filtering issues (e.g. `API`).
     #[serde(default)]
     pub project_key: Option<String>,
+
+    /// Maps JIRA project keys to canonical work types (subcategory names).
+    ///
+    /// Used by the Tier 3 [`crate::classify::tiers::jira_project_tier::JiraProjectTier`]
+    /// classifier. Example YAML:
+    /// ```yaml
+    /// jira:
+    ///   jira_project_mappings:
+    ///     INFRA: platform
+    ///     DATA: feature
+    /// ```
+    #[serde(default)]
+    pub jira_project_mappings: HashMap<String, String>,
 }
 
 /// Expand a leading `~` in a path to the current user's home directory.

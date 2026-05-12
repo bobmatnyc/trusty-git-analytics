@@ -30,8 +30,8 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
     let stats = pipeline.run(db).await?;
 
     println!(
-        "Classified {}/{} commits",
-        stats.classified, stats.total_commits
+        "Classified {}/{} commits ({:.1}% coverage)",
+        stats.classified, stats.total_commits, stats.coverage_pct
     );
     if !stats.by_method.is_empty() {
         println!("By method:");

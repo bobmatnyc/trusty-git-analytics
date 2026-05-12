@@ -8,7 +8,10 @@
 
 pub mod exact;
 pub mod fuzzy;
+pub mod issue_type_tier;
+pub mod jira_project_tier;
 pub mod llm;
+pub mod override_tier;
 pub mod regex_tier;
 
 use serde::{Deserialize, Serialize};

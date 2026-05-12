@@ -1,13 +1,20 @@
-//! Cascade orchestrator combining the four classification tiers.
+//! Cascade orchestrator combining the classification tiers.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use rayon::prelude::*;
+use rusqlite::Connection;
 
 use crate::classify::errors::Result;
 use crate::classify::rules::RuleSet;
 use crate::classify::taxonomy::{SubcategoryDef, TaxonomyRegistry};
 use crate::classify::tiers::exact::ExactMatcher;
 use crate::classify::tiers::fuzzy::FuzzyClassifier;
+use crate::classify::tiers::issue_type_tier::IssueTypeTier;
+use crate::classify::tiers::jira_project_tier::JiraProjectTier;
 use crate::classify::tiers::llm::LlmClassifier;
+use crate::classify::tiers::override_tier::OverrideTier;
 use crate::classify::tiers::regex_tier::RegexMatcher;
 use crate::classify::tiers::ClassificationResult;
 use crate::core::models::ClassificationMethod;
@@ -37,10 +44,13 @@ impl Default for ClassificationEngineConfig {
     }
 }
 
-/// Combined four-tier cascade.
+/// Combined classification cascade.
 pub struct ClassificationEngine {
+    override_tier: Option<OverrideTier>,
     exact: ExactMatcher,
+    issue_type: IssueTypeTier,
     regex: RegexMatcher,
+    jira_project: JiraProjectTier,
     fuzzy: FuzzyClassifier,
     llm: Option<LlmClassifier>,
     taxonomy: TaxonomyRegistry,
@@ -75,6 +85,22 @@ impl ClassificationEngine {
         config: ClassificationEngineConfig,
         custom_taxonomy: Vec<SubcategoryDef>,
     ) -> Result<Self> {
+        Self::with_taxonomy_and_mappings(ruleset, config, custom_taxonomy, HashMap::new(), None)
+    }
+
+    /// Full builder allowing JIRA project-key mappings and an optional DB
+    /// connection for the manual-override tier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the rules fail to compile.
+    pub fn with_taxonomy_and_mappings(
+        ruleset: RuleSet,
+        config: ClassificationEngineConfig,
+        custom_taxonomy: Vec<SubcategoryDef>,
+        jira_project_mappings: HashMap<String, String>,
+        override_conn: Option<Arc<Mutex<Connection>>>,
+    ) -> Result<Self> {
         let exact = ExactMatcher::new(&ruleset.rules)?;
         let regex = RegexMatcher::new(&ruleset.rules)?;
         let fuzzy = FuzzyClassifier;
@@ -85,9 +111,15 @@ impl ClassificationEngine {
             None
         };
         let taxonomy = TaxonomyRegistry::new(custom_taxonomy);
+        let issue_type = IssueTypeTier::with_taxonomy(taxonomy.clone());
+        let jira_project = JiraProjectTier::with_taxonomy(jira_project_mappings, taxonomy.clone());
+        let override_tier = override_conn.map(|c| OverrideTier::with_taxonomy(c, taxonomy.clone()));
         Ok(Self {
+            override_tier,
             exact,
+            issue_type,
             regex,
+            jira_project,
             fuzzy,
             llm,
             taxonomy,
@@ -105,11 +137,39 @@ impl ClassificationEngine {
         &self.config
     }
 
-    /// Run tiers 1–3 (synchronous) for a single message.
+    /// Run the synchronous tiers (0, 1, 1.5, 2, 3, 3.5) for a single message.
     ///
     /// Returns `None` if no tier matched; callers may then invoke the
     /// async [`ClassificationEngine::classify`] for the LLM fallback.
+    ///
+    /// `commit_sha` and `repo_path` are optional; when supplied, the
+    /// manual-override tier (Tier 0) is consulted first. When `issue_type`
+    /// is supplied, the issue-type tier (Tier 1.5) is consulted between
+    /// the exact and regex tiers.
     pub fn classify_sync(&self, message: &str, is_merge: bool) -> Option<ClassificationResult> {
+        self.classify_sync_with_context(message, is_merge, None, None, None)
+    }
+
+    /// Context-aware variant of [`Self::classify_sync`] that supplies
+    /// optional commit identity (for Tier 0) and PM-system issue type
+    /// (for Tier 1.5).
+    pub fn classify_sync_with_context(
+        &self,
+        message: &str,
+        is_merge: bool,
+        commit_sha: Option<&str>,
+        repo_path: Option<&str>,
+        issue_type: Option<&str>,
+    ) -> Option<ClassificationResult> {
+        // Tier 0: manual override (DB lookup, short-circuits everything).
+        if let (Some(tier), Some(sha), Some(repo)) =
+            (self.override_tier.as_ref(), commit_sha, repo_path)
+        {
+            if let Some(r) = tier.lookup(sha, repo) {
+                return Some(r);
+            }
+        }
+
         // Tier 1: exact keywords
         if let Some(rule) = self.exact.classify(message) {
             return Some(ClassificationResult {
@@ -120,6 +180,14 @@ impl ClassificationEngine {
                 method: ClassificationMethod::ExactRule,
                 ticket_id: RegexMatcher::extract_ticket_id(message),
             });
+        }
+
+        // Tier 1.5: PM issue-type mapping.
+        if let Some(it) = issue_type {
+            if let Some(mut r) = self.issue_type.classify(it) {
+                r.ticket_id = RegexMatcher::extract_ticket_id(message);
+                return Some(r);
+            }
         }
 
         // Tier 2: regex
@@ -134,7 +202,14 @@ impl ClassificationEngine {
             });
         }
 
-        // Tier 3: fuzzy heuristics
+        // Tier 3: JIRA project-key mapping (if configured).
+        if !self.jira_project.is_empty() {
+            if let Some(r) = self.jira_project.classify(message) {
+                return Some(r);
+            }
+        }
+
+        // Tier 3.5: fuzzy heuristics
         if let Some(mut result) = self.fuzzy.classify(message, is_merge) {
             if result.ticket_id.is_none() {
                 result.ticket_id = RegexMatcher::extract_ticket_id(message);
