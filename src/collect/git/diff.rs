@@ -48,6 +48,16 @@ pub struct FileDiff {
 ///
 /// Propagates any `git2` errors from tree lookups or diff computation.
 pub fn compute_commit_diff(repo: &Repository, commit: &Commit<'_>) -> Result<CommitDiff> {
+    // PROFILING NOTE (see docs/adr/0002-performance-hotspots.md):
+    // `commit.tree()?` and `commit.parent(0)?.tree()?` are libgit2 object
+    // lookups against the on-disk ODB. Profiles on a 58K-commit monolith
+    // show ~35% of `collect_window` time is spent in these two calls.
+    // A future optimisation could cache the previous commit's tree across
+    // adjacent revwalk steps, but `Sort::TIME` does not guarantee parent
+    // adjacency on merge-heavy histories, so the cache hit rate is
+    // workload-dependent. The simpler win — `find_similar` with rename
+    // detection only when the diff would otherwise show many add/delete
+    // pairs — is left as a follow-up.
     let tree = commit.tree()?;
     let parent_tree = if commit.parent_count() > 0 {
         Some(commit.parent(0)?.tree()?)

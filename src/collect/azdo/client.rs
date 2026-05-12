@@ -121,6 +121,14 @@ pub struct AzdoWorkItem {
     pub team_project: String,
     /// Self URL from ADO (if present in response).
     pub url: Option<String>,
+    /// `System.IterationPath` — the sprint/iteration the item lives in.
+    /// `None` if ADO did not return the field (some older work items predate
+    /// the iteration model).
+    #[serde(default)]
+    pub iteration_path: Option<String>,
+    /// `System.AreaPath` — the team/area the item is owned by.
+    #[serde(default)]
+    pub area_path: Option<String>,
 }
 
 /// Backwards-compatible alias for the original Phase-1 placeholder type.
@@ -212,6 +220,59 @@ pub struct AzdoUser {
     pub mail_address: Option<String>,
     /// UPN / login name (e.g. `"alice@contoso.com"`), if visible.
     pub principal_name: Option<String>,
+}
+
+/// ADO work item comment (Phase 5 ext).
+///
+/// Returned by
+/// `GET {org}/{project}/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3`.
+/// The `text` field may contain HTML formatting as authored in the ADO UI;
+/// callers that need plain text should strip tags downstream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AzdoComment {
+    /// Comment ID — unique within the work item.
+    pub id: u32,
+    /// Comment body (may contain HTML markup).
+    pub text: String,
+    /// Display name of the user who created the comment.
+    pub created_by: String,
+    /// ISO 8601 creation timestamp.
+    pub created_date: String,
+}
+
+/// Extended ADO work item with iteration/area paths and arbitrary custom
+/// fields (Phase 5 ext).
+///
+/// Fetched via
+/// `GET {org}/{project}/_apis/wit/workitems/{id}?$expand=all&api-version=7.1`.
+/// Unlike [`AzdoWorkItem`] (which projects a known field set via the batch
+/// endpoint), this shape preserves any process-template / org-specific
+/// fields in [`Self::custom_fields`] so callers can read them dynamically.
+///
+/// `custom_fields` contains every `fields.*` entry from the ADO response
+/// that is **not** one of the standard fields surfaced as named struct
+/// fields (`System.Id`, `System.Title`, `System.State`,
+/// `System.WorkItemType`, `System.Tags`, `System.IterationPath`,
+/// `System.AreaPath`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AzdoWorkItemExtended {
+    /// ADO work-item integer ID.
+    pub id: u32,
+    /// `System.Title`.
+    pub title: String,
+    /// `System.State`.
+    pub state: String,
+    /// `System.WorkItemType`.
+    pub work_item_type: String,
+    /// `System.IterationPath` — the sprint/iteration this item lives in.
+    pub iteration_path: Option<String>,
+    /// `System.AreaPath` — the team/area this item is owned by.
+    pub area_path: Option<String>,
+    /// `System.Tags` — split on `; ` and trimmed.
+    pub tags: Vec<String>,
+    /// All non-standard `fields.*` entries from the ADO response, keyed by
+    /// reference name (e.g. `"Microsoft.VSTS.Common.Priority"`).
+    pub custom_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// ADO project descriptor (Phase 2 — list-projects shape).
@@ -361,6 +422,56 @@ struct IterationAttributesRaw {
     finish_date: Option<String>,
     #[serde(default)]
     time_frame: String,
+}
+
+/// Work-item comments response (Phase 5 ext).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentsResponse {
+    #[serde(default)]
+    comments: Vec<CommentRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentRaw {
+    id: u32,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    created_by: IdentityRefRaw,
+    #[serde(default)]
+    created_date: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct IdentityRefRaw {
+    #[serde(default)]
+    display_name: String,
+}
+
+/// Work-item single-fetch response with `relations` expanded (Phase 5 ext).
+#[derive(Debug, Deserialize)]
+struct WorkItemRelationsResponse {
+    #[serde(default)]
+    relations: Vec<WorkItemRelationRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkItemRelationRaw {
+    #[serde(default)]
+    rel: String,
+    #[serde(default)]
+    url: String,
+    /// Relation attributes (e.g. `name: "Fixed in Commit"`). Currently
+    /// unused by [`extract_commit_shas_from_relations`] — we identify
+    /// commit links via the `vstfs:///Git/Commit/` URL scheme — but we
+    /// deserialize the field to validate the wire format and to keep the
+    /// door open for filtering by `attributes.name` in the future.
+    #[serde(default)]
+    #[allow(dead_code)]
+    attributes: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Graph user response (Phase 4 ext).
@@ -806,6 +917,8 @@ impl AzureDevOpsClient {
             "System.WorkItemType",
             "System.Tags",
             "System.TeamProject",
+            "System.IterationPath",
+            "System.AreaPath",
         ];
 
         let mut all = Vec::with_capacity(ids.len());
@@ -941,6 +1054,169 @@ impl AzureDevOpsClient {
             .collect())
     }
 
+    /// Fetch all comments for a single work item (Phase 5 ext).
+    ///
+    /// Calls
+    /// `GET {org}/{project}/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.3`.
+    /// Returns comments in the order ADO returns them — typically
+    /// chronological (oldest first), but this is not guaranteed.
+    ///
+    /// # Errors
+    ///
+    /// Same set as [`Self::test_connection`]. Returns
+    /// [`AzdoError::NotFound`] if the work item ID does not exist or is in
+    /// a different organisation.
+    pub async fn get_work_item_comments(
+        &self,
+        project: &str,
+        work_item_id: u32,
+    ) -> Result<Vec<AzdoComment>, AzdoError> {
+        self.validate_credentials()?;
+
+        let client = build_client()?;
+        let url = format!(
+            "{}/{}/_apis/wit/workItems/{}/comments?api-version=7.1-preview.3",
+            self.org_url(),
+            encode_path_segment(project),
+            work_item_id,
+        );
+        tracing::debug!(url = %url, "GET work item comments");
+
+        let resp = client
+            .get(&url)
+            .basic_auth("", Some(&self.config.pat))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(Self::map_status(resp).await);
+        }
+
+        let body: CommentsResponse = resp
+            .json()
+            .await
+            .map_err(|e| AzdoError::Parse(e.to_string()))?;
+
+        Ok(body
+            .comments
+            .into_iter()
+            .map(|c| AzdoComment {
+                id: c.id,
+                text: c.text,
+                created_by: c.created_by.display_name,
+                created_date: c.created_date,
+            })
+            .collect())
+    }
+
+    /// Fetch a single work item with **all** fields expanded (Phase 5 ext).
+    ///
+    /// Calls
+    /// `GET {org}/_apis/wit/workitems/{id}?$expand=all&api-version=7.1`.
+    /// Unlike [`Self::get_work_items`] (which projects a fixed field list
+    /// via the batch endpoint), this returns every field on the work item,
+    /// including process-template-specific custom fields.
+    ///
+    /// Returns `Ok(None)` if ADO returns 404 (work item deleted or wrong
+    /// organisation). All other non-success statuses surface as errors.
+    ///
+    /// # Errors
+    ///
+    /// Same set as [`Self::test_connection`], except 404 is mapped to
+    /// `Ok(None)` rather than [`AzdoError::NotFound`].
+    pub async fn get_work_item_extended(
+        &self,
+        id: u32,
+    ) -> Result<Option<AzdoWorkItemExtended>, AzdoError> {
+        self.validate_credentials()?;
+
+        let client = build_client()?;
+        let url = format!(
+            "{}/_apis/wit/workitems/{}?$expand=all&api-version=7.1",
+            self.org_url(),
+            id,
+        );
+        tracing::debug!(url = %url, "GET work item extended");
+
+        let resp = client
+            .get(&url)
+            .basic_auth("", Some(&self.config.pat))
+            .send()
+            .await?;
+
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(Self::map_status(resp).await);
+        }
+
+        let raw: WorkItemRaw = resp
+            .json()
+            .await
+            .map_err(|e| AzdoError::Parse(e.to_string()))?;
+
+        Ok(Some(parse_work_item_extended(raw)))
+    }
+
+    /// Fetch the native commit-link list for a work item (Phase 5 ext).
+    ///
+    /// Calls
+    /// `GET {org}/_apis/wit/workItems/{id}?$expand=relations&api-version=7.1`
+    /// and scans `relations[]` for entries whose `rel` is
+    /// `"ArtifactLink"` with attribute name `"Fixed in Commit"` or any
+    /// `System.LinkTypes.Versioned*` relation. The commit SHA is extracted
+    /// from the `vstfs:///Git/Commit/<projectId>%2F<repoId>%2F<sha>` URL
+    /// scheme used by ADO artifact links.
+    ///
+    /// Returns the list of commit SHAs linked to this work item, in the
+    /// order ADO returns them. Returns an empty `Vec` if the work item has
+    /// no commit links, or if 404 (work item deleted).
+    ///
+    /// # Errors
+    ///
+    /// Same set as [`Self::test_connection`], except 404 maps to
+    /// `Ok(vec![])`.
+    pub async fn get_work_item_commit_links(
+        &self,
+        project: &str,
+        work_item_id: u32,
+    ) -> Result<Vec<String>, AzdoError> {
+        self.validate_credentials()?;
+        // `project` is part of the URL for symmetry with other methods; the
+        // work-item endpoint itself is org-scoped, but routing through the
+        // project segment makes the request appear in the project's audit
+        // log and is what ADO's own UI emits.
+        let client = build_client()?;
+        let url = format!(
+            "{}/{}/_apis/wit/workItems/{}?$expand=relations&api-version=7.1",
+            self.org_url(),
+            encode_path_segment(project),
+            work_item_id,
+        );
+        tracing::debug!(url = %url, "GET work item relations");
+
+        let resp = client
+            .get(&url)
+            .basic_auth("", Some(&self.config.pat))
+            .send()
+            .await?;
+
+        if resp.status().as_u16() == 404 {
+            return Ok(Vec::new());
+        }
+        if !resp.status().is_success() {
+            return Err(Self::map_status(resp).await);
+        }
+
+        let raw: WorkItemRelationsResponse = resp
+            .json()
+            .await
+            .map_err(|e| AzdoError::Parse(e.to_string()))?;
+
+        Ok(extract_commit_shas_from_relations(&raw.relations))
+    }
+
     /// Build the Graph users URL for this client's organisation.
     ///
     /// Supports two organisation URL forms:
@@ -1004,6 +1280,14 @@ fn parse_work_item(raw: WorkItemRaw) -> AzdoWorkItem {
             .collect()
     };
 
+    let get_opt = |key: &str| -> Option<String> {
+        raw.fields
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    };
+
     AzdoWorkItem {
         id: raw.id,
         title: get_str("System.Title"),
@@ -1012,7 +1296,115 @@ fn parse_work_item(raw: WorkItemRaw) -> AzdoWorkItem {
         tags,
         team_project: get_str("System.TeamProject"),
         url: raw.url,
+        iteration_path: get_opt("System.IterationPath"),
+        area_path: get_opt("System.AreaPath"),
     }
+}
+
+/// Build an [`AzdoWorkItemExtended`] from a raw single-fetch work item
+/// (the `$expand=all` shape). Splits `System.Tags` on `; ` and routes
+/// non-standard fields into [`AzdoWorkItemExtended::custom_fields`].
+fn parse_work_item_extended(raw: WorkItemRaw) -> AzdoWorkItemExtended {
+    use std::collections::HashMap;
+
+    // The "standard" fields we surface as named struct fields; everything
+    // else lands in `custom_fields`.
+    const STANDARD_FIELDS: &[&str] = &[
+        "System.Id",
+        "System.Title",
+        "System.State",
+        "System.WorkItemType",
+        "System.Tags",
+        "System.IterationPath",
+        "System.AreaPath",
+    ];
+
+    let get_str = |key: &str| -> String {
+        raw.fields
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let get_opt = |key: &str| -> Option<String> {
+        raw.fields
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    let tags_raw = get_str("System.Tags");
+    let tags = if tags_raw.is_empty() {
+        Vec::new()
+    } else {
+        tags_raw
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+
+    let mut custom_fields: HashMap<String, serde_json::Value> = HashMap::new();
+    for (k, v) in &raw.fields {
+        if !STANDARD_FIELDS.contains(&k.as_str()) {
+            custom_fields.insert(k.clone(), v.clone());
+        }
+    }
+
+    AzdoWorkItemExtended {
+        id: raw.id,
+        title: get_str("System.Title"),
+        state: get_str("System.State"),
+        work_item_type: get_str("System.WorkItemType"),
+        iteration_path: get_opt("System.IterationPath"),
+        area_path: get_opt("System.AreaPath"),
+        tags,
+        custom_fields,
+    }
+}
+
+/// Extract commit SHAs from a list of ADO work-item relations.
+///
+/// ADO encodes a commit link as a relation with `rel == "ArtifactLink"`
+/// and a `url` of the form
+/// `vstfs:///Git/Commit/<projectId>%2F<repoId>%2F<sha>`. The SHA is the
+/// segment after the second `%2F` (or `/` after URL-decoding).
+fn extract_commit_shas_from_relations(relations: &[WorkItemRelationRaw]) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in relations {
+        // ADO uses `ArtifactLink` with attribute `name == "Fixed in Commit"`
+        // (or "Branch", "Pull Request", ...). We accept any artifact link
+        // whose URL points to `vstfs:///Git/Commit/...`. We also keep the
+        // legacy `System.LinkTypes.Versioned*` `rel` values in case ADO
+        // surfaces them on older work items.
+        let is_artifact = r.rel.eq_ignore_ascii_case("ArtifactLink");
+        let is_versioned = r.rel.starts_with("System.LinkTypes.Versioned");
+        if !(is_artifact || is_versioned) {
+            continue;
+        }
+        // Match the commit URL scheme. We accept both `%2F` (URL-encoded)
+        // and `/` separators between the path segments.
+        let lower = r.url.to_lowercase();
+        if !lower.starts_with("vstfs:///git/commit/") {
+            continue;
+        }
+        let suffix = &r.url["vstfs:///Git/Commit/".len()..];
+        // Take the last segment after either `%2F` or `/`. ADO emits
+        // `%2F` in practice; we tolerate both.
+        let last = suffix
+            .rsplit_once("%2F")
+            .or_else(|| suffix.rsplit_once("%2f"))
+            .or_else(|| suffix.rsplit_once('/'))
+            .map(|(_, sha)| sha)
+            .unwrap_or(suffix);
+        // Strip any trailing query string just in case.
+        let sha = last.split('?').next().unwrap_or(last).trim();
+        if !sha.is_empty() {
+            out.push(sha.to_string());
+        }
+    }
+    out
 }
 
 /// Extract Azure DevOps work-item IDs from arbitrary text.
@@ -1922,5 +2314,216 @@ mod tests {
             .await
             .expect("trailing slash should be tolerated");
         assert!(projects.is_empty());
+    }
+
+    // ----- Phase 5 ext: comments, extended work items, commit links -----
+
+    #[tokio::test]
+    async fn get_work_item_comments_parses_response() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "totalCount": 2,
+            "count": 2,
+            "comments": [
+                {
+                    "id": 101,
+                    "workItemId": 42,
+                    "text": "Looks good to me",
+                    "createdBy": { "displayName": "Alice" },
+                    "createdDate": "2025-01-01T12:00:00Z"
+                },
+                {
+                    "id": 102,
+                    "workItemId": 42,
+                    "text": "<div>Done</div>",
+                    "createdBy": { "displayName": "Bob" },
+                    "createdDate": "2025-01-02T08:00:00Z"
+                }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path("/MyProject/_apis/wit/workItems/42/comments"))
+            .and(query_param("api-version", "7.1-preview.3"))
+            .and(header("authorization", EXPECTED_AUTH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let comments = client
+            .get_work_item_comments("MyProject", 42)
+            .await
+            .expect("200 ok");
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].id, 101);
+        assert_eq!(comments[0].text, "Looks good to me");
+        assert_eq!(comments[0].created_by, "Alice");
+        assert_eq!(comments[0].created_date, "2025-01-01T12:00:00Z");
+        assert_eq!(comments[1].text, "<div>Done</div>");
+    }
+
+    #[tokio::test]
+    async fn get_work_item_comments_maps_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/MyProject/_apis/wit/workItems/999/comments"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let err = client
+            .get_work_item_comments("MyProject", 999)
+            .await
+            .expect_err("404");
+        assert!(matches!(err, AzdoError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn get_work_item_extended_returns_full_fields() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "id": 42,
+            "url": "https://x/42",
+            "fields": {
+                "System.Id": 42,
+                "System.Title": "Improve cache",
+                "System.State": "Active",
+                "System.WorkItemType": "User Story",
+                "System.Tags": "perf; cache",
+                "System.IterationPath": "MyProject\\Sprint 3",
+                "System.AreaPath": "MyProject\\Backend",
+                "Microsoft.VSTS.Common.Priority": 2,
+                "Custom.RiskScore": "medium"
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/_apis/wit/workitems/42"))
+            .and(query_param("api-version", "7.1"))
+            .and(query_param("$expand", "all"))
+            .and(header("authorization", EXPECTED_AUTH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let item = client
+            .get_work_item_extended(42)
+            .await
+            .expect("200 ok")
+            .expect("found");
+        assert_eq!(item.id, 42);
+        assert_eq!(item.title, "Improve cache");
+        assert_eq!(item.state, "Active");
+        assert_eq!(item.work_item_type, "User Story");
+        assert_eq!(item.tags, vec!["perf", "cache"]);
+        assert_eq!(item.iteration_path.as_deref(), Some("MyProject\\Sprint 3"));
+        assert_eq!(item.area_path.as_deref(), Some("MyProject\\Backend"));
+        // Standard fields must NOT be in custom_fields.
+        assert!(!item.custom_fields.contains_key("System.Title"));
+        assert!(!item.custom_fields.contains_key("System.IterationPath"));
+        // Custom fields must be present.
+        assert_eq!(
+            item.custom_fields
+                .get("Microsoft.VSTS.Common.Priority")
+                .and_then(|v| v.as_i64()),
+            Some(2)
+        );
+        assert_eq!(
+            item.custom_fields
+                .get("Custom.RiskScore")
+                .and_then(|v| v.as_str()),
+            Some("medium")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_work_item_extended_maps_404_to_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_apis/wit/workitems/999"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let out = client.get_work_item_extended(999).await.expect("ok(None)");
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_work_item_commit_links_extracts_shas() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "id": 42,
+            "relations": [
+                {
+                    "rel": "ArtifactLink",
+                    "url": "vstfs:///Git/Commit/proj-guid%2Frepo-guid%2Fabc123def456",
+                    "attributes": { "name": "Fixed in Commit" }
+                },
+                {
+                    "rel": "ArtifactLink",
+                    "url": "vstfs:///Git/Commit/proj-guid%2Frepo-guid%2F0123456789abcdef",
+                    "attributes": { "name": "Fixed in Commit" }
+                },
+                {
+                    "rel": "System.LinkTypes.Related",
+                    "url": "https://dev.azure.com/myorg/_apis/wit/workItems/77",
+                    "attributes": {}
+                }
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path("/MyProject/_apis/wit/workItems/42"))
+            .and(query_param("api-version", "7.1"))
+            .and(query_param("$expand", "relations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let shas = client
+            .get_work_item_commit_links("MyProject", 42)
+            .await
+            .expect("200 ok");
+        assert_eq!(shas, vec!["abc123def456", "0123456789abcdef"]); // pragma: allowlist secret
+    }
+
+    #[tokio::test]
+    async fn get_work_item_commit_links_404_returns_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/MyProject/_apis/wit/workItems/999"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let shas = client
+            .get_work_item_commit_links("MyProject", 999)
+            .await
+            .expect("404 yields empty");
+        assert!(shas.is_empty());
+    }
+
+    #[test]
+    fn extract_commit_shas_handles_versioned_and_artifact_rels() {
+        let rels = vec![
+            WorkItemRelationRaw {
+                rel: "ArtifactLink".into(),
+                url: "vstfs:///Git/Commit/p%2Fr%2Fdeadbeef".into(),
+                attributes: serde_json::Map::new(),
+            },
+            WorkItemRelationRaw {
+                rel: "System.LinkTypes.VersionedRelated".into(),
+                url: "vstfs:///Git/Commit/p/r/cafebabe".into(),
+                attributes: serde_json::Map::new(),
+            },
+            WorkItemRelationRaw {
+                rel: "AttachedFile".into(),
+                url: "vstfs:///Git/Commit/p%2Fr%2Fnotacommit".into(),
+                attributes: serde_json::Map::new(),
+            },
+        ];
+        let shas = extract_commit_shas_from_relations(&rels);
+        assert_eq!(shas, vec!["deadbeef", "cafebabe"]);
     }
 }

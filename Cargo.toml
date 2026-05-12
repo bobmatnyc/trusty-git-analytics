@@ -78,3 +78,9 @@ bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
 [dev-dependencies]
 # HTTP mocking for async reqwest tests
 wiremock = "0.6"
+# Statistical benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "tga_bench"
+harness = false
