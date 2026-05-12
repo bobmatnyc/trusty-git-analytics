@@ -56,6 +56,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "classification_overrides",
         sql: include_str!("sql/0006_classification_overrides.sql"),
     },
+    Migration {
+        version: 7,
+        name: "pr_metrics_and_backfill",
+        sql: include_str!("sql/0007_pr_metrics_and_backfill.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
