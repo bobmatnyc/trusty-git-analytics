@@ -63,9 +63,22 @@ impl ReportPipeline {
                 FORMAT_CSV => {
                     files_written.push(csv_fmt::write_author_csv(&data, &output_dir)?);
                     files_written.push(csv_fmt::write_weekly_csv(&data, &output_dir)?);
+                    files_written.push(csv_fmt::write_weekly_metrics_csv(&data, &output_dir)?);
+                    files_written.push(csv_fmt::write_developer_activity_csv(&data, &output_dir)?);
+                    files_written.push(csv_fmt::write_summary_csv(&data, &output_dir)?);
+                    files_written.push(csv_fmt::write_untracked_csv(&data, &output_dir)?);
+                    files_written.push(csv_fmt::write_weekly_categorization_csv(
+                        &data,
+                        &output_dir,
+                    )?);
+                    files_written.push(csv_fmt::write_weekly_velocity_csv(&data, &output_dir)?);
+                    files_written.push(csv_fmt::write_weekly_dora_csv(&data, &output_dir)?);
                 }
                 FORMAT_JSON => {
                     files_written.push(json_fmt::write_json(&data, &output_dir)?);
+                    files_written.push(json_fmt::write_velocity_json(&data, &output_dir)?);
+                    files_written.push(json_fmt::write_quality_json(&data, &output_dir)?);
+                    files_written.push(json_fmt::write_dora_json(&data, &output_dir)?);
                 }
                 FORMAT_MARKDOWN | "md" => {
                     files_written.push(md_fmt::write_markdown(&data, &output_dir)?);

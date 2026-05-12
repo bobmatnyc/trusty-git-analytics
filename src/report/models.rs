@@ -68,6 +68,186 @@ pub struct WeeklyActivity {
     pub categories: HashMap<String, usize>,
 }
 
+/// Per-week aggregated metrics across all developers and repositories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeeklyMetrics {
+    /// ISO week label (e.g. `"2024-W03"`).
+    pub week: String,
+    /// Total commits in the week.
+    pub total_commits: usize,
+    /// Feature commits.
+    pub feature_commits: usize,
+    /// Bugfix commits.
+    pub bugfix_commits: usize,
+    /// Maintenance commits.
+    pub maintenance_commits: usize,
+    /// Refactor commits.
+    pub refactor_commits: usize,
+    /// Test commits.
+    pub test_commits: usize,
+    /// Documentation commits.
+    pub doc_commits: usize,
+    /// Distinct active developers.
+    pub active_developers: usize,
+    /// Story points (placeholder — sourced from work items when available).
+    pub story_points: f64,
+}
+
+/// Per-developer activity summary across the full reporting period.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeveloperActivitySummary {
+    /// Stable developer identifier (canonical email).
+    pub developer_id: String,
+    /// Canonical display name.
+    pub display_name: String,
+    /// Total commits attributed to this developer.
+    pub total_commits: usize,
+    /// Distinct ISO weeks with at least one commit.
+    pub active_weeks: usize,
+    /// `total_commits / active_weeks` (zero when no active weeks).
+    pub avg_commits_per_week: f64,
+    /// Modal `change_type` for this developer (e.g. `"feature"`).
+    pub primary_work_type: String,
+    /// Story points contributed (currently zero — placeholder).
+    pub story_points_total: f64,
+    /// Composite activity score, see [`ActivityWeights`].
+    pub activity_score: f64,
+}
+
+/// Single-row overview metrics for the whole report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportSummary {
+    /// Period range as `"<start> .. <end>"` (ISO 8601, UTC).
+    pub date_range: String,
+    /// Total commit count.
+    pub total_commits: usize,
+    /// Total distinct developer count.
+    pub total_developers: usize,
+    /// Total distinct ISO weeks observed.
+    pub total_weeks: usize,
+    /// Classification coverage percent (commits with a non-null category).
+    pub classification_coverage_pct: f64,
+}
+
+/// A commit that has no associated work-item / ticket reference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UntrackedCommit {
+    /// Commit SHA.
+    pub sha: String,
+    /// Author display name.
+    pub author: String,
+    /// Author timestamp (ISO 8601).
+    pub date: String,
+    /// First line of the commit message.
+    pub message: String,
+}
+
+/// Per-week per-change-type count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeeklyCategorization {
+    /// ISO week label.
+    pub week: String,
+    /// Change type / category label.
+    pub change_type: String,
+    /// Number of commits.
+    pub commit_count: usize,
+    /// Percentage of the week's total commits this category represents.
+    pub pct_of_week: f64,
+}
+
+/// Per-week velocity metrics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeeklyVelocity {
+    /// ISO week label.
+    pub week: String,
+    /// PRs merged in the week.
+    pub prs_merged: usize,
+    /// Average PR cycle time (created → merged) in hours.
+    pub avg_pr_cycle_time_hours: f64,
+    /// Story points delivered (placeholder, currently zero).
+    pub story_points: f64,
+    /// Average commits per active developer in the week.
+    pub commits_per_developer: f64,
+}
+
+/// DORA "Accelerate" metrics over the full reporting period.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoraMetrics {
+    /// Deployment frequency in deploys per week.
+    pub deployment_frequency: f64,
+    /// Average lead time (PR open → merge) in hours. Zero if no PR data.
+    pub lead_time_hours: f64,
+    /// Change failure rate: bugfix commits / total commits.
+    pub change_failure_rate: f64,
+    /// MTTR approximation: average hours between a bug-introducing commit and
+    /// its bugfix commit. Zero if no commit-pairs found.
+    pub mttr_hours: f64,
+    /// Aggregate performance band: `"elite" | "high" | "medium" | "low"`.
+    pub performance_level: String,
+}
+
+/// Period-level velocity summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VelocitySummary {
+    /// Average PR cycle time in hours (outlier-filtered).
+    pub pr_cycle_time_avg_hours: f64,
+    /// Median PR cycle time in hours (outlier-filtered).
+    pub pr_cycle_time_median_hours: f64,
+    /// PRs merged per ISO week (mean across weeks observed).
+    pub pr_throughput_per_week: f64,
+    /// Revision rate placeholder — currently zero because review-round data
+    /// is not yet collected; surfaced so the schema is stable.
+    pub revision_rate: f64,
+    /// Total PRs considered after outlier filtering.
+    pub pr_count: usize,
+}
+
+/// Quality / hygiene metrics derived from commit messages and classifications.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualitySummary {
+    /// Composite quality score in `[0, 1]`.
+    pub quality_score: f64,
+    /// Total revert commits detected.
+    pub revert_count: usize,
+    /// `revert_count / total_commits` as a fraction in `[0, 1]`.
+    pub revert_pct: f64,
+    /// Bugfix commit percentage in `[0, 1]`.
+    pub bugfix_pct: f64,
+    /// Defect rate: bugfix / non-bugfix-feature commits, in `[0, 1]`.
+    pub defect_rate: f64,
+}
+
+/// Configurable weights for composite developer activity score.
+///
+/// Defaults match the values in `docs/requirements/reporting.md`. The five
+/// components are normalized via min-max scaling across the reporting period
+/// and then linearly combined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityWeights {
+    /// Weight for raw commit count.
+    pub commits: f64,
+    /// Weight for merged PRs.
+    pub prs: f64,
+    /// Weight for code impact (lines changed).
+    pub code_impact: f64,
+    /// Weight for code complexity proxy (files changed per commit).
+    pub complexity: f64,
+    /// Weight for ticketing hygiene (ticketed commits / total).
+    pub ticketing: f64,
+}
+
+impl Default for ActivityWeights {
+    fn default() -> Self {
+        Self {
+            commits: 0.22,
+            prs: 0.26,
+            code_impact: 0.26,
+            complexity: 0.11,
+            ticketing: 0.15,
+        }
+    }
+}
+
 /// Full report payload passed to every formatter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportData {
@@ -89,6 +269,28 @@ pub struct ReportData {
     pub total_authors: usize,
     /// Cross-cutting category → count tally.
     pub category_breakdown: HashMap<String, usize>,
+    /// Weekly cross-developer aggregate metrics.
+    pub weekly_metrics: Vec<WeeklyMetrics>,
+    /// Per-developer activity rollup.
+    pub developer_activity: Vec<DeveloperActivitySummary>,
+    /// Single-row period summary.
+    pub summary: Option<ReportSummary>,
+    /// Commits with no work-item reference.
+    pub untracked_commits: Vec<UntrackedCommit>,
+    /// Per-week per-category counts.
+    pub weekly_categorization: Vec<WeeklyCategorization>,
+    /// Per-week velocity metrics.
+    pub weekly_velocity: Vec<WeeklyVelocity>,
+    /// DORA period-level metrics.
+    pub dora: Option<DoraMetrics>,
+    /// Velocity period-level summary.
+    pub velocity: Option<VelocitySummary>,
+    /// Quality period-level summary.
+    pub quality: Option<QualitySummary>,
+    /// Total boilerplate commits detected.
+    pub boilerplate_count: usize,
+    /// Total revert commits detected.
+    pub revert_count: usize,
 }
 
 impl ReportData {
@@ -104,6 +306,17 @@ impl ReportData {
             total_commits: 0,
             total_authors: 0,
             category_breakdown: HashMap::new(),
+            weekly_metrics: Vec::new(),
+            developer_activity: Vec::new(),
+            summary: None,
+            untracked_commits: Vec::new(),
+            weekly_categorization: Vec::new(),
+            weekly_velocity: Vec::new(),
+            dora: None,
+            velocity: None,
+            quality: None,
+            boilerplate_count: 0,
+            revert_count: 0,
         }
     }
 }
