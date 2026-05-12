@@ -107,6 +107,12 @@ Server / Data Center is **not** supported.
 - **Commit list**: only the merge commit hash is recorded in `commit_shas`,
   matching the GitHub client's behavior. The per-PR commit endpoint is not
   called in v1.
+- **`merged_at` precision**: Bitbucket Cloud's PR list endpoint exposes no
+  `merged_on` field, so the client records `merged_at = updated_on` for
+  merged PRs. Post-merge edits (title/description/reviewer changes) bump
+  `updated_on`, biasing recorded `merged_at` later than the actual merge
+  moment. Bias is one-directional and bounded in practice. See
+  [ADR-0003 §6](../adr/0003-bitbucket-pr-provider.md) for the full rationale.
 
 ### Incremental Fetch
 

@@ -540,16 +540,46 @@ mod tests {
         assert!(prs[1].commit_shas.contains("abc123"));
     }
 
+    /// Drop guard that snapshots an env var, removes it for the test, and
+    /// restores it (or re-removes it if originally absent) on drop. The Drop
+    /// impl runs during stack unwinding, so a panic inside the test body
+    /// still triggers env restore — unlike a closure-based save/run/restore
+    /// pattern, which silently leaks mutated state when the closure panics.
+    struct EnvVarGuard {
+        name: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn remove(name: &'static str) -> Self {
+            let original = std::env::var(name).ok();
+            // SAFETY: 2024-edition env mutation; the guard is the sole writer
+            // for `name` within the test it covers, restored unconditionally
+            // on drop.
+            unsafe { std::env::remove_var(name) };
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: see [`EnvVarGuard::remove`].
+            unsafe {
+                match self.original.as_deref() {
+                    Some(v) => std::env::set_var(self.name, v),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
     /// `new()` rejects a config that has neither token nor username+password.
     #[test]
     fn client_new_rejects_missing_auth() {
-        // Take care not to pick up a real env credential during this assertion.
-        let prev_t = std::env::var("BITBUCKET_TOKEN").ok();
-        let prev_p = std::env::var("BITBUCKET_APP_PASSWORD").ok();
-        unsafe {
-            std::env::remove_var("BITBUCKET_TOKEN");
-            std::env::remove_var("BITBUCKET_APP_PASSWORD");
-        }
+        // Take care not to pick up a real env credential during this
+        // assertion; guards restore env even if the test below panics.
+        let _t = EnvVarGuard::remove("BITBUCKET_TOKEN");
+        let _p = EnvVarGuard::remove("BITBUCKET_APP_PASSWORD");
 
         let result = BitbucketClient::new(&BitbucketConfig {
             workspace: Some("acme".into()),
@@ -561,15 +591,6 @@ mod tests {
             Ok(_) => panic!("expected auth failure, got Ok(_)"),
             Err(CollectError::Config(_)) => {}
             Err(other) => panic!("unexpected error: {other:?}"),
-        }
-
-        unsafe {
-            if let Some(v) = prev_t {
-                std::env::set_var("BITBUCKET_TOKEN", v);
-            }
-            if let Some(v) = prev_p {
-                std::env::set_var("BITBUCKET_APP_PASSWORD", v);
-            }
         }
     }
 }

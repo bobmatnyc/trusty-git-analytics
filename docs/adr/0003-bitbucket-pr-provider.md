@@ -154,7 +154,35 @@ in the database after this collapse. We accept the loss for v1 because:
   needs the distinction we will have to either (a) refetch, or (b) add
   a `raw_state TEXT` column. This is recorded so future-us can find it.
 
-### 6. One commit SHA per PR (no per-PR commits fetch)
+### 6. `merged_at` is sourced from `updated_on`
+
+Bitbucket Cloud's `/pullrequests` list endpoint does not surface a dedicated
+`merged_on` field. The only timestamp on a merged PR row is `updated_on`,
+which reflects the most recent edit to the PR — including post-merge edits
+to title, description, or reviewer list. The Bitbucket client therefore
+records `merged_at = updated_on` for `state == MERGED`, accepting that the
+recorded time can drift later than the actual merge moment if the PR is
+edited after merging.
+
+Consequences worth knowing:
+
+- DORA cycle-time and lead-time metrics computed from `merged_at - created_at`
+  will be **biased upward** for Bitbucket PRs that get edited post-merge.
+  GitHub PRs are unaffected (GitHub returns a real `merged_at`).
+- The error is bounded in practice — most PRs are not edited after merge —
+  and goes in only one direction (later, never earlier).
+- A merged PR that has never been edited has `updated_on == merged_on` and
+  the recorded value is exact.
+
+This is recorded so a future report consumer can decide whether to (a) ignore
+the bias, (b) refetch with the activity endpoint to find the real merge
+event, or (c) add a `merged_at_source TEXT` column. Today no downstream
+report distinguishes the two providers when computing cycle time, so the
+bias is silent. The `pull_requests` row remains internally consistent —
+`state == merged` always implies `merged_at IS NOT NULL` because the live
+integration test asserts it.
+
+### 7. One commit SHA per PR (no per-PR commits fetch)
 
 GitHub's client stores only the merge commit hash in `commit_shas`
 (JSON array of one element, or `[]` for unmerged PRs). The Bitbucket
@@ -168,7 +196,7 @@ If a future report needs full PR commit lists, the right move is to add
 an opt-in `bitbucket.fetch_commits: bool` (mirrored on the GitHub side)
 rather than enabling it globally. Recorded as a known limit, not a bug.
 
-### 7. Concurrent providers via `tokio::task::JoinSet`
+### 8. Concurrent providers via `tokio::task::JoinSet`
 
 `CollectionPipeline::fetch_and_store_prs` builds
 `Vec<Arc<dyn PrProvider + Send + Sync>>` from config, spawns one task

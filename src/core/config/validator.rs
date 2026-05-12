@@ -591,29 +591,52 @@ mod tests {
         assert!(exists, "validator should have created the dir");
     }
 
-    /// Save and clear the Bitbucket env vars for the duration of a closure,
-    /// then restore them. Tests for `MissingBitbucketAuth` need a clean
-    /// environment so a developer's shell-exported credentials don't mask
-    /// the failure mode.
+    /// Drop guard that snapshots an env var, removes it for the test, and
+    /// restores it (or removes it again if it was originally absent) on drop.
     ///
-    /// SAFETY: env-var mutation is unsafe in 2024 edition; we accept the
-    /// best-effort save/restore the rest of this file already uses.
+    /// Why: previous closure-based helpers ran restore code *after* the test
+    /// body, which meant a panicking assertion would skip the restore and
+    /// leak mutated global env state into the rest of the test run. A Drop
+    /// guard runs during unwinding too, so panicking tests still restore.
+    ///
+    /// SAFETY: env-var mutation is `unsafe` in the 2024 edition. We accept
+    /// it here only inside `#[cfg(test)]` and rely on the guard being the
+    /// sole writer in the test it covers.
+    struct EnvVarGuard {
+        name: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        /// Snapshot `name`, remove it, and arrange for restore on drop.
+        fn remove(name: &'static str) -> Self {
+            let original = std::env::var(name).ok();
+            // SAFETY: 2024-edition env mutation; isolated to this test thread
+            // via Drop ordering; cleanup is guaranteed via the impl below.
+            unsafe { std::env::remove_var(name) };
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: see [`EnvVarGuard::remove`].
+            unsafe {
+                match self.original.as_deref() {
+                    Some(v) => std::env::set_var(self.name, v),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
+    /// Save and clear the Bitbucket env vars for the duration of a closure,
+    /// then restore them — panic-safe via [`EnvVarGuard`].
     fn with_clean_bitbucket_env<F: FnOnce()>(f: F) {
-        let prev_t = std::env::var("BITBUCKET_TOKEN").ok();
-        let prev_p = std::env::var("BITBUCKET_APP_PASSWORD").ok();
-        unsafe {
-            std::env::remove_var("BITBUCKET_TOKEN");
-            std::env::remove_var("BITBUCKET_APP_PASSWORD");
-        }
+        let _t = EnvVarGuard::remove("BITBUCKET_TOKEN");
+        let _p = EnvVarGuard::remove("BITBUCKET_APP_PASSWORD");
         f();
-        unsafe {
-            if let Some(v) = prev_t {
-                std::env::set_var("BITBUCKET_TOKEN", v);
-            }
-            if let Some(v) = prev_p {
-                std::env::set_var("BITBUCKET_APP_PASSWORD", v);
-            }
-        }
+        // Guards drop here (or earlier on panic), restoring env.
     }
 
     #[test]

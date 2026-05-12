@@ -384,8 +384,13 @@ pub struct GithubConfig {
 ///
 /// Auth must be supplied via **either** an access token (Bearer) **or** a
 /// `username` + `app_password` pair (Basic auth). The validator enforces
-/// "exactly one mode populated" so partially-filled configs fail loudly
-/// rather than silently sending unauthenticated requests.
+/// "at least one usable mode populated" when `fetch_prs == true` — a wholly
+/// auth-less config is rejected, partially-filled Basic auth (username
+/// without password, or vice versa) is rejected, but populating both modes
+/// at once is *accepted* and resolved by the client via Bearer-wins
+/// precedence (token > username+password). This is intentional: it lets
+/// operators set both during a migration from App Password to access token
+/// without a transient failure window.
 ///
 /// Tokens / passwords may also be sourced from the environment variables
 /// `BITBUCKET_TOKEN` and `BITBUCKET_APP_PASSWORD` — the validator treats
