@@ -11,11 +11,14 @@
 //! - [`jira`] — JIRA REST client (issues)
 //! - [`linear`] — Linear GraphQL client (issues)
 //! - [`azdo`] — Azure DevOps stub client (Phase 1: config + AB# detection)
+//! - [`bitbucket`] — Bitbucket Cloud REST client (PRs)
+//! - [`pr_provider`] — provider-agnostic PR fetch trait
 //! - [`ticket`] — ticket-reference detection on commit messages
 //! - [`collector`] — end-to-end pipeline orchestrator
 //! - [`errors`] — module-level error type ([`CollectError`])
 
 pub mod azdo;
+pub mod bitbucket;
 pub mod collector;
 pub mod errors;
 pub mod git;
@@ -24,6 +27,7 @@ pub mod identity;
 pub mod jira;
 pub mod linear;
 pub mod pm_adapter;
+pub mod pr_provider;
 pub mod ticket;
 pub mod weeks;
 
@@ -33,6 +37,7 @@ pub use pm_adapter::{
     build_adapters, AzureDevOpsAdapter, GitHubAdapter, JiraAdapter, LinearAdapter, PmAdapter,
     PmError, PmSource, PmTicket,
 };
+pub use pr_provider::PrProvider;
 
 #[cfg(test)]
 mod tests {

@@ -11,13 +11,13 @@ superior performance, parallelism, and correctness.
 
 ## Implementation State
 
-> Last updated: 2026-05-11
+> Last updated: 2026-05-12
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Single `tga` crate | DONE | Consolidated from 5-crate workspace into one library+binary |
 | `src/core/` | DONE | Types, config, DB schema, error definitions |
-| `src/collect/` | DONE | git2 extraction, identity resolution, GitHub/JIRA/Linear/ADO clients, `PmAdapter` trait + `build_adapters` factory |
+| `src/collect/` | DONE | git2 extraction, identity resolution, GitHub/Bitbucket/JIRA/Linear/ADO clients, `PmAdapter` + `PrProvider` traits |
 | `src/classify/` | DONE | Four-tier classification cascade (rules + LLM) |
 | `src/report/` | DONE | CSV/JSON/Markdown report generation |
 | `src/main.rs` + `src/commands/` | DONE | clap CLI binary entry point |

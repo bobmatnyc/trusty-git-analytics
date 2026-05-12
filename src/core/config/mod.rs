@@ -61,6 +61,10 @@ pub struct Config {
     #[serde(default)]
     pub github: Option<GithubConfig>,
 
+    /// Bitbucket Cloud API credentials and scope.
+    #[serde(default)]
+    pub bitbucket: Option<BitbucketConfig>,
+
     /// JIRA API credentials and scope.
     #[serde(default)]
     pub jira: Option<JiraConfig>,
@@ -374,6 +378,58 @@ pub struct GithubConfig {
     /// Whether to fetch pull request metadata.
     #[serde(default)]
     pub fetch_prs: bool,
+}
+
+/// Bitbucket Cloud API integration settings.
+///
+/// Auth must be supplied via **either** an access token (Bearer) **or** a
+/// `username` + `app_password` pair (Basic auth). The validator enforces
+/// "exactly one mode populated" so partially-filled configs fail loudly
+/// rather than silently sending unauthenticated requests.
+///
+/// Tokens / passwords may also be sourced from the environment variables
+/// `BITBUCKET_TOKEN` and `BITBUCKET_APP_PASSWORD` — the validator treats
+/// either source as satisfying the requirement.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BitbucketConfig {
+    /// Bitbucket account / workspace member username (required for Basic auth).
+    #[serde(default)]
+    pub username: Option<String>,
+
+    /// Bitbucket App Password (Basic auth secret).
+    ///
+    /// Falls back to the `BITBUCKET_APP_PASSWORD` env var when unset.
+    #[serde(default)]
+    pub app_password: Option<String>,
+
+    /// Workspace / repository access token (Bearer auth).
+    ///
+    /// Falls back to the `BITBUCKET_TOKEN` env var when unset. If both
+    /// `token` and `app_password` are set the token wins.
+    #[serde(default)]
+    pub token: Option<String>,
+
+    /// Workspace slug, e.g. the `myteam` in
+    /// `bitbucket.org/myteam/myrepo`.
+    #[serde(default)]
+    pub workspace: Option<String>,
+
+    /// Repository slug, e.g. the `myrepo` in
+    /// `bitbucket.org/myteam/myrepo`.
+    #[serde(default)]
+    pub repo_slug: Option<String>,
+
+    /// Whether to fetch pull request metadata.
+    #[serde(default)]
+    pub fetch_prs: bool,
+
+    /// Override the Bitbucket API base URL.
+    ///
+    /// Defaults to `https://api.bitbucket.org/2.0`. This is primarily a
+    /// test seam so `wiremock::MockServer::uri()` can stand in for the
+    /// real API; production users should not need to set it.
+    #[serde(default)]
+    pub api_base_url: Option<String>,
 }
 
 /// JIRA Cloud / Server integration settings.

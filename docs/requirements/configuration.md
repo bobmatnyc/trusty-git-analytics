@@ -9,6 +9,7 @@ The configuration file is YAML, matching the schema used by the Python predecess
 ```yaml
 repositories: []          # list[RepositoryConfig], required
 github: {}                # GitHubConfig
+bitbucket: {}             # BitbucketConfig (Cloud only)
 analysis: {}              # AnalysisConfig
 output: {}                # OutputConfig
 cache: {}                 # CacheConfig
@@ -50,6 +51,36 @@ confluence: {}            # ConfluenceConfig
 | `backoff_factor` | f64 | 2.0 | Exponential backoff multiplier |
 | `fetch_pr_reviews` | bool | true | Fetch review summaries with PRs |
 | `open_pr_refresh_ttl_hours` | u32 | 1 | TTL for refreshing open PR snapshots |
+
+### `bitbucket` — BitbucketConfig
+
+Bitbucket Cloud only. Bitbucket Server / Data Center is not supported.
+
+Authentication accepts either an access token (Bearer) or an App Password
+(Basic auth). Token takes precedence when both are populated.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `username` | string | None | Bitbucket account / workspace member username (required for Basic auth) |
+| `app_password` | string | env `BITBUCKET_APP_PASSWORD` | Bitbucket App Password (Basic auth secret) |
+| `token` | string | env `BITBUCKET_TOKEN` | Workspace / repository access token (Bearer auth) |
+| `workspace` | string | required when `fetch_prs: true` | Workspace slug (`myteam` in `bitbucket.org/myteam/myrepo`) |
+| `repo_slug` | string | required when `fetch_prs: true` | Repository slug (`myrepo` in `bitbucket.org/myteam/myrepo`) |
+| `fetch_prs` | bool | `false` | Fetch pull request metadata |
+| `api_base_url` | url | `https://api.bitbucket.org/2.0` | API base URL override (test seam) |
+
+State mapping into the shared `pull_requests` table:
+
+| Bitbucket state | Stored as |
+|-----------------|-----------|
+| `OPEN` | `open` |
+| `MERGED` | `merged` |
+| `DECLINED` | `closed` |
+| `SUPERSEDED` | `closed` |
+
+`DECLINED` and `SUPERSEDED` collapse onto `closed` because the shared schema
+has no richer variants. Reports that need to distinguish them must consult
+the raw Bitbucket payload, which is currently not persisted.
 
 ### `analysis` — AnalysisConfig
 

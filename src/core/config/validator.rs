@@ -58,6 +58,24 @@ pub enum ConfigError {
     #[error("GitHub token required when fetch_prs = true")]
     MissingGitHubToken,
 
+    /// Bitbucket is partially configured (at least one of
+    /// `workspace`/`repo_slug` is missing while `fetch_prs = true`).
+    #[error("Bitbucket config incomplete: {field} is required when fetch_prs = true")]
+    IncompleteBitbucketConfig {
+        /// The missing field name (`workspace` or `repo_slug`).
+        field: String,
+    },
+
+    /// Bitbucket PR fetching is enabled but no usable auth credentials are
+    /// available — neither a Bearer `token` nor a `username` + `app_password`
+    /// pair (in config or env).
+    #[error(
+        "Bitbucket auth required when fetch_prs = true: \
+         supply either `token` (or BITBUCKET_TOKEN) or `username` + `app_password` \
+         (or BITBUCKET_APP_PASSWORD)"
+    )]
+    MissingBitbucketAuth,
+
     /// JIRA is partially configured (at least one of url/username/token is
     /// set, but not all of them).
     #[error("JIRA config incomplete: {field} is required")]
@@ -106,6 +124,7 @@ impl<'a> ConfigValidator<'a> {
         self.check_repositories(&mut errors);
         self.check_output_dir(&mut errors);
         self.check_github_token(&mut errors);
+        self.check_bitbucket_config(&mut errors);
         self.check_jira_config(&mut errors);
         self.check_llm_config(&mut errors);
         self.check_conflicting_flags(&mut errors);
@@ -168,6 +187,63 @@ impl<'a> ConfigValidator<'a> {
             if !token_present && !env_present {
                 errors.push(ConfigError::MissingGitHubToken);
             }
+        }
+    }
+
+    /// Verify Bitbucket Cloud is configured with workspace, repo, and at
+    /// least one usable auth mode when PR fetching is on.
+    ///
+    /// Auth modes (checked in order):
+    /// 1. Bearer `token` (from config or `BITBUCKET_TOKEN`).
+    /// 2. Basic auth: `username` + `app_password` (or `BITBUCKET_APP_PASSWORD`).
+    ///
+    /// A wholly absent `bitbucket:` block is fine — the integration is just
+    /// off.
+    fn check_bitbucket_config(&self, errors: &mut Vec<ConfigError>) {
+        let Some(bb) = self.config.bitbucket.as_ref() else {
+            return;
+        };
+        if !bb.fetch_prs {
+            return;
+        }
+
+        if bb
+            .workspace
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
+            errors.push(ConfigError::IncompleteBitbucketConfig {
+                field: "workspace".into(),
+            });
+        }
+        if bb
+            .repo_slug
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
+            errors.push(ConfigError::IncompleteBitbucketConfig {
+                field: "repo_slug".into(),
+            });
+        }
+
+        let nonempty = |o: Option<&str>| o.map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let token_in_cfg = nonempty(bb.token.as_deref());
+        let token_in_env = std::env::var("BITBUCKET_TOKEN")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let user = nonempty(bb.username.as_deref());
+        let pwd_in_cfg = nonempty(bb.app_password.as_deref());
+        let pwd_in_env = std::env::var("BITBUCKET_APP_PASSWORD")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+
+        let has_token = token_in_cfg || token_in_env;
+        let has_basic = user && (pwd_in_cfg || pwd_in_env);
+
+        if !has_token && !has_basic {
+            errors.push(ConfigError::MissingBitbucketAuth);
         }
     }
 
@@ -296,7 +372,8 @@ fn is_dir_writable(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::core::config::{
-        ClassificationConfig, GithubConfig, JiraConfig, OutputConfig, RepositoryConfig,
+        BitbucketConfig, ClassificationConfig, GithubConfig, JiraConfig, OutputConfig,
+        RepositoryConfig,
     };
     use std::path::PathBuf;
 
@@ -512,5 +589,138 @@ mod tests {
             "got {errors:?}"
         );
         assert!(exists, "validator should have created the dir");
+    }
+
+    /// Save and clear the Bitbucket env vars for the duration of a closure,
+    /// then restore them. Tests for `MissingBitbucketAuth` need a clean
+    /// environment so a developer's shell-exported credentials don't mask
+    /// the failure mode.
+    ///
+    /// SAFETY: env-var mutation is unsafe in 2024 edition; we accept the
+    /// best-effort save/restore the rest of this file already uses.
+    fn with_clean_bitbucket_env<F: FnOnce()>(f: F) {
+        let prev_t = std::env::var("BITBUCKET_TOKEN").ok();
+        let prev_p = std::env::var("BITBUCKET_APP_PASSWORD").ok();
+        unsafe {
+            std::env::remove_var("BITBUCKET_TOKEN");
+            std::env::remove_var("BITBUCKET_APP_PASSWORD");
+        }
+        f();
+        unsafe {
+            if let Some(v) = prev_t {
+                std::env::set_var("BITBUCKET_TOKEN", v);
+            }
+            if let Some(v) = prev_p {
+                std::env::set_var("BITBUCKET_APP_PASSWORD", v);
+            }
+        }
+    }
+
+    #[test]
+    fn bitbucket_requires_workspace_and_repo_slug_when_fetch_prs() {
+        with_clean_bitbucket_env(|| {
+            let mut cfg = empty_config();
+            cfg.bitbucket = Some(BitbucketConfig {
+                token: Some("bearer".into()),
+                fetch_prs: true,
+                ..Default::default()
+            });
+            let errors = ConfigValidator::new(&cfg).validate();
+            let missing: Vec<&str> = errors
+                .iter()
+                .filter_map(|e| match e {
+                    ConfigError::IncompleteBitbucketConfig { field } => Some(field.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(missing.contains(&"workspace"), "got {errors:?}");
+            assert!(missing.contains(&"repo_slug"), "got {errors:?}");
+        });
+    }
+
+    #[test]
+    fn bitbucket_accepts_app_password_pair() {
+        with_clean_bitbucket_env(|| {
+            let mut cfg = empty_config();
+            cfg.bitbucket = Some(BitbucketConfig {
+                username: Some("alice".into()),
+                app_password: Some("abcd".into()),
+                workspace: Some("acme".into()),
+                repo_slug: Some("widgets".into()),
+                fetch_prs: true,
+                ..Default::default()
+            });
+            let errors = ConfigValidator::new(&cfg).validate();
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ConfigError::MissingBitbucketAuth
+                        | ConfigError::IncompleteBitbucketConfig { .. }
+                )),
+                "got {errors:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn bitbucket_accepts_bearer_token() {
+        with_clean_bitbucket_env(|| {
+            let mut cfg = empty_config();
+            cfg.bitbucket = Some(BitbucketConfig {
+                token: Some("workspace-access-token".into()),
+                workspace: Some("acme".into()),
+                repo_slug: Some("widgets".into()),
+                fetch_prs: true,
+                ..Default::default()
+            });
+            let errors = ConfigValidator::new(&cfg).validate();
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ConfigError::MissingBitbucketAuth
+                        | ConfigError::IncompleteBitbucketConfig { .. }
+                )),
+                "got {errors:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn bitbucket_rejects_partial_auth() {
+        with_clean_bitbucket_env(|| {
+            let mut cfg = empty_config();
+            // username without app_password
+            cfg.bitbucket = Some(BitbucketConfig {
+                username: Some("alice".into()),
+                workspace: Some("acme".into()),
+                repo_slug: Some("widgets".into()),
+                fetch_prs: true,
+                ..Default::default()
+            });
+            let errors = ConfigValidator::new(&cfg).validate();
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ConfigError::MissingBitbucketAuth)),
+                "got {errors:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn bitbucket_block_off_is_fine() {
+        with_clean_bitbucket_env(|| {
+            let mut cfg = empty_config();
+            cfg.bitbucket = Some(BitbucketConfig::default());
+            let errors = ConfigValidator::new(&cfg).validate();
+            assert!(
+                !errors.iter().any(|e| matches!(
+                    e,
+                    ConfigError::MissingBitbucketAuth
+                        | ConfigError::IncompleteBitbucketConfig { .. }
+                )),
+                "got {errors:?}"
+            );
+        });
     }
 }

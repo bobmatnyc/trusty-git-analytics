@@ -5,6 +5,24 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Bitbucket Cloud PR provider** — pull-request collection now supports
+  Bitbucket Cloud alongside GitHub. The two providers share a new
+  `PrProvider` trait and run concurrently via `tokio::task::JoinSet`.
+  Configured via a new `bitbucket:` block (workspace, repo_slug, fetch_prs,
+  and either a Bearer token or an Atlassian API token via Basic auth).
+  Bitbucket Server / Data Center remains unsupported.
+
+### Notes
+
+- `pull_requests.pr_number` is not currently a UNIQUE index, so the existing
+  `INSERT OR REPLACE` is a no-op for deduplication — tracked separately as
+  issue #71. Running both GitHub and Bitbucket providers against the same
+  database can cause double-inserts when PR IDs collide across providers.
+
 ## [1.0.3] - 2026-05-12
 
 ### Fixed
