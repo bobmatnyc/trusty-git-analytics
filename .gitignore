@@ -8,3 +8,5 @@ reports/
 .env.local
 # Personal/local configs with absolute user paths — keep out of repo
 configs/duetto-*.yaml
+# Per-checkout Claude notes — see https://docs.anthropic.com/en/docs/claude-code/memory
+CLAUDE.local.md
