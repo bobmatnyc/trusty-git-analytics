@@ -37,6 +37,14 @@ pub struct ClassificationEngineConfig {
     /// can still inspect them), but their `confidence` informs filtering
     /// in downstream reports.
     pub confidence_threshold: f64,
+    /// Confidence at or below which a sync-tier verdict is escalated to
+    /// the LLM tier (when `use_llm` is true).
+    ///
+    /// Default `0.0` preserves the historical behavior of only firing the
+    /// LLM on commits with no rule match. The LLM verdict only replaces
+    /// the existing verdict when its confidence is strictly higher, so a
+    /// failed LLM call preserves the rule verdict.
+    pub llm_fallback_threshold: f64,
 }
 
 impl Default for ClassificationEngineConfig {
@@ -47,6 +55,7 @@ impl Default for ClassificationEngineConfig {
             llm_provider: "auto".to_string(),
             openrouter_api_key: None,
             confidence_threshold: 0.7,
+            llm_fallback_threshold: 0.0,
         }
     }
 }
@@ -243,16 +252,37 @@ impl ClassificationEngine {
     }
 
     /// Run the full four-tier cascade including the optional LLM fallback.
+    ///
+    /// The LLM tier is consulted when the synchronous cascade returns no
+    /// verdict, or when its verdict's confidence is at or below
+    /// `config.llm_fallback_threshold`. Even then, the LLM verdict only
+    /// replaces the existing one when its own confidence is strictly
+    /// higher — a failed LLM call (network / auth / JSON-parse error)
+    /// thus preserves the rule verdict rather than silently regressing it
+    /// to `uncategorized`.
     pub async fn classify(&self, message: &str, is_merge: bool) -> ClassificationResult {
-        if let Some(r) = self.classify_sync(message, is_merge) {
-            return r;
+        let sync_result = self.classify_sync(message, is_merge);
+        let should_try_llm = match &sync_result {
+            Some(r) => r.confidence <= self.config.llm_fallback_threshold,
+            None => true,
+        };
+
+        if should_try_llm {
+            if let Some(llm) = &self.llm {
+                if let Some(mut r) = llm.classify(message).await {
+                    r.top_level = self.taxonomy.resolve(&r.category);
+                    // Overwrite-guard: only replace the existing rule
+                    // verdict when the LLM is strictly more confident.
+                    let existing_conf = sync_result.as_ref().map_or(0.0, |s| s.confidence);
+                    if r.confidence > existing_conf {
+                        return r;
+                    }
+                }
+            }
         }
 
-        if let Some(llm) = &self.llm {
-            if let Some(mut r) = llm.classify(message).await {
-                r.top_level = self.taxonomy.resolve(&r.category);
-                return r;
-            }
+        if let Some(r) = sync_result {
+            return r;
         }
 
         let mut fallback = ClassificationResult::unclassified();
@@ -271,5 +301,130 @@ impl ClassificationEngine {
                     .unwrap_or_else(ClassificationResult::unclassified)
             })
             .collect()
+    }
+
+    /// Test-only: replace the LLM tier's endpoint URL and inject an API
+    /// key so the LLM path can be exercised against a mock server.
+    #[cfg(test)]
+    pub(crate) fn set_llm_endpoint_for_tests(&mut self, endpoint: &str, api_key: &str) {
+        self.llm = Some(
+            crate::classify::tiers::llm::LlmClassifier::new("test-model", Some(api_key.into()))
+                .with_endpoint(endpoint),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::classify::rules;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build an engine with default rules and `use_llm: true`. The LLM
+    /// endpoint is left pointing at the production default; tests rebind
+    /// it via [`ClassificationEngine::set_llm_endpoint_for_tests`].
+    fn engine_with_threshold(threshold: f64) -> ClassificationEngine {
+        ClassificationEngine::new(
+            rules::default_rules(),
+            ClassificationEngineConfig {
+                use_llm: true,
+                llm_model: "test-model".to_string(),
+                llm_provider: "openai".to_string(),
+                openrouter_api_key: None,
+                confidence_threshold: 0.5,
+                llm_fallback_threshold: threshold,
+            },
+        )
+        .expect("engine builds")
+    }
+
+    /// Threshold 0.3 escalates a catch-all 0.3 verdict to the LLM, and
+    /// the LLM's strictly-higher-confidence verdict wins.
+    #[tokio::test]
+    async fn llm_fallback_threshold_upgrades_catchall_verdict() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "{\"category\":\"feature\",\"subcategory\":\"security\",\"confidence\":0.9}"
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut engine = engine_with_threshold(0.3);
+        engine.set_llm_endpoint_for_tests(&server.uri(), "test-key");
+
+        // A message that hits only the catch-all rule (no domain keywords).
+        let r = engine.classify("xyzzy plugh frobnicate quux", false).await;
+        assert_eq!(r.category, "feature");
+        assert_eq!(r.subcategory.as_deref(), Some("security"));
+        assert!(
+            (r.confidence - 0.9).abs() < 1e-9,
+            "confidence={}",
+            r.confidence
+        );
+        assert_eq!(r.method, ClassificationMethod::LlmFallback);
+    }
+
+    /// Threshold 0.3 still triggers an LLM call, but on failure (non-2xx)
+    /// the catch-all rule verdict at 0.3 is preserved — the overwrite-guard
+    /// must not regress it to `uncategorized`.
+    #[tokio::test]
+    async fn llm_failure_preserves_catchall_verdict() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let mut engine = engine_with_threshold(0.3);
+        engine.set_llm_endpoint_for_tests(&server.uri(), "test-key");
+
+        let r = engine.classify("xyzzy plugh frobnicate quux", false).await;
+        // Catch-all preserved.
+        assert_eq!(r.category, "maintenance");
+        assert_eq!(r.subcategory.as_deref(), Some("uncategorized"));
+        assert!(
+            (r.confidence - 0.3).abs() < 1e-9,
+            "confidence={}",
+            r.confidence
+        );
+        assert_ne!(r.method, ClassificationMethod::LlmFallback);
+    }
+
+    /// With threshold 0.0 (the default), the catch-all verdict is *not*
+    /// escalated — historical behavior preserved.
+    #[tokio::test]
+    async fn default_threshold_does_not_escalate_catchall() {
+        // Mount a mock that would *fail the test* if it's hit, by returning
+        // a high-confidence verdict we'd otherwise expect to win.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "{\"category\":\"feature\",\"subcategory\":\"security\",\"confidence\":0.9}"
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut engine = engine_with_threshold(0.0);
+        engine.set_llm_endpoint_for_tests(&server.uri(), "test-key");
+
+        let r = engine.classify("xyzzy plugh frobnicate quux", false).await;
+        // Sync catch-all wins because 0.3 > 0.0 threshold.
+        assert_eq!(r.category, "maintenance");
+        assert_eq!(r.subcategory.as_deref(), Some("uncategorized"));
+        assert!(
+            (r.confidence - 0.3).abs() < 1e-9,
+            "confidence={}",
+            r.confidence
+        );
     }
 }

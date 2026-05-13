@@ -268,6 +268,20 @@ pub struct ClassificationConfig {
     #[serde(default = "default_confidence_threshold")]
     pub confidence_threshold: f64,
 
+    /// Confidence at or below which a synchronous-tier verdict is sent to
+    /// the LLM tier for a second opinion (when `use_llm` is true).
+    ///
+    /// Default `0.0` preserves the historical behavior of only firing the
+    /// LLM on commits with no rule match at all. Set to `0.3` to let the
+    /// LLM upgrade catch-all verdicts (the catch-all rule emits at exactly
+    /// 0.3 by design); set higher to escalate weaker fuzzy/regex matches.
+    ///
+    /// The LLM verdict only replaces the rule verdict when its own
+    /// confidence is strictly higher, so a failed LLM call (network error,
+    /// auth failure, JSON parse error) preserves the rule verdict.
+    #[serde(default = "default_llm_fallback_threshold")]
+    pub llm_fallback_threshold: f64,
+
     /// User-defined subcategories. Each entry must declare a `parent`
     /// top-level category. These extend the built-in subcategory registry;
     /// entries whose `name` matches an existing built-in replace it.
@@ -298,6 +312,10 @@ fn default_confidence_threshold() -> f64 {
     0.7
 }
 
+fn default_llm_fallback_threshold() -> f64 {
+    0.0
+}
+
 fn default_min_coverage_pct() -> f64 {
     20.0
 }
@@ -315,6 +333,7 @@ impl Default for ClassificationConfig {
             llm_provider: default_llm_provider(),
             openrouter_api_key: None,
             confidence_threshold: default_confidence_threshold(),
+            llm_fallback_threshold: default_llm_fallback_threshold(),
             custom_categories: Vec::new(),
             min_coverage_pct: default_min_coverage_pct(),
         }

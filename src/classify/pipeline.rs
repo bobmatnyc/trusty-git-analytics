@@ -109,6 +109,7 @@ impl ClassificationPipeline {
                 llm_provider: c.llm_provider.clone(),
                 openrouter_api_key: c.openrouter_api_key.clone(),
                 confidence_threshold: c.confidence_threshold,
+                llm_fallback_threshold: c.llm_fallback_threshold,
             },
             None => ClassificationEngineConfig::default(),
         };
@@ -166,11 +167,15 @@ impl ClassificationPipeline {
             }
         }
 
-        // 4. LLM fallback (async, serialized) for entries that came back as uncategorized.
+        // 4. LLM fallback (async, serialized) for entries whose sync-tier
+        //    verdict came back at or below `llm_fallback_threshold`.
+        //    `engine.classify` itself enforces the overwrite-guard so a
+        //    failed LLM call cannot regress a rule verdict.
         if engine.config().use_llm {
+            let threshold = engine.config().llm_fallback_threshold;
             let pb = make_progress(total as u64, "LLM fallback");
             for (idx, commit) in commits.iter().enumerate() {
-                if results[idx].confidence <= 0.0 {
+                if results[idx].confidence <= threshold {
                     let r = engine.classify(&commit.message, commit.is_merge).await;
                     results[idx] = r;
                 }
