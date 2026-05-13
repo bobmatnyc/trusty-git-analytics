@@ -256,10 +256,13 @@ impl ClassificationEngine {
     /// The LLM tier is consulted when the synchronous cascade returns no
     /// verdict, or when its verdict's confidence is at or below
     /// `config.llm_fallback_threshold`. Even then, the LLM verdict only
-    /// replaces the existing one when its own confidence is strictly
-    /// higher — a failed LLM call (network / auth / JSON-parse error)
+    /// replaces the existing rule verdict when its confidence is at least
+    /// as high — a failed LLM call (network / auth / JSON-parse error)
     /// thus preserves the rule verdict rather than silently regressing it
-    /// to `uncategorized`.
+    /// to `uncategorized`. When there is no rule verdict to protect, the
+    /// LLM verdict is taken as-is even at zero confidence, preserving the
+    /// pre-threshold behavior of falling through to the LLM when the
+    /// sync cascade matched nothing.
     pub async fn classify(&self, message: &str, is_merge: bool) -> ClassificationResult {
         let sync_result = self.classify_sync(message, is_merge);
         let should_try_llm = match &sync_result {
@@ -271,10 +274,14 @@ impl ClassificationEngine {
             if let Some(llm) = &self.llm {
                 if let Some(mut r) = llm.classify(message).await {
                     r.top_level = self.taxonomy.resolve(&r.category);
-                    // Overwrite-guard: only replace the existing rule
-                    // verdict when the LLM is strictly more confident.
+                    // Overwrite-guard: replace the existing rule verdict
+                    // when the LLM is at least as confident. `>=` (not `>`)
+                    // so that a sync miss followed by an LLM verdict at
+                    // exactly 0.0 confidence still surfaces the LLM's
+                    // category/subcategory data instead of being dropped
+                    // for the literal-`uncategorized` fallback below.
                     let existing_conf = sync_result.as_ref().map_or(0.0, |s| s.confidence);
-                    if r.confidence > existing_conf {
+                    if r.confidence >= existing_conf {
                         return r;
                     }
                 }
@@ -426,5 +433,41 @@ mod tests {
             "confidence={}",
             r.confidence
         );
+    }
+
+    /// When the LLM returns a verdict at the same confidence as the sync
+    /// verdict, the LLM wins. This locks in the `>=` overwrite-guard:
+    /// with the older strict-`>` form, an LLM-at-equal-confidence verdict
+    /// was silently dropped — and most acutely, an LLM verdict at exactly
+    /// 0.0 confidence following a sync miss (where the implicit baseline
+    /// is 0.0) lost its category/subcategory data to the literal
+    /// `uncategorized` fallback. Exercising the equal-confidence boundary
+    /// against the catch-all proves the guard now admits it.
+    #[tokio::test]
+    async fn llm_at_equal_confidence_wins_over_catchall() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "{\"category\":\"feature\",\"subcategory\":\"security\",\"confidence\":0.3}"
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut engine = engine_with_threshold(0.3);
+        engine.set_llm_endpoint_for_tests(&server.uri(), "test-key");
+
+        let r = engine.classify("xyzzy plugh frobnicate quux", false).await;
+        assert_eq!(r.category, "feature");
+        assert_eq!(r.subcategory.as_deref(), Some("security"));
+        assert!(
+            (r.confidence - 0.3).abs() < 1e-9,
+            "confidence={}",
+            r.confidence
+        );
+        assert_eq!(r.method, ClassificationMethod::LlmFallback);
     }
 }
