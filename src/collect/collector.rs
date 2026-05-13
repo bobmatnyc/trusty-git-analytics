@@ -437,7 +437,6 @@ impl CollectionPipeline {
         db: &mut Database,
         client: &AzureDevOpsClient,
     ) -> Result<()> {
-        use crate::collect::azdo::extract_work_item_refs;
         use std::collections::{BTreeSet, HashMap};
 
         // 1. Pull (sha, message) pairs from the database.
@@ -458,7 +457,7 @@ impl CollectionPipeline {
         let mut commit_refs: HashMap<String, Vec<u32>> = HashMap::new();
         let mut all_ids: BTreeSet<u32> = BTreeSet::new();
         for (sha, msg) in &rows {
-            let ids = extract_work_item_refs(msg);
+            let ids = client.extract_work_item_refs(msg);
             if !ids.is_empty() {
                 for id in &ids {
                     all_ids.insert(*id);

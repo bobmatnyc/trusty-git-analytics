@@ -12,12 +12,17 @@
 //! - **Cloud-only.** On-premises ADO Server (TFS) URLs are rejected at
 //!   config load time with an explicit error. Only `dev.azure.com` and
 //!   `*.visualstudio.com` are accepted.
-//! - **`AB#N` work-item references only.** Bare `#N` is intentionally
-//!   excluded — it collides with GitHub PR/issue numbers.
+//! - **Configurable work-item reference regex.** The default `AB#(\d+)`
+//!   matches Microsoft's canonical convention, but real ADO orgs use a
+//!   variety of conventions (`#NNNNNN`, `BUG #N`, …). Override via
+//!   `pm.azure_devops.ticket_regex`. The regex must compile and must
+//!   expose capture group 1, which is parsed as the numeric work-item
+//!   ID for batch fetches. Validation happens at config-load time.
 //!
 //! Lives under `pm.azure_devops` in YAML (clean namespace; avoids the
 //! `jira` / `jira_integration` dual-stack of the Python predecessor).
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::core::errors::TgaError;
@@ -41,8 +46,20 @@ pub struct AzureDevOpsConfig {
     pub project: String,
 
     /// Regex pattern used to detect ADO work-item references in commit messages.
-    /// Default: `"AB#(\\d+)"`. Bare `#N` is intentionally excluded — it collides
-    /// with GitHub PR/issue numbers.
+    ///
+    /// Default: `"(?i)AB#(\\d+)"` (case-insensitive). Group 1 must capture the numeric work-item ID;
+    /// the full match is used for adapter-level reference detection (so the
+    /// returned ref string includes any prefix like `AB#`).
+    ///
+    /// Examples for orgs that don't use `AB#N`:
+    /// - `"\\B#(\\d{4,8})\\b"` — bare `#NNNNNN` (4–8 digit) work items.
+    /// - `"(?i)\\bBUG\\s*#?(\\d+)\\b"` — `BUG 12345` / `BUG #12345`.
+    ///
+    /// Bare `#N` overlaps with GitHub PR/issue numbers; configure with care
+    /// when both integrations are enabled.
+    ///
+    /// Validated at config-load time: the pattern must compile, and it must
+    /// expose at least one capture group.
     #[serde(default = "default_ticket_regex")]
     pub ticket_regex: String,
 
@@ -56,7 +73,10 @@ pub struct AzureDevOpsConfig {
 }
 
 fn default_ticket_regex() -> String {
-    "AB#(\\d+)".to_string()
+    // `(?i)` makes the default case-insensitive so `ab#42` / `Ab#42` /
+    // `AB#42` all match — preserves the behavior of the pre-issue-#74
+    // hardcoded `(?i)\bAB#(\d+)\b` regex that this field replaces.
+    "(?i)AB#(\\d+)".to_string()
 }
 
 fn default_true() -> bool {
@@ -74,6 +94,7 @@ impl AzureDevOpsConfig {
     ///   `dev.azure.com` and `*.visualstudio.com` are accepted in Phase 1)
     /// - `pat` is empty or whitespace-only
     /// - `project` is empty
+    /// - `ticket_regex` fails to compile or has no capture group 1
     pub fn validate(&self) -> Result<(), TgaError> {
         if self.organization_url.trim().is_empty() {
             return Err(TgaError::ConfigError(
@@ -98,7 +119,36 @@ impl AzureDevOpsConfig {
                 "pm.azure_devops.project must not be empty".into(),
             ));
         }
+        // Compile the regex now so config-load surfaces a bad pattern early.
+        let _ = self.compile_ticket_regex()?;
         Ok(())
+    }
+
+    /// Compile `ticket_regex` and verify the contract used by detection:
+    /// the pattern must have at least one capture group, since group 1 is
+    /// parsed as the numeric work-item ID for batch fetches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TgaError::ConfigError`] when the pattern fails to compile
+    /// or has no capture group 1.
+    pub fn compile_ticket_regex(&self) -> Result<Regex, TgaError> {
+        let re = Regex::new(&self.ticket_regex).map_err(|e| {
+            TgaError::ConfigError(format!(
+                "pm.azure_devops.ticket_regex {:?} failed to compile: {e}",
+                self.ticket_regex
+            ))
+        })?;
+        if re.captures_len() < 2 {
+            return Err(TgaError::ConfigError(format!(
+                "pm.azure_devops.ticket_regex {:?} has no capture group — \
+                 group 1 must capture the numeric work-item ID \
+                 (e.g. {:?})",
+                self.ticket_regex,
+                default_ticket_regex(),
+            )));
+        }
+        Ok(re)
     }
 }
 
@@ -169,8 +219,15 @@ mod tests {
     }
 
     #[test]
-    fn default_ticket_regex_is_ab_hash() {
-        assert_eq!(default_ticket_regex(), r"AB#(\d+)");
+    fn default_ticket_regex_is_case_insensitive_ab_hash() {
+        // Locked in by the pre-issue-#74 behavior. The old hardcoded
+        // detection used `(?i)\bAB#(\d+)\b`; the default must keep that
+        // case-insensitivity, or `ab#42` / `Ab#42` silently stop matching.
+        assert_eq!(default_ticket_regex(), r"(?i)AB#(\d+)");
+        let re = Regex::new(&default_ticket_regex()).expect("default compiles");
+        assert!(re.is_match("AB#42"));
+        assert!(re.is_match("ab#42"));
+        assert!(re.is_match("Ab#42"));
     }
 
     #[test]
@@ -188,8 +245,46 @@ team_keys: ["ENG", "PLATFORM"]
         assert_eq!(parsed.project, "MyProject");
         assert_eq!(parsed.team_keys, vec!["ENG", "PLATFORM"]);
         // Defaults applied.
-        assert_eq!(parsed.ticket_regex, r"AB#(\d+)");
+        assert_eq!(parsed.ticket_regex, r"(?i)AB#(\d+)");
         assert!(parsed.fetch_on_reference);
+    }
+
+    #[test]
+    fn invalid_ticket_regex_rejected() {
+        let mut c = cfg("https://dev.azure.com/myorg", "secret", "MyProject");
+        c.ticket_regex = "(unclosed".to_string();
+        let err = c.validate().expect_err("invalid regex must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ticket_regex") && msg.contains("failed to compile"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn ticket_regex_without_capture_group_rejected() {
+        let mut c = cfg("https://dev.azure.com/myorg", "secret", "MyProject");
+        c.ticket_regex = r"AB#\d+".to_string();
+        let err = c
+            .validate()
+            .expect_err("regex without capture group must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ticket_regex") && msg.contains("no capture group"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn custom_ticket_regex_compiles() {
+        let mut c = cfg("https://dev.azure.com/myorg", "secret", "MyProject");
+        c.ticket_regex = r"\B#(\d{4,8})\b".to_string();
+        let re = c
+            .compile_ticket_regex()
+            .expect("custom #NNNNNN regex should compile");
+        let caps = re.captures("see #123080 and #99 here").expect("matches");
+        assert_eq!(caps.get(0).unwrap().as_str(), "#123080");
+        assert_eq!(caps.get(1).unwrap().as_str(), "123080");
     }
 
     #[test]

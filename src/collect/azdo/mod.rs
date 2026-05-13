@@ -13,7 +13,7 @@
 pub mod client;
 
 pub use client::{
-    extract_work_item_refs, feed_azdo_users, fetch_referenced_work_items, AzdoComment,
-    AzdoConnectionInfo, AzdoError, AzdoField, AzdoIteration, AzdoProject, AzdoUser, AzdoWorkItem,
-    AzdoWorkItemExtended, AzdoWorkItemType, AzureDevOpsClient, WiqlResult, WorkItem, WorkItemRef,
+    feed_azdo_users, fetch_referenced_work_items, AzdoComment, AzdoConnectionInfo, AzdoError,
+    AzdoField, AzdoIteration, AzdoProject, AzdoUser, AzdoWorkItem, AzdoWorkItemExtended,
+    AzdoWorkItemType, AzureDevOpsClient, WiqlResult, WorkItem, WorkItemRef,
 };

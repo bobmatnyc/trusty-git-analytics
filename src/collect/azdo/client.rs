@@ -1,7 +1,9 @@
 //! Azure DevOps client — Phases 2–6.
 //!
 //! Implements an authenticated HTTP session against the Azure DevOps REST API
-//! (`api-version=7.1`) with the following endpoints:
+//! (`api-version=7.1` for GA resources, `7.1-preview` / `7.1-preview.N` for
+//! resources ADO still flags as under preview — currently `connectionData`,
+//! `graph/users`, and `workItems/{id}/comments`) with the following endpoints:
 //!
 //! * [`AzureDevOpsClient::test_connection`] — `GET _apis/connectionData`
 //! * [`AzureDevOpsClient::get_projects`]    — `GET _apis/projects`
@@ -495,6 +497,12 @@ struct UserRaw {
 /// Azure DevOps client. Holds config + a lazily built `reqwest::Client`.
 pub struct AzureDevOpsClient {
     config: AzureDevOpsConfig,
+    /// Lazily compiled work-item reference regex (from `config.ticket_regex`).
+    /// Compiled on first use; if compilation fails we fall back to the
+    /// default `AB#(\d+)` regex with a `tracing::warn!` — config-load
+    /// validation (`AzureDevOpsConfig::validate`) catches bad patterns
+    /// before the client is built, so this fallback is purely defensive.
+    work_item_regex: std::sync::OnceLock<regex::Regex>,
 }
 
 /// Percent-encode a single path segment (e.g. an ADO project name).
@@ -546,12 +554,74 @@ fn build_client() -> Result<reqwest::Client, AzdoError> {
 impl AzureDevOpsClient {
     /// Construct a new client. Does not validate or contact ADO.
     pub fn new(config: AzureDevOpsConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            work_item_regex: std::sync::OnceLock::new(),
+        }
     }
 
     /// Borrow the underlying config.
     pub fn config(&self) -> &AzureDevOpsConfig {
         &self.config
+    }
+
+    /// Return the compiled work-item reference regex.
+    ///
+    /// Compiled lazily from `config.ticket_regex` on first call. If the
+    /// pattern doesn't compile (which `AzureDevOpsConfig::validate` should
+    /// have caught at config-load time), falls back to the default
+    /// `AB#(\d+)` with a warning so the pipeline can still make progress.
+    pub fn work_item_regex(&self) -> &regex::Regex {
+        self.work_item_regex.get_or_init(|| {
+            self.config.compile_ticket_regex().unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    pattern = %self.config.ticket_regex,
+                    "azure_devops.ticket_regex failed to compile at runtime — falling back to default AB#(\\d+)"
+                );
+                regex::Regex::new(r"AB#(\d+)").expect("default regex compiles")
+            })
+        })
+    }
+
+    /// Extract Azure DevOps work-item IDs from arbitrary text using the
+    /// configured [`AzureDevOpsConfig::ticket_regex`]. IDs are deduplicated
+    /// in first-seen order. Capture group 1 is parsed as the numeric ID;
+    /// matches whose group 1 is not a valid `u32` are skipped silently.
+    pub fn extract_work_item_refs(&self, text: &str) -> Vec<u32> {
+        use std::collections::HashSet;
+        let re = self.work_item_regex();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for cap in re.captures_iter(text) {
+            if let Some(m) = cap.get(1) {
+                if let Ok(id) = m.as_str().parse::<u32>() {
+                    if seen.insert(id) {
+                        out.push(id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Extract full work-item *reference strings* (e.g. `AB#7`, `#123080`)
+    /// from text using the configured regex. Used by `PmAdapter` consumers
+    /// that want the human-readable ref rather than the numeric ID.
+    pub fn extract_work_item_ref_strings(&self, text: &str) -> Vec<String> {
+        use std::collections::HashSet;
+        let re = self.work_item_regex();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for cap in re.captures_iter(text) {
+            if let Some(m) = cap.get(0) {
+                let s = m.as_str().to_string();
+                if seen.insert(s.clone()) {
+                    out.push(s);
+                }
+            }
+        }
+        out
     }
 
     /// Validate credentials format only — no HTTP probe.
@@ -607,8 +677,14 @@ impl AzureDevOpsClient {
         self.validate_credentials()?;
 
         let client = build_client()?;
+        // `_apis/connectionData` is a preview-only resource on ADO Services
+        // — sending `api-version=7.1` returns HTTP 400 with
+        // "The requested version \"7.1\" of the resource is under preview.
+        //  The -preview flag must be supplied in the api-version".
+        // Use `7.1-preview` to stay in the 7.1 family used by every other
+        // endpoint in this client.
         let url = format!(
-            "{}/_apis/connectionData?connectOptions=none&api-version=7.1",
+            "{}/_apis/connectionData?connectOptions=none&api-version=7.1-preview",
             self.org_url()
         );
 
@@ -892,6 +968,10 @@ impl AzureDevOpsClient {
     /// Returns work items in the order ADO returns them — callers that need
     /// input-order alignment should re-sort by ID.
     ///
+    /// Requests use `errorPolicy: "omit"` so a single stale / deleted /
+    /// cross-project ID in a chunk does not nuke the whole batch with
+    /// HTTP 404. Unresolvable IDs are silently dropped from the response.
+    ///
     /// An empty `ids` slice short-circuits to `Ok(vec![])` without any HTTP
     /// traffic.
     ///
@@ -928,9 +1008,16 @@ impl AzureDevOpsClient {
             let resp = client
                 .post(&url)
                 .basic_auth("", Some(&self.config.pat))
+                // `errorPolicy: "omit"` makes ADO drop unresolvable IDs
+                // (deleted items, items in inaccessible projects, regex
+                // false positives) instead of failing the entire batch
+                // with HTTP 404. Without it, a single stale ref in a
+                // chunk of 200 silently nukes work-item enrichment for
+                // every commit in that chunk.
                 .json(&serde_json::json!({
                     "ids": chunk,
                     "fields": fields,
+                    "errorPolicy": "omit",
                 }))
                 .send()
                 .await?;
@@ -1407,29 +1494,6 @@ fn extract_commit_shas_from_relations(relations: &[WorkItemRelationRaw]) -> Vec<
     out
 }
 
-/// Extract Azure DevOps work-item IDs from arbitrary text.
-///
-/// Matches `AB#\d+` case-insensitively (so `ab#42`, `Ab#42`, `AB#42` all
-/// resolve to `42`). IDs are deduplicated in first-seen order.
-pub fn extract_work_item_refs(text: &str) -> Vec<u32> {
-    use std::collections::HashSet;
-    use std::sync::OnceLock;
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| regex::Regex::new(r"(?i)\bAB#(\d+)\b").expect("AB# regex compiles"));
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for cap in re.captures_iter(text) {
-        if let Some(m) = cap.get(1) {
-            if let Ok(id) = m.as_str().parse::<u32>() {
-                if seen.insert(id) {
-                    out.push(id);
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Feed ADO Graph users into an [`crate::collect::identity::IdentityResolver`].
 ///
 /// For each user with a non-empty `mail_address`, registers the email
@@ -1477,7 +1541,7 @@ pub async fn fetch_referenced_work_items(
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
     for msg in messages {
-        for id in extract_work_item_refs(msg) {
+        for id in client.extract_work_item_refs(msg) {
             if seen.insert(id) {
                 ids.push(id);
             }
@@ -1496,7 +1560,7 @@ pub async fn fetch_referenced_work_items(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn sample_config_for(server_url: &str) -> AzureDevOpsConfig {
@@ -1584,7 +1648,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/_apis/connectionData"))
-            .and(query_param("api-version", "7.1"))
+            // Regression guard: ADO rejects bare `7.1` with HTTP 400 for
+            // this preview-only resource — see the comment in
+            // `AzureDevOpsClient::test_connection`.
+            .and(query_param("api-version", "7.1-preview"))
             .and(query_param("connectOptions", "none"))
             .and(header("authorization", EXPECTED_AUTH))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
@@ -1971,6 +2038,12 @@ mod tests {
             .and(path("/_apis/wit/workitemsbatch"))
             .and(query_param("api-version", "7.1"))
             .and(header("authorization", EXPECTED_AUTH))
+            // Regression guard: the batch request must send
+            // `errorPolicy: "omit"` so a single stale/inaccessible ID
+            // does not fail the entire chunk with HTTP 404.
+            .and(body_partial_json(serde_json::json!({
+                "errorPolicy": "omit",
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(&server)
             .await;
@@ -2027,21 +2100,55 @@ mod tests {
     // ----- Phase 6: AB# reference detection -----
 
     #[test]
-    fn extract_work_item_refs_finds_ids() {
-        let out = extract_work_item_refs("Fixes AB#42 and AB#100 and AB#42 again");
+    fn client_extract_work_item_refs_returns_empty_when_no_match() {
+        let client = AzureDevOpsClient::new(sample_config());
+        let out = client.extract_work_item_refs("nothing to see here #42 PROJ-1");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn client_extract_work_item_refs_honors_default_ticket_regex() {
+        let client = AzureDevOpsClient::new(sample_config());
+        let out = client.extract_work_item_refs("Fixes AB#42 and AB#100 and AB#42 again");
         assert_eq!(out, vec![42, 100]);
     }
 
     #[test]
-    fn extract_work_item_refs_is_case_insensitive() {
-        let out = extract_work_item_refs("see ab#7 and Ab#8 and AB#9");
+    fn client_default_ticket_regex_matches_lowercase_ab_hash() {
+        // Regression guard: the pre-issue-#74 hardcoded regex was
+        // case-insensitive. After the config-driven refactor the default
+        // must stay case-insensitive — otherwise `ab#42` / `Ab#42`
+        // silently stop matching.
+        let mut cfg = sample_config();
+        cfg.ticket_regex = r"(?i)AB#(\d+)".into();
+        let client = AzureDevOpsClient::new(cfg);
+        let out = client.extract_work_item_refs("see ab#7 and Ab#8 and AB#9");
         assert_eq!(out, vec![7, 8, 9]);
     }
 
     #[test]
-    fn extract_work_item_refs_returns_empty_when_no_match() {
-        let out = extract_work_item_refs("nothing to see here #42 PROJ-1");
-        assert!(out.is_empty());
+    fn client_extract_work_item_refs_honors_custom_ticket_regex() {
+        // Real-world example from the issue: ADO org that uses `#NNNNNN`
+        // in PR merge footers and never uses `AB#N`.
+        let mut cfg = sample_config();
+        cfg.ticket_regex = r"\B#(\d{4,8})\b".into();
+        let client = AzureDevOpsClient::new(cfg);
+        let out = client.extract_work_item_refs(
+            "Related work items: #123080, #124928, #99 (too short), #42 (too short)",
+        );
+        assert_eq!(out, vec![123080, 124928]);
+    }
+
+    #[test]
+    fn client_extract_work_item_refs_falls_back_on_invalid_regex() {
+        // Defensive path: if a bad regex sneaks past config-load validation
+        // (e.g. config struct constructed by hand), the client falls back
+        // to the default `AB#(\d+)` instead of panicking.
+        let mut cfg = sample_config();
+        cfg.ticket_regex = "(unclosed".into();
+        let client = AzureDevOpsClient::new(cfg);
+        let out = client.extract_work_item_refs("AB#7 and AB#9");
+        assert_eq!(out, vec![7, 9]);
     }
 
     #[tokio::test]

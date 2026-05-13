@@ -80,6 +80,16 @@ pub enum ConfigError {
         /// Human-readable description of the conflict.
         message: String,
     },
+
+    /// `pm.azure_devops` is configured but invalid (bad URL, missing PAT,
+    /// bad `ticket_regex`, …). Wraps the message from
+    /// [`super::AzureDevOpsConfig::validate`] so the user sees the same
+    /// detail at the CLI pre-flight as they would on programmatic load.
+    #[error("Azure DevOps config invalid: {message}")]
+    InvalidAzureDevOps {
+        /// Detailed cause from `AzureDevOpsConfig::validate`.
+        message: String,
+    },
 }
 
 /// Runs a battery of validation checks against a [`Config`].
@@ -107,9 +117,29 @@ impl<'a> ConfigValidator<'a> {
         self.check_output_dir(&mut errors);
         self.check_github_token(&mut errors);
         self.check_jira_config(&mut errors);
+        self.check_azure_devops_config(&mut errors);
         self.check_llm_config(&mut errors);
         self.check_conflicting_flags(&mut errors);
         errors
+    }
+
+    /// Verify `pm.azure_devops` config — URL cloud-only, PAT non-empty,
+    /// project set, and `ticket_regex` compiles with capture group 1.
+    ///
+    /// Delegates to [`super::AzureDevOpsConfig::validate`] so the CLI
+    /// pre-flight catches the same problems that programmatic
+    /// `Config::validate` callers see. Without this, a bad
+    /// `pm.azure_devops.ticket_regex` would slide past validation and
+    /// produce silent zero-result detection at runtime.
+    fn check_azure_devops_config(&self, errors: &mut Vec<ConfigError>) {
+        let Some(adzo) = self.config.azure_devops_config() else {
+            return;
+        };
+        if let Err(e) = adzo.validate() {
+            errors.push(ConfigError::InvalidAzureDevOps {
+                message: e.to_string(),
+            });
+        }
     }
 
     /// Verify every configured repository path exists on disk.
@@ -512,5 +542,82 @@ mod tests {
             "got {errors:?}"
         );
         assert!(exists, "validator should have created the dir");
+    }
+
+    #[test]
+    fn ado_invalid_ticket_regex_surfaces_via_config_validator() {
+        use crate::core::config::{AzureDevOpsConfig, PmConfig};
+        let cfg = Config {
+            pm: Some(PmConfig {
+                azure_devops: Some(AzureDevOpsConfig {
+                    organization_url: "https://dev.azure.com/myorg".into(),
+                    pat: "secret".into(),
+                    project: "MyProject".into(),
+                    // Bad pattern — must be caught by pre-flight, not by a
+                    // silent fallback at adapter runtime.
+                    ticket_regex: "(unclosed".into(),
+                    team_keys: vec![],
+                    fetch_on_reference: true,
+                }),
+            }),
+            ..Default::default()
+        };
+        let errors = ConfigValidator::new(&cfg).validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidAzureDevOps { .. })),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn ado_on_prem_url_surfaces_via_config_validator() {
+        use crate::core::config::{AzureDevOpsConfig, PmConfig};
+        let cfg = Config {
+            pm: Some(PmConfig {
+                azure_devops: Some(AzureDevOpsConfig {
+                    organization_url: "https://tfs.mycompany.com/tfs".into(),
+                    pat: "secret".into(),
+                    project: "MyProject".into(),
+                    ticket_regex: r"AB#(\d+)".into(),
+                    team_keys: vec![],
+                    fetch_on_reference: true,
+                }),
+            }),
+            ..Default::default()
+        };
+        let errors = ConfigValidator::new(&cfg).validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidAzureDevOps { .. })),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn ado_valid_config_passes_config_validator() {
+        use crate::core::config::{AzureDevOpsConfig, PmConfig};
+        let cfg = Config {
+            pm: Some(PmConfig {
+                azure_devops: Some(AzureDevOpsConfig {
+                    organization_url: "https://dev.azure.com/myorg".into(),
+                    pat: "secret".into(),
+                    project: "MyProject".into(),
+                    ticket_regex: r"\B#(\d{4,8})\b".into(),
+                    team_keys: vec![],
+                    fetch_on_reference: true,
+                }),
+            }),
+            ..Default::default()
+        };
+        let errors = ConfigValidator::new(&cfg).validate();
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidAzureDevOps { .. })),
+            "got {errors:?}"
+        );
     }
 }

@@ -233,12 +233,6 @@ fn github_ref_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?m)(?:^|\s)(#\d+)\b").expect("github regex compiles"))
 }
 
-/// Lazily-compiled Azure DevOps regex (`AB#\d+`).
-fn azdo_ref_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b(AB#\d+)\b").expect("azdo regex compiles"))
-}
-
 /// Extract deduplicated matches for `re`'s first capture group from `text`.
 fn extract_unique(re: &Regex, text: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -530,7 +524,10 @@ impl PmAdapter for AzureDevOpsAdapter {
     }
 
     fn detect_ticket_refs(&self, text: &str) -> Vec<String> {
-        extract_unique(azdo_ref_re(), text)
+        // Honour `pm.azure_devops.ticket_regex` — orgs that use `#NNNNNN`
+        // or other conventions configure the regex once and detection
+        // follows everywhere.
+        self.inner.extract_work_item_ref_strings(text)
     }
 
     async fn health_check(&self) -> Result<(), PmError> {
@@ -680,9 +677,38 @@ mod tests {
     }
 
     #[test]
-    fn azdo_ref_re_extracts_ab_refs() {
-        let out = extract_unique(azdo_ref_re(), "AB#1234 and AB#7 and AB#1234 again");
+    fn azdo_adapter_default_regex_extracts_ab_refs() {
+        use crate::core::config::AzureDevOpsConfig;
+        let cfg = AzureDevOpsConfig {
+            organization_url: "https://dev.azure.com/myorg".into(),
+            pat: "x".into(),
+            project: "P".into(),
+            ticket_regex: r"AB#(\d+)".into(),
+            team_keys: vec![],
+            fetch_on_reference: true,
+        };
+        let adapter = AzureDevOpsAdapter::new(crate::collect::azdo::AzureDevOpsClient::new(cfg));
+        let out = adapter.detect_ticket_refs("AB#1234 and AB#7 and AB#1234 again");
         assert_eq!(out, vec!["AB#1234".to_string(), "AB#7".to_string()]);
+    }
+
+    #[test]
+    fn azdo_adapter_custom_regex_extracts_bare_hash_refs() {
+        use crate::core::config::AzureDevOpsConfig;
+        let cfg = AzureDevOpsConfig {
+            organization_url: "https://dev.azure.com/myorg".into(),
+            pat: "x".into(),
+            project: "P".into(),
+            // Bare `#NNNNNN` convention (4–8 digits) — common in ADO PR merge footers.
+            ticket_regex: r"\B#(\d{4,8})\b".into(),
+            team_keys: vec![],
+            fetch_on_reference: true,
+        };
+        let adapter = AzureDevOpsAdapter::new(crate::collect::azdo::AzureDevOpsClient::new(cfg));
+        let out =
+            adapter.detect_ticket_refs("Related work items: #123080, #124928, #99 (skip), #42");
+        // `#99` and `#42` are below the 4-digit minimum, so they're skipped.
+        assert_eq!(out, vec!["#123080".to_string(), "#124928".to_string()]);
     }
 
     #[test]
