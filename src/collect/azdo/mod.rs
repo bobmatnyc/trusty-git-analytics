@@ -11,9 +11,14 @@
 //! Phase 6 will add work-item fetching on top of this session.
 
 pub mod client;
+pub mod pr_fetcher;
 
 pub use client::{
     extract_work_item_refs, feed_azdo_users, fetch_referenced_work_items, AzdoComment,
     AzdoConnectionInfo, AzdoError, AzdoField, AzdoIteration, AzdoProject, AzdoUser, AzdoWorkItem,
     AzdoWorkItemExtended, AzdoWorkItemType, AzureDevOpsClient, WiqlResult, WorkItem, WorkItemRef,
+};
+pub use pr_fetcher::{
+    extract_pr_ids, get_existing_pr_numbers, upsert_pr, upsert_pr_reviewer, AdoPrFetcher,
+    AdoPrReviewer, AdoPullRequest,
 };

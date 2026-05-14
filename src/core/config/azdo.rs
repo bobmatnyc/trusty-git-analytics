@@ -53,6 +53,16 @@ pub struct AzureDevOpsConfig {
     /// Whether to fetch work items on commit reference (Phase 2+, currently ignored).
     #[serde(default = "default_true")]
     pub fetch_on_reference: bool,
+
+    /// Whether to fetch pull request metadata + reviewers from ADO.
+    ///
+    /// When `true`, the collector scans commit messages for `Merged PR NNNN:`
+    /// patterns, fetches PR details for each unique ID via the ADO REST API,
+    /// and stores them in the `pull_requests` and `pr_reviewers` tables with
+    /// `provider = 'azdo'`. Default `false` to preserve the previous behaviour
+    /// (no PR HTTP traffic) for users that haven't opted in.
+    #[serde(default)]
+    pub fetch_prs: bool,
 }
 
 fn default_ticket_regex() -> String {
@@ -123,6 +133,7 @@ mod tests {
             ticket_regex: default_ticket_regex(),
             team_keys: vec![],
             fetch_on_reference: true,
+            fetch_prs: false,
         }
     }
 

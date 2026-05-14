@@ -846,6 +846,7 @@ mod tests {
                     ticket_regex: r"AB#(\d+)".into(),
                     team_keys: vec![],
                     fetch_on_reference: true,
+                    fetch_prs: false,
                 }),
             }),
             ..Default::default()
@@ -1007,6 +1008,7 @@ mod tests {
                     ticket_regex: r"AB#(\d+)".into(),
                     team_keys: vec![],
                     fetch_on_reference: true,
+                    fetch_prs: false,
                 }),
             }),
             ..Default::default()
@@ -1053,6 +1055,7 @@ mod tests {
                     ticket_regex: r"AB#(\d+)".into(),
                     team_keys: vec![],
                     fetch_on_reference: true,
+                    fetch_prs: false,
                 }),
             }),
             ..Default::default()
@@ -1270,6 +1273,7 @@ jira:
                     ticket_regex: r"AB#(\d+)".into(),
                     team_keys: vec![],
                     fetch_on_reference: true,
+                    fetch_prs: false,
                 }),
             }),
             ..Default::default()

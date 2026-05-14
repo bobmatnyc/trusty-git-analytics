@@ -1535,6 +1535,7 @@ mod tests {
             ticket_regex: r"AB#(\d+)".into(),
             team_keys: vec![],
             fetch_on_reference: true,
+            fetch_prs: false,
         }
     }
 
@@ -1546,6 +1547,7 @@ mod tests {
             ticket_regex: r"AB#(\d+)".into(),
             team_keys: vec![],
             fetch_on_reference: true,
+            fetch_prs: false,
         }
     }
 
