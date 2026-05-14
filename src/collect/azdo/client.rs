@@ -949,6 +949,29 @@ impl AzureDevOpsClient {
                 .await
                 .map_err(|e| AzdoError::Parse(e.to_string()))?;
 
+            // Detect IDs silently dropped by ADO's errorPolicy=omit behavior.
+            // When `workitemsbatch` cannot resolve an ID (e.g., wrong project,
+            // deleted, or never existed), it omits it from the response without
+            // raising an error. Without this log, a misconfigured `ticket_regex`
+            // is indistinguishable from a correct one.
+            if body.value.len() < chunk.len() {
+                let returned_ids: std::collections::HashSet<u32> =
+                    body.value.iter().map(|w| w.id).collect();
+                let dropped: Vec<u32> = chunk
+                    .iter()
+                    .copied()
+                    .filter(|id| !returned_ids.contains(id))
+                    .collect();
+                let first_dropped: Vec<u32> = dropped.iter().take(10).copied().collect();
+                tracing::debug!(
+                    requested = chunk.len(),
+                    returned = body.value.len(),
+                    dropped = dropped.len(),
+                    first_dropped = ?first_dropped,
+                    "ADO workitemsbatch silently omitted some IDs (errorPolicy=omit)"
+                );
+            }
+
             for w in body.value {
                 all.push(parse_work_item(w));
             }
