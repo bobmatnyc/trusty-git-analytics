@@ -239,6 +239,68 @@ fn azdo_ref_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\b(AB#\d+)\b").expect("azdo regex compiles"))
 }
 
+/// Compile a user-supplied ticket-detection regex.
+///
+/// Why: lets users override the hardcoded JIRA / GitHub / Linear detection
+/// patterns to accommodate real-world commit-message conventions
+/// (lowercase keys, longer prefixes, `Fix:#123`, etc.) without code changes.
+/// What: attempts to compile `pattern`; on compile failure or when the
+/// regex has zero capture groups, emits a `tracing::warn!` and returns
+/// `None` so the caller falls back to the default pattern.
+/// Test: assert that `compile_user_regex("x", Some("\\d+"))` returns `None`
+/// (no capture group), and that `compile_user_regex("x", Some("(\\d+)"))`
+/// returns `Some(_)`.
+fn compile_user_regex(system: &str, pattern: Option<&str>) -> Option<Regex> {
+    let pat = pattern?;
+    match Regex::new(pat) {
+        Ok(re) => {
+            if re.captures_len() < 2 {
+                warn!(
+                    system = system,
+                    pattern = pat,
+                    "ticket_regex has no capture group; ignoring and using default pattern"
+                );
+                None
+            } else {
+                Some(re)
+            }
+        }
+        Err(e) => {
+            // Should be unreachable when called from build_adapters because
+            // Config::load already validates compilability — kept for defense
+            // in depth and for callers that construct adapters by hand.
+            warn!(
+                system = system,
+                pattern = pat,
+                error = %e,
+                "ticket_regex failed to compile; using default pattern"
+            );
+            None
+        }
+    }
+}
+
+/// Extract deduplicated matches for the user-supplied regex's first capture
+/// group from `text`.
+///
+/// Why: user-supplied regexes always expose the ticket ID in group 1; this
+/// differs from the built-in JIRA pattern, which uses two groups and joins
+/// them. Keeping the logic separate avoids over-generalizing
+/// [`extract_unique`].
+fn extract_user_regex(re: &Regex, text: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for cap in re.captures_iter(text) {
+        if let Some(m) = cap.get(1) {
+            let s = m.as_str().to_string();
+            if seen.insert(s.clone()) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 /// Extract deduplicated matches for `re`'s first capture group from `text`.
 fn extract_unique(re: &Regex, text: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -272,12 +334,34 @@ fn extract_unique(re: &Regex, text: &str) -> Vec<String> {
 /// PM adapter wrapping [`crate::collect::jira::JiraClient`].
 pub struct JiraAdapter {
     inner: crate::collect::jira::JiraClient,
+    /// Optional user-supplied detection regex. When `None`, the adapter
+    /// falls back to the shared default JIRA pattern.
+    ticket_regex: Option<Regex>,
 }
 
 impl JiraAdapter {
-    /// Construct from an existing [`crate::collect::jira::JiraClient`].
+    /// Construct from an existing [`crate::collect::jira::JiraClient`]
+    /// using the default JIRA detection regex.
     pub fn new(inner: crate::collect::jira::JiraClient) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            ticket_regex: None,
+        }
+    }
+
+    /// Construct from a client and an optional user-supplied detection regex
+    /// string. The string is pre-validated at config-load time, so a parse
+    /// failure here is treated as a non-fatal warning and the adapter falls
+    /// back to the default pattern. A regex with no capture groups is also
+    /// rejected with a warning.
+    pub fn with_ticket_regex(
+        inner: crate::collect::jira::JiraClient,
+        pattern: Option<&str>,
+    ) -> Self {
+        Self {
+            inner,
+            ticket_regex: compile_user_regex("jira", pattern),
+        }
     }
 }
 
@@ -317,7 +401,10 @@ impl PmAdapter for JiraAdapter {
     }
 
     fn detect_ticket_refs(&self, text: &str) -> Vec<String> {
-        extract_unique(jira_ref_re(), text)
+        match &self.ticket_regex {
+            Some(re) => extract_user_regex(re, text),
+            None => extract_unique(jira_ref_re(), text),
+        }
     }
 
     async fn health_check(&self) -> Result<(), PmError> {
@@ -337,12 +424,31 @@ impl PmAdapter for JiraAdapter {
 /// delegates to [`crate::collect::github::GitHubClient::fetch_issue`].
 pub struct GitHubAdapter {
     inner: crate::collect::github::GitHubClient,
+    /// Optional user-supplied detection regex. When `None`, the adapter
+    /// falls back to the shared default GitHub pattern.
+    ticket_regex: Option<Regex>,
 }
 
 impl GitHubAdapter {
-    /// Construct from an existing [`crate::collect::github::GitHubClient`].
+    /// Construct from an existing [`crate::collect::github::GitHubClient`]
+    /// using the default GitHub detection regex.
     pub fn new(inner: crate::collect::github::GitHubClient) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            ticket_regex: None,
+        }
+    }
+
+    /// Construct from a client and an optional user-supplied detection regex.
+    /// See [`JiraAdapter::with_ticket_regex`] for semantics.
+    pub fn with_ticket_regex(
+        inner: crate::collect::github::GitHubClient,
+        pattern: Option<&str>,
+    ) -> Self {
+        Self {
+            inner,
+            ticket_regex: compile_user_regex("github", pattern),
+        }
     }
 }
 
@@ -388,7 +494,10 @@ impl PmAdapter for GitHubAdapter {
     }
 
     fn detect_ticket_refs(&self, text: &str) -> Vec<String> {
-        extract_unique(github_ref_re(), text)
+        match &self.ticket_regex {
+            Some(re) => extract_user_regex(re, text),
+            None => extract_unique(github_ref_re(), text),
+        }
     }
 
     async fn health_check(&self) -> Result<(), PmError> {
@@ -408,12 +517,31 @@ impl PmAdapter for GitHubAdapter {
 /// PM adapter wrapping [`crate::collect::linear::LinearClient`].
 pub struct LinearAdapter {
     inner: crate::collect::linear::LinearClient,
+    /// Optional user-supplied detection regex. When `None`, the adapter
+    /// falls back to the shared default JIRA-shaped pattern.
+    ticket_regex: Option<Regex>,
 }
 
 impl LinearAdapter {
-    /// Construct from an existing [`crate::collect::linear::LinearClient`].
+    /// Construct from an existing [`crate::collect::linear::LinearClient`]
+    /// using the default Linear detection regex.
     pub fn new(inner: crate::collect::linear::LinearClient) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            ticket_regex: None,
+        }
+    }
+
+    /// Construct from a client and an optional user-supplied detection regex.
+    /// See [`JiraAdapter::with_ticket_regex`] for semantics.
+    pub fn with_ticket_regex(
+        inner: crate::collect::linear::LinearClient,
+        pattern: Option<&str>,
+    ) -> Self {
+        Self {
+            inner,
+            ticket_regex: compile_user_regex("linear", pattern),
+        }
     }
 }
 
@@ -452,8 +580,13 @@ impl PmAdapter for LinearAdapter {
     }
 
     fn detect_ticket_refs(&self, text: &str) -> Vec<String> {
-        // Linear identifiers are a strict subset of the JIRA `KEY-N` shape.
-        extract_unique(jira_ref_re(), text)
+        // Linear identifiers are a strict subset of the JIRA `KEY-N` shape
+        // by default; users can override via `linear.ticket_regex` to
+        // accommodate workspace-specific team prefixes.
+        match &self.ticket_regex {
+            Some(re) => extract_user_regex(re, text),
+            None => extract_unique(jira_ref_re(), text),
+        }
     }
 
     async fn health_check(&self) -> Result<(), PmError> {
@@ -618,21 +751,30 @@ pub fn build_adapters(config: &Config) -> Vec<Box<dyn PmAdapter>> {
 
     if let Some(cfg) = &config.jira {
         match crate::collect::jira::JiraClient::new(cfg) {
-            Ok(client) => out.push(Box::new(JiraAdapter::new(client))),
+            Ok(client) => out.push(Box::new(JiraAdapter::with_ticket_regex(
+                client,
+                cfg.ticket_regex.as_deref(),
+            ))),
             Err(e) => warn!(error = %e, "skipping JIRA adapter: invalid config"),
         }
     }
 
     if let Some(cfg) = &config.github {
         match crate::collect::github::GitHubClient::new(cfg) {
-            Ok(client) => out.push(Box::new(GitHubAdapter::new(client))),
+            Ok(client) => out.push(Box::new(GitHubAdapter::with_ticket_regex(
+                client,
+                cfg.ticket_regex.as_deref(),
+            ))),
             Err(e) => warn!(error = %e, "skipping GitHub adapter: invalid config"),
         }
     }
 
     if let Some(cfg) = &config.linear {
         match crate::collect::linear::LinearClient::new(cfg) {
-            Ok(client) => out.push(Box::new(LinearAdapter::new(client))),
+            Ok(client) => out.push(Box::new(LinearAdapter::with_ticket_regex(
+                client,
+                cfg.ticket_regex.as_deref(),
+            ))),
             Err(e) => warn!(error = %e, "skipping Linear adapter: invalid config"),
         }
     }
@@ -765,6 +907,90 @@ mod tests {
         );
         assert_eq!(ticket.source, PmSource::GitHub);
         assert!(ticket.raw.get("body").is_some());
+    }
+
+    /// Verify that a user-supplied regex with no capture group is rejected
+    /// at adapter-construction time (returns `None`, falls back to default).
+    ///
+    /// Why: protects the documented contract that capture group 1 is the
+    /// ticket ID; a zero-group regex would silently break detection.
+    /// What: calls `compile_user_regex` with a pattern that has no groups
+    /// and asserts the result is `None`.
+    /// Test: `compile_user_regex("x", Some("\\d+"))` returns `None`.
+    #[test]
+    fn compile_user_regex_rejects_zero_capture_groups() {
+        assert!(compile_user_regex("jira", Some(r"\d+")).is_none());
+        assert!(compile_user_regex("jira", Some(r"(\d+)")).is_some());
+        assert!(compile_user_regex("jira", None).is_none());
+    }
+
+    /// Verify that an invalid regex string yields `None` (caller falls back
+    /// to the default pattern).
+    #[test]
+    fn compile_user_regex_handles_invalid_pattern() {
+        assert!(compile_user_regex("github", Some("[")).is_none());
+    }
+
+    /// Verify `extract_user_regex` extracts and deduplicates group-1 matches.
+    #[test]
+    fn extract_user_regex_dedupes_group_one() {
+        let re = Regex::new(r"(?i)([a-z]+-\d+)").expect("compiles");
+        let out = extract_user_regex(&re, "fix proj-123 and PROJ-123 and other-9");
+        assert_eq!(
+            out,
+            vec![
+                "proj-123".to_string(),
+                "PROJ-123".to_string(),
+                "other-9".to_string()
+            ]
+        );
+    }
+
+    /// JIRA adapter with a custom regex picks up lowercase keys.
+    #[test]
+    fn jira_adapter_uses_user_regex_for_lowercase_keys() {
+        // Default JIRA pattern rejects lowercase — verify override fixes it.
+        let cfg = crate::core::config::JiraConfig {
+            url: Some("https://x.atlassian.net".into()),
+            username: Some("u".into()),
+            token: Some("t".into()),
+            ..Default::default()
+        };
+        let client = crate::collect::jira::JiraClient::new(&cfg).expect("client");
+        let adapter = JiraAdapter::with_ticket_regex(client, Some(r"(?i)\b([A-Z][A-Z0-9]*-\d+)\b"));
+        let refs = adapter.detect_ticket_refs("see proj-123 and ENG-456");
+        assert!(refs.contains(&"proj-123".to_string()));
+        assert!(refs.contains(&"ENG-456".to_string()));
+    }
+
+    /// GitHub adapter with a custom regex picks up `Fix:#123` (no leading space).
+    #[test]
+    fn github_adapter_uses_user_regex_for_tight_refs() {
+        let cfg = crate::core::config::GithubConfig {
+            token: Some("t".into()),
+            repo: Some("owner/name".into()),
+            ..Default::default()
+        };
+        let client = crate::collect::github::GitHubClient::new(&cfg).expect("client");
+        let adapter = GitHubAdapter::with_ticket_regex(client, Some(r"(#\d+)"));
+        let refs = adapter.detect_ticket_refs("Fix:#123 and (#456) and closes#42");
+        assert_eq!(
+            refs,
+            vec!["#123".to_string(), "#456".to_string(), "#42".to_string()]
+        );
+    }
+
+    /// Linear adapter falls back to the default pattern when no override.
+    #[test]
+    fn linear_adapter_defaults_when_no_override() {
+        let cfg = crate::core::config::LinearConfig {
+            api_key: Some("k".into()),
+            ..Default::default()
+        };
+        let client = crate::collect::linear::LinearClient::new(&cfg).expect("client");
+        let adapter = LinearAdapter::with_ticket_regex(client, None);
+        let refs = adapter.detect_ticket_refs("ENG-1 and FE-2");
+        assert_eq!(refs, vec!["ENG-1".to_string(), "FE-2".to_string()]);
     }
 
     /// Smoke-test: an adapter built behind `dyn PmAdapter` can still call

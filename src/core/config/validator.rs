@@ -376,6 +376,7 @@ mod tests {
             org: None,
             repo: None,
             fetch_prs: true,
+            ticket_regex: None,
         });
         let errors = ConfigValidator::new(&cfg).validate();
         let found = errors
@@ -400,6 +401,7 @@ mod tests {
             org: None,
             repo: None,
             fetch_prs: true,
+            ticket_regex: None,
         });
         let errors = ConfigValidator::new(&cfg).validate();
         assert!(
