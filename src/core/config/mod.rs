@@ -292,6 +292,19 @@ pub struct ClassificationConfig {
     /// emits a `tracing::warn!` if the result falls below this threshold.
     #[serde(default = "default_min_coverage_pct")]
     pub min_coverage_pct: f64,
+
+    /// Confidence threshold at or below which the LLM fallback tier is invoked.
+    ///
+    /// After tiers 1–3 produce a verdict, the LLM fallback fires for any
+    /// commit whose `confidence <= llm_fallback_threshold` (and only when
+    /// [`Self::use_llm`] is true). The catch-all rule emits `confidence = 0.3`,
+    /// so a value of `0.35` will route catch-all hits through the LLM while
+    /// a value of `0.0` preserves the legacy behaviour of only invoking the
+    /// LLM on truly empty (`confidence == 0.0`) verdicts.
+    ///
+    /// Defaults to `0.0` for backwards compatibility.
+    #[serde(default)]
+    pub llm_fallback_threshold: f64,
 }
 
 fn default_confidence_threshold() -> f64 {
@@ -317,6 +330,7 @@ impl Default for ClassificationConfig {
             confidence_threshold: default_confidence_threshold(),
             custom_categories: Vec::new(),
             min_coverage_pct: default_min_coverage_pct(),
+            llm_fallback_threshold: 0.0,
         }
     }
 }

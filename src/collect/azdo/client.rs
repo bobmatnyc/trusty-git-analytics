@@ -60,8 +60,13 @@ pub enum AzdoError {
     #[error("access denied (403): PAT lacks required scope")]
     Forbidden,
 
-    /// HTTP 404 — the organisation URL is wrong or the resource does not exist.
-    #[error("organisation not found (404): check organization_url")]
+    /// HTTP 404 — the requested resource was not found.
+    ///
+    /// This can mean the organisation URL is wrong, the project does not
+    /// exist, a referenced work item ID is missing, or credentials don't
+    /// grant visibility. The endpoint context is not threaded through this
+    /// variant — callers should consult the failing endpoint to disambiguate.
+    #[error("resource not found (404): check organisation, project, and credentials")]
     NotFound,
 
     /// Transport-level failure (DNS, TLS, timeout, connection reset, ...).

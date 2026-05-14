@@ -166,13 +166,32 @@ impl ClassificationPipeline {
             }
         }
 
-        // 4. LLM fallback (async, serialized) for entries that came back as uncategorized.
+        // 4. LLM fallback (async, serialized) for entries whose verdict
+        //    confidence is at or below `llm_fallback_threshold`. The default
+        //    threshold is `0.0`, preserving legacy behaviour; raising it to
+        //    `~0.35` routes catch-all (`confidence = 0.3`) verdicts through
+        //    the LLM.
         if engine.config().use_llm {
+            let fallback_threshold = self
+                .config
+                .classification
+                .as_ref()
+                .map(|c| c.llm_fallback_threshold)
+                .unwrap_or(0.0);
             let pb = make_progress(total as u64, "LLM fallback");
             for (idx, commit) in commits.iter().enumerate() {
-                if results[idx].confidence <= 0.0 {
+                if results[idx].confidence <= fallback_threshold {
+                    let original = results[idx].clone();
                     let r = engine.classify(&commit.message, commit.is_merge).await;
-                    results[idx] = r;
+                    // Overwrite-guard: if the LLM call effectively failed
+                    // (returned a verdict no better than what we had), keep
+                    // the original catch-all verdict so we don't regress
+                    // confidence to 0.0.
+                    if r.confidence > original.confidence {
+                        results[idx] = r;
+                    } else {
+                        results[idx] = original;
+                    }
                 }
                 pb.inc(1);
             }
