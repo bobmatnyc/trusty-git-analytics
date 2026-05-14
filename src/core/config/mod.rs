@@ -305,6 +305,20 @@ pub struct ClassificationConfig {
     /// Defaults to `0.0` for backwards compatibility.
     #[serde(default)]
     pub llm_fallback_threshold: f64,
+
+    /// Maximum number of concurrent in-flight LLM fallback requests.
+    ///
+    /// The LLM fallback tier issues one HTTP request per commit whose
+    /// confidence is at or below [`Self::llm_fallback_threshold`]. Issuing
+    /// these serially yields ~1 second per commit, which is intolerable on
+    /// large corpora (e.g. 1000+ commits → 15+ minutes). Running them through
+    /// `buffer_unordered(llm_fallback_concurrency)` typically cuts wall-clock
+    /// time by an order of magnitude.
+    ///
+    /// Defaults to `8`. Increase for higher-throughput providers; decrease if
+    /// you hit upstream rate limits.
+    #[serde(default = "default_llm_fallback_concurrency")]
+    pub llm_fallback_concurrency: usize,
 }
 
 fn default_confidence_threshold() -> f64 {
@@ -319,6 +333,10 @@ fn default_llm_provider() -> String {
     "auto".to_string()
 }
 
+fn default_llm_fallback_concurrency() -> usize {
+    8
+}
+
 impl Default for ClassificationConfig {
     fn default() -> Self {
         Self {
@@ -331,6 +349,7 @@ impl Default for ClassificationConfig {
             custom_categories: Vec::new(),
             min_coverage_pct: default_min_coverage_pct(),
             llm_fallback_threshold: 0.0,
+            llm_fallback_concurrency: default_llm_fallback_concurrency(),
         }
     }
 }
