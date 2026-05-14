@@ -5,6 +5,23 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-05-14
+
+### Fixed
+- **`llm_fallback_threshold` config field now wired (#78)** — The `classification.llm_fallback_threshold` config value was parsed but never forwarded to `ClassificationEngine`. Commits above the threshold now correctly skip the LLM fallback tier.
+- **ADO 404 error message clarified (#80)** — Azure DevOps 404 responses previously surfaced a generic HTTP error. The message now identifies the missing resource and suggests checking the project/organization slug in config.
+- **`ticket_regex` config wired for JIRA, GitHub, and Linear adapters (#75)** — The `ticket_regex` field defined in each PM adapter's config block was ignored; all three adapters now compile and apply the user-supplied regex pattern when detecting ticket references in commit messages.
+- **ADO workitemsbatch omit policy: dropped IDs now logged (#81)** — When the ADO batch API silently omits work item IDs (e.g. items in areas the token cannot read), `tga` now logs each dropped ID at `WARN` level so operators can identify access-control gaps without digging through raw HTTP responses.
+
+### Performance
+- **Parallel LLM fallback with `buffer_unordered` (#83)** — The per-commit LLM classification loop was fully serial; each request waited for the previous one to complete. Requests are now dispatched concurrently using `futures::stream::buffer_unordered`, capped at the configurable `llm_concurrency` limit, cutting wall-clock classification time roughly proportional to API latency.
+
+### Added
+- **ADO pull request fetcher with reviewer tracking (#84)** — `AzureDevOpsClient` now implements `fetch_pull_requests`, collecting PR metadata (title, state, author, dates, target branch) and the full reviewer list (identity, vote, required flag) into the `pull_requests` and `pull_request_reviews` tables.
+
+### Tests
+- **Ticket-regex detection coverage (#76)** — Added unit tests for `ticket_regex` detection across the JIRA, GitHub, and Linear adapters, covering match, no-match, and malformed-pattern cases.
+
 ## [1.0.5] - 2026-05-12
 
 ### Fixed
