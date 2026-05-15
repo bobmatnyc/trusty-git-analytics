@@ -6,6 +6,15 @@ This is a Rust port of gitflow-analytics (Python).
 Python predecessor: /Users/masa/Projects/gitflow-analytics
 GitHub: https://github.com/bobmatnyc/gitflow-analytics
 
+## Session Start Workflow (MANDATORY order)
+
+When asked to "check issues", "run workflow", or start a work session:
+
+1. **Check open PRs first** — `gh pr list --repo bobmatnyc/trusty-git-analytics --state open`
+   - Review each open PR (diff, CI status, comments)
+   - Address PRs before touching issues: review, request changes, or merge
+2. **Then check open issues** — only after all actionable PRs are handled
+
 ## Shipping Checklist (MANDATORY for every feature/fix release)
 
 1. **Implement** — write code and tests, verify all pass (`cargo test`)
