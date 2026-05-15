@@ -2,7 +2,7 @@
 
 The configuration file is YAML, matching the schema used by the Python predecessor
 `gitflow-analytics`. All keys are deserialized via `serde_yaml` into typed structs in
-`tga-core::config`. Paths support `~` expansion via the `shellexpand` crate.
+`tga::core::config`. Paths support `~` expansion via the `shellexpand` crate.
 
 ## Top-Level Structure
 
@@ -48,8 +48,10 @@ confluence: {}            # ConfluenceConfig
 | `base_url` | url | `https://api.github.com` | API base URL (GHE support) |
 | `max_retries` | u32 | 3 | Retry count on transient failures |
 | `backoff_factor` | f64 | 2.0 | Exponential backoff multiplier |
+| `fetch_prs` | bool | false | Fetch pull request metadata from GitHub |
 | `fetch_pr_reviews` | bool | true | Fetch review summaries with PRs |
 | `open_pr_refresh_ttl_hours` | u32 | 1 | TTL for refreshing open PR snapshots |
+| `ticket_regex` | string | None | Override regex for detecting GitHub ticket refs (e.g. `#(\d+)`) in commit messages. Added in v1.0.6 (#75). |
 
 ### `analysis` — AnalysisConfig
 
@@ -86,18 +88,20 @@ confluence: {}            # ConfluenceConfig
 
 #### `analysis.llm_classification`
 
-| Field | Type | Default |
-|-------|------|---------|
-| `enabled` | bool | true |
-| `provider` | enum | `openrouter` (`openrouter` / `bedrock` / `auto`) |
-| `model` | string | `mistralai/mistral-7b-instruct` |
-| `api_key` | string | env `OPENROUTER_API_KEY` |
-| `confidence_threshold` | f64 | 0.7 |
-| `batch_size` | u32 | 50 |
-| `max_tokens` | u32 | 50 |
-| `temperature` | f64 | 0.1 |
-| `timeout_seconds` | u32 | 30 |
-| `cache_ttl_days` | u32 | 90 |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | true | Enable the LLM fallback tier |
+| `provider` | enum | `openrouter` | `openrouter` / `bedrock` / `auto` |
+| `model` | string | `mistralai/mistral-7b-instruct` | LLM model identifier |
+| `api_key` | string | env `OPENROUTER_API_KEY` | API key (not used for `bedrock`) |
+| `confidence_threshold` | f64 | 0.7 | Minimum confidence to accept an LLM result |
+| `llm_fallback_threshold` | f64 | 0.0 | Commits with rule-based confidence **above** this value skip the LLM tier entirely. Setting to e.g. `0.5` avoids sending already-confident results to the LLM. Added in v1.0.6 (#78). |
+| `llm_fallback_concurrency` | usize | 4 | Maximum concurrent LLM requests during the fallback pass (`buffer_unordered` cap). Increase to reduce wall-clock time when API latency is the bottleneck. Added in v1.0.6 (#83). |
+| `batch_size` | u32 | 50 | Commits per LLM batch |
+| `max_tokens` | u32 | 50 | Maximum tokens per LLM response |
+| `temperature` | f64 | 0.1 | Sampling temperature |
+| `timeout_seconds` | u32 | 30 | Per-request timeout |
+| `cache_ttl_days` | u32 | 90 | Cache TTL for LLM results |
 
 #### `analysis.identity`
 
@@ -127,11 +131,12 @@ confluence: {}            # ConfluenceConfig
 
 ### `jira` — JIRAConfig
 
-| Field | Type | Default |
-|-------|------|---------|
-| `access_user` | string | env `JIRA_USER` |
-| `access_token` | string | env `JIRA_TOKEN` |
-| `base_url` | url | required if JIRA used |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `access_user` | string | env `JIRA_USER` | JIRA API username (email for Cloud) |
+| `access_token` | string | env `JIRA_TOKEN` | JIRA API token |
+| `base_url` | url | required if JIRA used | JIRA instance base URL |
+| `ticket_regex` | string | None | Override regex for detecting JIRA ticket refs (e.g. `([A-Z]+-\d+)`) in commit messages. Added in v1.0.6 (#75). |
 
 ### `jira_integration` — JIRAIntegrationConfig
 
@@ -141,6 +146,25 @@ confluence: {}            # ConfluenceConfig
 | `fetch_story_points` | bool | true |
 | `project_keys` | list[string] | [] |
 | `story_point_fields` | list[string] | `["customfield_10016"]` |
+
+### `linear` — LinearConfig
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key` | string | env `LINEAR_API_KEY` | Linear API key |
+| `team_id` | string | None | Limit to a specific Linear team |
+| `ticket_regex` | string | None | Override regex for detecting Linear ticket refs (e.g. `([A-Z]+-\d+)`) in commit messages. Added in v1.0.6 (#75). |
+
+### `pm.azure_devops` — AzureDevOpsConfig
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `organization_url` | string | required | ADO org URL (e.g. `https://dev.azure.com/myorg`) |
+| `pat` | string | required | Azure DevOps Personal Access Token |
+| `project` | string | None | Default ADO project name |
+| `fetch_on_reference` | bool | false | Fetch work items when `AB#N` refs appear in commits |
+| `fetch_prs` | bool | false | Fetch ADO pull requests and reviewer data into `pull_requests` + `pr_reviewers` tables. Added in v1.0.6 (#84). |
+| `ticket_regex` | string | `AB#(\d+)` | Override regex for detecting ADO work item refs in commit messages. Must contain a capture group. Added in v1.0.6 (#75). |
 
 ### `jira_project_mappings`
 

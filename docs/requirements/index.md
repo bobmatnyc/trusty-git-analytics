@@ -17,3 +17,7 @@ Navigation index for trusty-git-analytics requirement specifications.
 
 The Python predecessor lives at `/Users/masa/Projects/gitflow-analytics`. Refer to its
 source under `src/gitflow_analytics/` for canonical behavior when porting features.
+
+## Version Notes
+
+- **v1.0.6**: Added `llm_fallback_threshold`, `llm_fallback_concurrency` config fields; wired `ticket_regex` for JIRA/GitHub/Linear/ADO adapters; ADO `fetch_prs` flag; `pr_reviewers` table (migration `0011`).

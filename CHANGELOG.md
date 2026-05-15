@@ -14,10 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ADO workitemsbatch omit policy: dropped IDs now logged (#81)** — When the ADO batch API silently omits work item IDs (e.g. items in areas the token cannot read), `tga` now logs each dropped ID at `WARN` level so operators can identify access-control gaps without digging through raw HTTP responses.
 
 ### Performance
-- **Parallel LLM fallback with `buffer_unordered` (#83)** — The per-commit LLM classification loop was fully serial; each request waited for the previous one to complete. Requests are now dispatched concurrently using `futures::stream::buffer_unordered`, capped at the configurable `llm_concurrency` limit, cutting wall-clock classification time roughly proportional to API latency.
+- **Parallel LLM fallback with `buffer_unordered` (#83)** — The per-commit LLM classification loop was fully serial; each request waited for the previous one to complete. Requests are now dispatched concurrently using `futures::stream::buffer_unordered`, capped at the configurable `llm_fallback_concurrency` limit (default 4), cutting wall-clock classification time roughly proportional to API latency.
 
 ### Added
-- **ADO pull request fetcher with reviewer tracking (#84)** — `AzureDevOpsClient` now implements `fetch_pull_requests`, collecting PR metadata (title, state, author, dates, target branch) and the full reviewer list (identity, vote, required flag) into the `pull_requests` and `pull_request_reviews` tables.
+- **ADO pull request fetcher with reviewer tracking (#84)** — `AzureDevOpsClient` now implements `fetch_pull_requests`, collecting PR metadata (title, state, author, dates, target branch) and the full reviewer list (identity, vote, required flag) into the `pull_requests` and `pr_reviewers` tables (migration `0011_pr_reviewers.sql`). Enabled per repository via `pm.azure_devops.fetch_prs: true`.
 
 ### Tests
 - **Ticket-regex detection coverage (#76)** — Added unit tests for `ticket_regex` detection across the JIRA, GitHub, and Linear adapters, covering match, no-match, and malformed-pattern cases.
