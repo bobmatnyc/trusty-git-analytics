@@ -221,8 +221,11 @@ impl BitbucketClient {
     /// Persist a batch of [`PullRequest`] rows into the database.
     ///
     /// Mirrors the GitHub client's persistence — same table, same columns.
-    /// The `INSERT OR REPLACE` semantics are imperfect today (see issue #71)
-    /// but matching GitHub keeps behavior consistent until that fix lands.
+    /// Writes `provider = 'bitbucket'` so rows deduplicate against the
+    /// `(provider, pr_number)` unique index from migration
+    /// `0010_pull_requests_provider.sql` (fix #71), preventing collisions
+    /// with PRs collected by the GitHub or Azure DevOps providers that
+    /// happen to share the same numeric `pr_number`.
     ///
     /// # Errors
     ///
@@ -237,9 +240,10 @@ impl BitbucketClient {
         for pr in prs {
             conn.execute(
                 "INSERT OR REPLACE INTO pull_requests \
-                 (pr_number, title, author, state, created_at, merged_at, commit_shas) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (provider, pr_number, title, author, state, created_at, merged_at, commit_shas) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
+                    "bitbucket",
                     pr.pr_number as i64,
                     pr.title,
                     pr.author,

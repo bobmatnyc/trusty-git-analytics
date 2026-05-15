@@ -5,19 +5,17 @@ the reasoning behind them.
 
 ## Crate Structure
 
-The project is a Cargo workspace with five member crates:
+The project is a single `tga` crate (consolidated from the original 5-crate workspace in v1.0.0). The library and binary are both built from this crate.
 
-| Crate | Responsibility |
-|-------|----------------|
-| `tga-core` | Shared types, config schema (serde), DB schema + migrations (rusqlite), error types, identity model, change_type enum |
-| `tga-collect` | Stage 1: git extraction (git2), GitHub HTTP client, JIRA HTTP client, identity resolver, ticket pattern matcher |
-| `tga-classify` | Stage 2: classification cascade (override / issue_type / jira_mapping / LLM / rule-based), LLM client, taxonomy remap |
-| `tga-report` | Stage 3: CSV/JSON/Markdown report generation, DORA / velocity / quality / activity metrics |
-| `tga-cli` | Binary crate (`tga`): clap subcommands, tracing setup, orchestrates pipeline stages |
+| Module | Path | Responsibility |
+|--------|------|----------------|
+| `tga::core` | `src/core/` | Shared types, config schema (serde), DB schema + migrations (rusqlite), error types, identity model, `ChangeType` enum |
+| `tga::collect` | `src/collect/` | Stage 1: git extraction (git2), GitHub/JIRA/Linear/ADO HTTP clients, `PmAdapter` trait, identity resolver, ticket pattern matcher |
+| `tga::classify` | `src/classify/` | Stage 2: classification cascade (override / issue_type / jira_mapping / LLM / rule-based), LLM client, taxonomy remap |
+| `tga::report` | `src/report/` | Stage 3: CSV/JSON/Markdown report generation, DORA / velocity / quality / activity metrics |
+| `commands` (binary-private) | `src/commands/` | Clap subcommand handlers wired into `src/main.rs` |
 
-Workspace boundaries are functional, not strictly enforced — `tga-collect` and
-`tga-classify` may import `tga-core` types directly. `tga-cli` is the only crate that knows
-about all three pipeline crates.
+Module dependency order: `core` ← `collect`, `classify`, `report` ← `main.rs`.
 
 ## Key Dependency Choices
 
@@ -95,8 +93,8 @@ about all three pipeline crates.
 
 | Layer | Library | Pattern |
 |-------|---------|---------|
-| Library crates (`tga-core`, `tga-collect`, `tga-classify`, `tga-report`) | `thiserror` | Define `enum FooError` per crate with `#[from]` conversions for upstream errors |
-| Binary crate (`tga-cli`) | `anyhow` | Use `anyhow::Result<()>` for `main()` and command handlers; convert via `?` |
+| Library modules (`tga::core`, `tga::collect`, `tga::classify`, `tga::report`) | `thiserror` | Define `enum FooError` per module with `#[from]` conversions for upstream errors |
+| Binary entry point (`src/main.rs`, `src/commands/`) | `anyhow` | Use `anyhow::Result<()>` for `main()` and command handlers; convert via `?` |
 | Never | `panic!`, `unwrap()`, `expect()` | Forbidden in library code; allowed in tests only |
 
 Example library error:
@@ -134,11 +132,11 @@ conn.execute_batch("
 
 ### Query Wrappers
 
-No raw SQL at call sites. Each table has a module in `tga-core::db` exposing typed
+No raw SQL at call sites. Each table has a module in `tga::core::db` exposing typed
 wrappers:
 
 ```rust
-// tga-core/src/db/cached_commits.rs
+// src/core/db/cached_commits.rs
 pub fn insert_commit(conn: &Connection, commit: &CommitRecord) -> Result<i64, DbError> { … }
 pub fn list_by_iso_week(conn: &Connection, iso_week: &str) -> Result<Vec<CommitRecord>, DbError> { … }
 ```
@@ -146,9 +144,9 @@ pub fn list_by_iso_week(conn: &Connection, iso_week: &str) -> Result<Vec<CommitR
 ### Migrations
 
 - Migration runner applies versioned SQL migrations on startup
-- Files in `tga-core/migrations/v01_initial.sql` … `v18_confluence_cache.sql`
-- `schema_version` table tracks applied versions
-- Future migrations (`v19+`) added as needed
+- Files in `src/core/db/sql/0001_initial_schema.sql` … `0011_pr_reviewers.sql`
+- `schema_migrations` table tracks applied versions
+- Future migrations added as `0012_*.sql`, etc.
 
 ## Configuration Deserialization
 
@@ -239,7 +237,7 @@ Target coverage: 90% on parsers and classifiers; 80% overall.
 | API fetching (PRs/sec, with rate limiting) | ~5 | 15–20 | 2–4x |
 | Overall pipeline (4-week, 10-repo run) | 3–5 min | 30–60 sec | 4–8x |
 
-These are aspirational and will be validated with benchmark suites in `crates/tga-*/benches/`
+These are aspirational and will be validated with benchmark suites in `benches/tga_bench.rs`
 using `criterion`.
 
 ## Architecture Decision Records

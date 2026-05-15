@@ -296,6 +296,33 @@ pub struct ClassificationConfig {
     /// emits a `tracing::warn!` if the result falls below this threshold.
     #[serde(default = "default_min_coverage_pct")]
     pub min_coverage_pct: f64,
+
+    /// Confidence threshold at or below which the LLM fallback tier is invoked.
+    ///
+    /// After tiers 1–3 produce a verdict, the LLM fallback fires for any
+    /// commit whose `confidence <= llm_fallback_threshold` (and only when
+    /// [`Self::use_llm`] is true). The catch-all rule emits `confidence = 0.3`,
+    /// so a value of `0.35` will route catch-all hits through the LLM while
+    /// a value of `0.0` preserves the legacy behaviour of only invoking the
+    /// LLM on truly empty (`confidence == 0.0`) verdicts.
+    ///
+    /// Defaults to `0.0` for backwards compatibility.
+    #[serde(default)]
+    pub llm_fallback_threshold: f64,
+
+    /// Maximum number of concurrent in-flight LLM fallback requests.
+    ///
+    /// The LLM fallback tier issues one HTTP request per commit whose
+    /// confidence is at or below [`Self::llm_fallback_threshold`]. Issuing
+    /// these serially yields ~1 second per commit, which is intolerable on
+    /// large corpora (e.g. 1000+ commits → 15+ minutes). Running them through
+    /// `buffer_unordered(llm_fallback_concurrency)` typically cuts wall-clock
+    /// time by an order of magnitude.
+    ///
+    /// Defaults to `8`. Increase for higher-throughput providers; decrease if
+    /// you hit upstream rate limits.
+    #[serde(default = "default_llm_fallback_concurrency")]
+    pub llm_fallback_concurrency: usize,
 }
 
 fn default_confidence_threshold() -> f64 {
@@ -310,6 +337,10 @@ fn default_llm_provider() -> String {
     "auto".to_string()
 }
 
+fn default_llm_fallback_concurrency() -> usize {
+    8
+}
+
 impl Default for ClassificationConfig {
     fn default() -> Self {
         Self {
@@ -321,6 +352,8 @@ impl Default for ClassificationConfig {
             confidence_threshold: default_confidence_threshold(),
             custom_categories: Vec::new(),
             min_coverage_pct: default_min_coverage_pct(),
+            llm_fallback_threshold: 0.0,
+            llm_fallback_concurrency: default_llm_fallback_concurrency(),
         }
     }
 }
@@ -346,6 +379,21 @@ pub struct LinearConfig {
     /// Fetch issue details when a commit message references a Linear issue ID.
     #[serde(default = "default_true")]
     pub fetch_on_reference: bool,
+
+    /// Optional override regex for detecting Linear ticket references in
+    /// commit messages.
+    ///
+    /// Must contain at least one capture group; capture group 1 is treated
+    /// as the ticket ID. When `None`, the default pattern is used:
+    /// `\b([A-Z][A-Z0-9]{0,9})-(\d+)\b` (same shape as JIRA keys —
+    /// configurable here because Linear team prefixes are user-defined per
+    /// workspace, so the default ten-character upper limit can be too
+    /// restrictive).
+    ///
+    /// Validated at config-load time: invalid patterns cause [`Config::load`]
+    /// to return an error.
+    #[serde(default)]
+    pub ticket_regex: Option<String>,
 }
 
 /// Project management integrations config block.
@@ -378,6 +426,20 @@ pub struct GithubConfig {
     /// Whether to fetch pull request metadata.
     #[serde(default)]
     pub fetch_prs: bool,
+
+    /// Optional override regex for detecting GitHub issue / PR references
+    /// in commit messages.
+    ///
+    /// Must contain at least one capture group; capture group 1 is treated
+    /// as the ticket reference (e.g. `#42`). When `None`, the default
+    /// pattern is used: `(?m)(?:^|\s)(#\d+)\b` — this requires a leading
+    /// whitespace or start-of-line to avoid matching hex colors. Override
+    /// when you need to detect `Fix:#123`, `(#123)`, `closes#42`, etc.
+    ///
+    /// Validated at config-load time: invalid patterns cause [`Config::load`]
+    /// to return an error.
+    #[serde(default)]
+    pub ticket_regex: Option<String>,
 }
 
 /// Bitbucket Cloud API integration settings.
@@ -468,6 +530,20 @@ pub struct JiraConfig {
     /// ```
     #[serde(default)]
     pub jira_project_mappings: HashMap<String, String>,
+
+    /// Optional override regex for detecting JIRA ticket references in
+    /// commit messages.
+    ///
+    /// Must contain at least one capture group; capture group 1 is treated
+    /// as the ticket key (e.g. `PROJ-123`). When `None`, the default pattern
+    /// is used: `\b([A-Z][A-Z0-9]{0,9})-(\d+)\b` (uppercase keys, max
+    /// 10-char prefix). Override to support lowercase keys (`proj-123`) or
+    /// project prefixes longer than 10 characters.
+    ///
+    /// Validated at config-load time: invalid patterns cause [`Config::load`]
+    /// to return an error.
+    #[serde(default)]
+    pub ticket_regex: Option<String>,
 }
 
 /// Expand a leading `~` in a path to the current user's home directory.
@@ -499,13 +575,48 @@ impl Config {
     ///
     /// - [`TgaError::IoError`] if the file cannot be read.
     /// - [`TgaError::SerdeYamlError`] if YAML parsing fails.
+    /// - [`TgaError::ConfigError`] if any user-supplied `ticket_regex`
+    ///   (JIRA, GitHub, Linear) is not a valid regular expression.
     pub fn load(path: &Path) -> Result<Config> {
         let resolved = expand_path(path);
         tracing::debug!(path = %resolved.display(), "loading config");
         let text = std::fs::read_to_string(&resolved)?;
         let mut cfg: Config = serde_yaml::from_str(&text)?;
         cfg.source_path = Some(resolved);
+        cfg.validate_ticket_regexes()?;
         Ok(cfg)
+    }
+
+    /// Validate every user-supplied `ticket_regex` in the config.
+    ///
+    /// Why: surfaces invalid regexes immediately at load time rather than
+    /// at first use deep inside the pipeline, with a clear error message
+    /// naming the offending section.
+    /// What: compiles `jira.ticket_regex`, `github.ticket_regex`, and
+    /// `linear.ticket_regex` if present; returns the first failure.
+    /// Test: load a config with `jira.ticket_regex: "["` and assert the
+    /// returned error is `TgaError::ConfigError` mentioning `jira`.
+    fn validate_ticket_regexes(&self) -> Result<()> {
+        fn check(section: &str, pat: &Option<String>) -> Result<()> {
+            if let Some(p) = pat {
+                regex::Regex::new(p).map_err(|e| {
+                    TgaError::ConfigError(format!(
+                        "{section}.ticket_regex is not a valid regular expression: {e}"
+                    ))
+                })?;
+            }
+            Ok(())
+        }
+        if let Some(jira) = &self.jira {
+            check("jira", &jira.ticket_regex)?;
+        }
+        if let Some(gh) = &self.github {
+            check("github", &gh.ticket_regex)?;
+        }
+        if let Some(linear) = &self.linear {
+            check("linear", &linear.ticket_regex)?;
+        }
+        Ok(())
     }
 
     /// Directory containing the loaded config file, if known.

@@ -71,6 +71,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "collection_runs_repo_count",
         sql: include_str!("sql/0009_collection_runs_repo_count.sql"),
     },
+    Migration {
+        version: 10,
+        name: "pull_requests_provider",
+        sql: include_str!("sql/0010_pull_requests_provider.sql"),
+    },
+    Migration {
+        version: 11,
+        name: "pr_reviewers",
+        sql: include_str!("sql/0011_pr_reviewers.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

@@ -9,19 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Bitbucket Cloud PR provider** — pull-request collection now supports
-  Bitbucket Cloud alongside GitHub. The two providers share a new
+- **Bitbucket Cloud PR provider (#72)** — pull-request collection now supports
+  Bitbucket Cloud alongside GitHub and Azure DevOps. All providers share a
   `PrProvider` trait and run concurrently via `tokio::task::JoinSet`.
   Configured via a new `bitbucket:` block (workspace, repo_slug, fetch_prs,
   and either a Bearer token or an Atlassian API token via Basic auth).
-  Bitbucket Server / Data Center remains unsupported.
+  Bitbucket PRs are persisted with `provider = 'bitbucket'` so they
+  deduplicate correctly against the `(provider, pr_number)` unique index
+  from migration `0010_pull_requests_provider.sql`. Bitbucket Server /
+  Data Center remains unsupported.
 
-### Notes
+## [1.0.6] - 2026-05-14
 
-- `pull_requests.pr_number` is not currently a UNIQUE index, so the existing
-  `INSERT OR REPLACE` is a no-op for deduplication — tracked separately as
-  issue #71. Running both GitHub and Bitbucket providers against the same
-  database can cause double-inserts when PR IDs collide across providers.
+### Fixed
+- **`llm_fallback_threshold` config field now wired (#78)** — The `classification.llm_fallback_threshold` config value was parsed but never forwarded to `ClassificationEngine`. Commits above the threshold now correctly skip the LLM fallback tier.
+- **ADO 404 error message clarified (#80)** — Azure DevOps 404 responses previously surfaced a generic HTTP error. The message now identifies the missing resource and suggests checking the project/organization slug in config.
+- **`ticket_regex` config wired for JIRA, GitHub, and Linear adapters (#75)** — The `ticket_regex` field defined in each PM adapter's config block was ignored; all three adapters now compile and apply the user-supplied regex pattern when detecting ticket references in commit messages.
+- **ADO workitemsbatch omit policy: dropped IDs now logged (#81)** — When the ADO batch API silently omits work item IDs (e.g. items in areas the token cannot read), `tga` now logs each dropped ID at `WARN` level so operators can identify access-control gaps without digging through raw HTTP responses.
+
+### Performance
+- **Parallel LLM fallback with `buffer_unordered` (#83)** — The per-commit LLM classification loop was fully serial; each request waited for the previous one to complete. Requests are now dispatched concurrently using `futures::stream::buffer_unordered`, capped at the configurable `llm_fallback_concurrency` limit (default 4), cutting wall-clock classification time roughly proportional to API latency.
+
+### Added
+- **ADO pull request fetcher with reviewer tracking (#84)** — `AzureDevOpsClient` now implements `fetch_pull_requests`, collecting PR metadata (title, state, author, dates, target branch) and the full reviewer list (identity, vote, required flag) into the `pull_requests` and `pr_reviewers` tables (migration `0011_pr_reviewers.sql`). Enabled per repository via `pm.azure_devops.fetch_prs: true`.
+
+### Tests
+- **Ticket-regex detection coverage (#76)** — Added unit tests for `ticket_regex` detection across the JIRA, GitHub, and Linear adapters, covering match, no-match, and malformed-pattern cases.
+
+## [1.0.5] - 2026-05-12
+
+### Fixed
+- **GitHub PR fetch resilience (#73)** — `fetch_pull_requests` now routes through the same `retry_request` helper used by every other paginated GitHub endpoint. A single 429 or 5xx response no longer fails the entire PR collection run; transient errors are retried with exponential backoff.
+- **Pull-request deduplication (#71)** — `INSERT OR REPLACE INTO pull_requests` was a silent no-op: the existing `idx_pull_requests_pr_number` index was non-UNIQUE, so SQLite's conflict resolution never fired and PRs accumulated on every re-run. Migration `0010_pull_requests_provider.sql` adds a `provider` column (default `'github'`) and a UNIQUE index on `(provider, pr_number)`. `store_pull_requests` now writes the provider explicitly so deduplication works correctly per provider.
+
+## [1.0.4] - 2026-05-12
+
+### Added
+- **Self-analysis example config** (`configs/self-analysis.yaml`) — a minimal config that runs `tga` against its own repository, useful as a quickstart template and for dogfooding releases.
+
+### Changed
+- Documentation cleanup pass: refreshed `CLAUDE.md` implementation state date, verified ADR README and README.md version references are current.
 
 ## [1.0.3] - 2026-05-12
 

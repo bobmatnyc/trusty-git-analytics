@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use futures::stream::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::params;
 use tracing::{info, warn};
@@ -166,17 +167,86 @@ impl ClassificationPipeline {
             }
         }
 
-        // 4. LLM fallback (async, serialized) for entries that came back as uncategorized.
+        // 4. LLM fallback (async, bounded-concurrency) for entries whose
+        //    verdict confidence is at or below `llm_fallback_threshold`. The
+        //    default threshold is `0.0`, preserving legacy behaviour; raising
+        //    it to `~0.35` routes catch-all (`confidence = 0.3`) verdicts
+        //    through the LLM.
+        //
+        //    Fan-out is bounded by `llm_fallback_concurrency` via
+        //    `buffer_unordered`, which yields ~order-of-magnitude wall-clock
+        //    savings on large corpora compared to a serial `for ... .await`.
+        //    We collect (commit_idx, new_result) pairs first, then write them
+        //    back, so the borrow checker doesn't see mutable refs into
+        //    `results` while futures are in flight.
         if engine.config().use_llm {
-            let pb = make_progress(total as u64, "LLM fallback");
-            for (idx, commit) in commits.iter().enumerate() {
-                if results[idx].confidence <= 0.0 {
-                    let r = engine.classify(&commit.message, commit.is_merge).await;
-                    results[idx] = r;
-                }
-                pb.inc(1);
-            }
+            let fallback_threshold = self
+                .config
+                .classification
+                .as_ref()
+                .map(|c| c.llm_fallback_threshold)
+                .unwrap_or(0.0);
+            let concurrency = self
+                .config
+                .classification
+                .as_ref()
+                .map(|c| c.llm_fallback_concurrency.max(1))
+                .unwrap_or(8);
+
+            // Pre-collect (idx, message, is_merge, original_confidence) for
+            // every commit that needs an LLM call. The original verdict is
+            // kept by index in `results` and consulted again at write-back.
+            let pending: Vec<(usize, String, bool, f64)> = commits
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, commit)| {
+                    if results[idx].confidence <= fallback_threshold {
+                        Some((
+                            idx,
+                            commit.message.clone(),
+                            commit.is_merge,
+                            results[idx].confidence,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let pb = make_progress(pending.len() as u64, "LLM fallback");
+            let engine_ref = &engine;
+            let pb_ref = &pb;
+            let new_results: Vec<(usize, ClassificationResult, f64)> =
+                futures::stream::iter(pending.into_iter().map(
+                    |(idx, message, is_merge, original_conf)| async move {
+                        let r = engine_ref.classify(&message, is_merge).await;
+                        pb_ref.inc(1);
+                        (idx, r, original_conf)
+                    },
+                ))
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
             pb.finish_and_clear();
+
+            // Overwrite-guard: only adopt the LLM verdict if it strictly
+            // improves confidence over the original. Otherwise keep the
+            // tier-1..3 verdict so a failed/empty LLM call doesn't regress
+            // confidence to 0.0. Errors inside `classify` are already
+            // logged at lower layers and surfaced as low-confidence
+            // verdicts; we treat them uniformly via this guard.
+            for (idx, r, original_conf) in new_results {
+                if r.confidence > original_conf {
+                    results[idx] = r;
+                } else {
+                    warn!(
+                        commit_idx = idx,
+                        original_conf,
+                        new_conf = r.confidence,
+                        "LLM fallback did not improve confidence; keeping original verdict"
+                    );
+                }
+            }
         }
 
         // 5. Write back + coverage bookkeeping.

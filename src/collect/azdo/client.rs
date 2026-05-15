@@ -60,8 +60,13 @@ pub enum AzdoError {
     #[error("access denied (403): PAT lacks required scope")]
     Forbidden,
 
-    /// HTTP 404 — the organisation URL is wrong or the resource does not exist.
-    #[error("organisation not found (404): check organization_url")]
+    /// HTTP 404 — the requested resource was not found.
+    ///
+    /// This can mean the organisation URL is wrong, the project does not
+    /// exist, a referenced work item ID is missing, or credentials don't
+    /// grant visibility. The endpoint context is not threaded through this
+    /// variant — callers should consult the failing endpoint to disambiguate.
+    #[error("resource not found (404): check organisation, project, and credentials")]
     NotFound,
 
     /// Transport-level failure (DNS, TLS, timeout, connection reset, ...).
@@ -944,6 +949,29 @@ impl AzureDevOpsClient {
                 .await
                 .map_err(|e| AzdoError::Parse(e.to_string()))?;
 
+            // Detect IDs silently dropped by ADO's errorPolicy=omit behavior.
+            // When `workitemsbatch` cannot resolve an ID (e.g., wrong project,
+            // deleted, or never existed), it omits it from the response without
+            // raising an error. Without this log, a misconfigured `ticket_regex`
+            // is indistinguishable from a correct one.
+            if body.value.len() < chunk.len() {
+                let returned_ids: std::collections::HashSet<u32> =
+                    body.value.iter().map(|w| w.id).collect();
+                let dropped: Vec<u32> = chunk
+                    .iter()
+                    .copied()
+                    .filter(|id| !returned_ids.contains(id))
+                    .collect();
+                let first_dropped: Vec<u32> = dropped.iter().take(10).copied().collect();
+                tracing::debug!(
+                    requested = chunk.len(),
+                    returned = body.value.len(),
+                    dropped = dropped.len(),
+                    first_dropped = ?first_dropped,
+                    "ADO workitemsbatch silently omitted some IDs (errorPolicy=omit)"
+                );
+            }
+
             for w in body.value {
                 all.push(parse_work_item(w));
             }
@@ -1507,6 +1535,7 @@ mod tests {
             ticket_regex: r"AB#(\d+)".into(),
             team_keys: vec![],
             fetch_on_reference: true,
+            fetch_prs: false,
         }
     }
 
@@ -1518,6 +1547,7 @@ mod tests {
             ticket_regex: r"AB#(\d+)".into(),
             team_keys: vec![],
             fetch_on_reference: true,
+            fetch_prs: false,
         }
     }
 

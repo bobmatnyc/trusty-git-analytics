@@ -203,7 +203,7 @@ impl GitHubClient {
                 self.owner, self.repo
             );
             debug!(url = %url, "GET");
-            let resp = self.client.get(&url).send().await?;
+            let resp = self.retry_request(&url).await?;
 
             // Respect rate-limit hints.
             if let Some(rem) = resp
@@ -256,7 +256,9 @@ impl GitHubClient {
 
     /// Persist a batch of [`PullRequest`] rows into the database.
     ///
-    /// Existing rows with the same `(pr_number)` are replaced.
+    /// Existing rows with the same `(provider, pr_number)` are replaced.
+    /// The `provider` column is set to `'github'` for all rows written by
+    /// this client (see migration `0010_pull_requests_provider.sql`).
     ///
     /// # Errors
     ///
@@ -271,9 +273,10 @@ impl GitHubClient {
         for pr in prs {
             conn.execute(
                 "INSERT OR REPLACE INTO pull_requests \
-                 (pr_number, title, author, state, created_at, merged_at, commit_shas) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (provider, pr_number, title, author, state, created_at, merged_at, commit_shas) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
+                    "github",
                     pr.pr_number as i64,
                     pr.title,
                     pr.author,

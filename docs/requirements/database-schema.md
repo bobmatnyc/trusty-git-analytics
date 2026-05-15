@@ -256,6 +256,27 @@ collected (skip unless `--force` is supplied).
 **Constraints**: UNIQUE(`repo_name`, `iso_year`, `iso_week`).
 **Indexes**: INDEX(`repo_name`, `iso_year`, `iso_week`).
 
+### `pr_reviewers`
+
+Per-PR reviewer records. Supports ADO reviewer votes; the `provider` column allows
+future expansion to GitHub review requests. FK to `pull_requests.id`.
+
+Added in migration `0011_pr_reviewers.sql` (v1.0.6 #84).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PK | Auto-increment |
+| `pr_id` | INTEGER | FK → `pull_requests.id` ON DELETE CASCADE |
+| `provider` | TEXT | `'azdo'` (default); future: `'github'`, etc. |
+| `reviewer_id` | TEXT | Upstream identity ID |
+| `display_name` | TEXT | Human-readable name |
+| `vote` | INTEGER | ADO vote: 10=approved, 5=approved-with-suggestions, 0=no-vote, -5=waiting, -10=rejected |
+| `is_required` | BOOLEAN | Whether reviewer approval is required |
+| `is_container` | BOOLEAN | Whether entry represents a group/team |
+
+**Constraint**: UNIQUE(`pr_id`, `provider`, `reviewer_id`).
+**Index**: INDEX(`pr_id`).
+
 ### Additional Tables
 
 - `detailed_tickets` — full JIRA ticket detail snapshots
@@ -346,8 +367,10 @@ sequence of versioned SQL migrations at startup. Summary:
 | `0007_pr_metrics_and_backfill.sql` | PR metrics + ticket backfill |
 | `0008_azdo_iterations.sql` | Azure DevOps iterations |
 | `0009_collection_runs_repo_count.sql` | Issue #69 — `repo_count` column on `collection_runs` for WoW baseline drift detection |
+| `0010_pull_requests_provider.sql` | Issue #71 — adds `provider` column (default `'github'`) and UNIQUE index on `(provider, pr_number)` to `pull_requests` for correct per-provider deduplication |
+| `0011_pr_reviewers.sql` | Issue #84 — `pr_reviewers` table for ADO (and future) PR reviewer tracking with vote values |
 
-Future migrations (v19+) will be added for Rust-specific improvements.
+Future migrations will be added as `0012_*.sql`, etc.
 
 ## Rust Improvements Over Python
 

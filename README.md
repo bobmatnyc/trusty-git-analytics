@@ -91,18 +91,25 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `classification.use_llm` | bool | `false` | Enable LLM fallback tier |
 | `classification.llm_model` | string | `gpt-4o-mini` | LLM model identifier |
 | `classification.confidence_threshold` | float | `0.7` | Minimum acceptance confidence |
+| `classification.llm_fallback_threshold` | float | `0.0` | Commits with confidence above this value skip the LLM tier |
+| `classification.llm_fallback_concurrency` | uint | `4` | Max concurrent LLM requests during fallback |
 | `github.token` | string | `$GITHUB_TOKEN` | GitHub PAT for PR fetch |
 | `github.org` | string | — | Org slug for org-wide PR queries |
 | `github.repo` | string | — | Single repo slug (`owner/name`) |
 | `github.fetch_prs` | bool | `false` | Fetch pull request metadata |
+| `github.ticket_regex` | string | — | Override regex for detecting GitHub ticket refs in commit messages |
 | `jira.url` | string | — | JIRA base URL |
 | `jira.username` | string | — | JIRA API username (email for Cloud) |
 | `jira.token` | string | — | JIRA API token |
 | `jira.project_key` | string | — | Project key filter (e.g. `API`) |
+| `jira.ticket_regex` | string | — | Override regex for detecting JIRA ticket refs in commit messages |
+| `linear.ticket_regex` | string | — | Override regex for detecting Linear ticket refs in commit messages |
 | `pm.azure_devops.organization_url` | string | — | ADO org URL (e.g. `https://dev.azure.com/myorg`) |
 | `pm.azure_devops.pat` | string | — | Azure DevOps Personal Access Token |
 | `pm.azure_devops.project` | string | — | Default ADO project name |
 | `pm.azure_devops.fetch_on_reference` | bool | `false` | Fetch work items when `AB#N` refs appear in commits |
+| `pm.azure_devops.fetch_prs` | bool | `false` | Fetch ADO pull requests and reviewer data |
+| `pm.azure_devops.ticket_regex` | string | `AB#(\d+)` | Override regex for detecting ADO work item refs in commit messages |
 | `cache.directory` | path | — | Cache directory (supports `~`) |
 | `version` | string | — | Schema version; stored for compatibility |
 | `profile` | string | — | Named profile; stored for compatibility |

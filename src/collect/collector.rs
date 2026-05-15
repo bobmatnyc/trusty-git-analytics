@@ -148,6 +148,17 @@ impl CollectionPipeline {
                         .push(format!("ADO work item persistence failed: {e}"));
                 }
             }
+            if azdo_cfg.fetch_prs {
+                match self.fetch_and_persist_azdo_prs(db, azdo_cfg).await {
+                    Ok(n) => {
+                        info!(prs = n, "stored ADO pull requests");
+                        stats.prs_fetched += n;
+                    }
+                    Err(e) => {
+                        stats.errors.push(format!("ADO PR fetch failed: {e}"));
+                    }
+                }
+            }
         }
 
         // Optional: Linear issue enrichment.
@@ -612,6 +623,56 @@ impl CollectionPipeline {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Fetch ADO pull requests referenced by commit-message `Merged PR NNNN:`
+    /// patterns and persist them (with reviewers) under provider `'azdo'`.
+    ///
+    /// Why: ADO PRs are the source of review-pattern signals (vote
+    /// distribution, reviewer load) that are absent from the bare git history;
+    /// they live in the same `pull_requests` table as GitHub PRs but
+    /// scoped by the `provider` column.
+    /// What: pulls commit messages, extracts PR IDs, fetches each PR serially
+    /// from `GET {org}/{project}/_apis/git/pullrequests/{id}`, and upserts
+    /// rows into `pull_requests` + `pr_reviewers`.
+    /// Test: PR-ID extraction, DB CRUD, and config wiring are covered in
+    /// `azdo::pr_fetcher::tests`. The full path is exercised by integration
+    /// tests gated on a live ADO instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::collect::CollectError`] for SQL failures. HTTP
+    /// failures on individual PRs are logged and do not abort the run.
+    async fn fetch_and_persist_azdo_prs(
+        &self,
+        db: &mut Database,
+        azdo_cfg: &crate::core::config::AzureDevOpsConfig,
+    ) -> Result<usize> {
+        use crate::collect::azdo::AdoPrFetcher;
+
+        let messages: Vec<String> = {
+            let conn = db.connection();
+            let mut stmt = conn.prepare("SELECT message FROM commits")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            out
+        };
+
+        let fetcher = match AdoPrFetcher::new(azdo_cfg.clone()) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("ADO PR fetcher init failed: {e}");
+                return Ok(0);
+            }
+        };
+        let conn = db.connection();
+        let stored = fetcher
+            .run(conn, messages.iter().map(String::as_str))
+            .await?;
+        Ok(stored)
     }
 }
 
