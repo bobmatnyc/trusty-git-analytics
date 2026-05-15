@@ -5,6 +5,16 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9] - 2026-05-15
+
+### Fixed
+- **Critical data loss bug in `pull_requests` table** (#88): `UNIQUE(provider, pr_number)` constraint
+  caused ~62% silent row loss when collecting PRs from multiple repositories (GitHub resets
+  `pr_number` per repo). Fixed by adding `repository TEXT NOT NULL DEFAULT 'unknown'` column and
+  replacing the unique index with `UNIQUE(provider, repository, pr_number)`.
+  Existing databases are migrated automatically (rows default to `repository = 'unknown'`;
+  correct values written on next `tga collect` run).
+
 ## [1.0.8] - 2026-05-15
 
 ### Fixed
