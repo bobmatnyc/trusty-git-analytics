@@ -613,7 +613,7 @@ impl AzureDevOpsClient {
 
         let client = build_client()?;
         let url = format!(
-            "{}/_apis/connectionData?connectOptions=none&api-version=7.1",
+            "{}/_apis/connectionData?connectOptions=none&api-version=7.1-preview.1",
             self.org_url()
         );
 
@@ -936,6 +936,7 @@ impl AzureDevOpsClient {
                 .json(&serde_json::json!({
                     "ids": chunk,
                     "fields": fields,
+                    "errorPolicy": "omit",
                 }))
                 .send()
                 .await?;
@@ -1614,7 +1615,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/_apis/connectionData"))
-            .and(query_param("api-version", "7.1"))
+            .and(query_param("api-version", "7.1-preview.1"))
             .and(query_param("connectOptions", "none"))
             .and(header("authorization", EXPECTED_AUTH))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
