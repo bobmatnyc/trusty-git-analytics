@@ -110,6 +110,12 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `pm.azure_devops.fetch_on_reference` | bool | `false` | Fetch work items when `AB#N` refs appear in commits |
 | `pm.azure_devops.fetch_prs` | bool | `false` | Fetch ADO pull requests and reviewer data |
 | `pm.azure_devops.ticket_regex` | string | `AB#(\d+)` | Override regex for detecting ADO work item refs in commit messages |
+| `pm.bitbucket.workspace` | string | — | Bitbucket Cloud workspace slug |
+| `pm.bitbucket.repo_slug` | string | — | Repository slug within the workspace |
+| `pm.bitbucket.fetch_prs` | bool | `false` | Fetch Bitbucket Cloud pull request metadata |
+| `pm.bitbucket.token` | string | `$BITBUCKET_TOKEN` | Bearer token (App password or OAuth) |
+| `pm.bitbucket.username` | string | — | Atlassian account username for Basic auth |
+| `pm.bitbucket.app_password` | string | — | Atlassian App password for Basic auth (alternative to `token`) |
 | `cache.directory` | path | — | Cache directory (supports `~`) |
 | `version` | string | — | Schema version; stored for compatibility |
 | `profile` | string | — | Named profile; stored for compatibility |
