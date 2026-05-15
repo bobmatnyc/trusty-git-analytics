@@ -504,6 +504,7 @@ mod tests {
             branch: None,
             since_date: since.map(str::to_string),
             until_date: until.map(str::to_string),
+            org: None,
         };
         GitCollector::new(&cfg)
             .expect("collector::new")

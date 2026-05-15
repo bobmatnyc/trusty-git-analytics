@@ -12,7 +12,7 @@ use async_trait::async_trait;
 
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::pr_provider::PrProvider;
-use crate::core::config::GithubConfig;
+use crate::core::config::{GithubConfig, RepositoryConfig};
 use crate::core::db::Database;
 use crate::core::models::{PrState, PullRequest};
 
@@ -28,13 +28,23 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_MS: u64 = 1000;
 
 /// Async GitHub REST client.
+///
+/// Supports single-repo and multi-repo PR collection. The `owner` / `repo`
+/// pair is the "primary" repository used by issue-oriented endpoints
+/// ([`Self::fetch_issue`], [`Self::list_issues`]). The `repos` vector lists
+/// every repository the bulk PR fetcher will iterate over and always contains
+/// the primary repo as the first entry when one is set.
 pub struct GitHubClient {
     client: reqwest::Client,
     token: Option<String>,
-    /// `owner` in `owner/repo` (organization or user).
+    /// Primary `owner` for issue-oriented endpoints.
     owner: String,
-    /// `repo` in `owner/repo`.
+    /// Primary `repo` for issue-oriented endpoints.
     repo: String,
+    /// Every `(owner, repo)` pair the PR fetcher will scan, in order. Never
+    /// empty in single-repo mode; may contain many entries in org / multi-repo
+    /// mode (see [`Self::new_for_prs`]).
+    repos: Vec<(String, String)>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +149,189 @@ pub struct GitHubReview {
     pub submitted_at: Option<String>,
 }
 
+/// Parse an `owner/name` slug, returning a [`CollectError::Config`] on
+/// malformed input. Extracted so both [`GitHubClient::new`] and
+/// [`resolve_github_repos`] share one error message format.
+fn parse_slug(slug: &str) -> Result<(String, String)> {
+    let (owner, repo) = slug.split_once('/').ok_or_else(|| {
+        CollectError::Config(format!("github repo must be 'owner/name', got '{slug}'"))
+    })?;
+    if owner.is_empty() || repo.is_empty() {
+        return Err(CollectError::Config(format!(
+            "github repo must be 'owner/name', got '{slug}'"
+        )));
+    }
+    Ok((owner.to_string(), repo.to_string()))
+}
+
+/// Build the shared `reqwest::Client` for all GitHub HTTP traffic.
+fn build_http_client(config: &GithubConfig) -> Result<reqwest::Client> {
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/vnd.github+json"),
+    );
+    if let Some(token) = &config.token {
+        let val = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|e| CollectError::Config(format!("invalid token header: {e}")))?;
+        headers.insert(AUTHORIZATION, val);
+    }
+    Ok(reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}
+
+/// Try to read `origin`'s URL from a local git repository and extract an
+/// `owner/name` pair if it looks like a GitHub URL.
+///
+/// Accepts both `https://github.com/owner/name(.git)?` and
+/// `git@github.com:owner/name(.git)?` forms. Returns `None` for non-GitHub
+/// remotes, missing `origin`, or anything that fails to parse — the caller
+/// then falls back to other resolution rules.
+///
+/// Why: per-repo entries in `repositories[]` often don't declare an `org:`
+/// field; the local clone's remote already encodes the canonical
+/// `owner/name`, so probing it is the cheapest correct fallback.
+/// What: opens the repo via `git2`, finds the `origin` remote, parses the
+/// URL.
+/// Test: covered by `extract_owner_repo_from_url` below (URL-parse path) —
+/// the disk-touching path is exercised end-to-end via integration tests.
+fn owner_repo_from_remote(repo_path: &std::path::Path) -> Option<(String, String)> {
+    let repo = git2::Repository::open(repo_path).ok()?;
+    let remote = repo.find_remote("origin").ok()?;
+    let url = remote.url()?;
+    extract_owner_repo_from_url(url)
+}
+
+/// Pure-string helper for [`owner_repo_from_remote`]: extracts `owner/name`
+/// from a GitHub remote URL string. Returns `None` for non-GitHub URLs or
+/// malformed input.
+fn extract_owner_repo_from_url(url: &str) -> Option<(String, String)> {
+    // Strip `.git` suffix if present.
+    let cleaned = url.strip_suffix(".git").unwrap_or(url);
+    // SSH form: git@github.com:owner/repo
+    if let Some(rest) = cleaned.strip_prefix("git@github.com:") {
+        return split_owner_repo(rest);
+    }
+    // HTTPS form: https://github.com/owner/repo or https://<user>@github.com/owner/repo
+    for prefix in [
+        "https://github.com/",
+        "http://github.com/",
+        "ssh://git@github.com/",
+    ] {
+        if let Some(rest) = cleaned.strip_prefix(prefix) {
+            return split_owner_repo(rest);
+        }
+    }
+    // https://user@github.com/owner/repo
+    if let Some(after_scheme) = cleaned.strip_prefix("https://") {
+        if let Some(at_idx) = after_scheme.find('@') {
+            let after_at = &after_scheme[at_idx + 1..];
+            if let Some(rest) = after_at.strip_prefix("github.com/") {
+                return split_owner_repo(rest);
+            }
+        }
+    }
+    None
+}
+
+/// Split a `owner/name(/...)` tail into a `(String, String)` pair, taking
+/// only the first two path segments. Returns `None` if either is empty.
+fn split_owner_repo(rest: &str) -> Option<(String, String)> {
+    let mut parts = rest.splitn(3, '/');
+    let owner = parts.next()?;
+    let name = parts.next()?;
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), name.to_string()))
+}
+
+/// Resolve the set of `(owner, repo)` pairs the GitHub PR fetcher should
+/// scan, given the GitHub config and the project's repository list.
+///
+/// Resolution rules, tried in order for each repository:
+/// 1. `github.repo` (single-repo mode) — when set, returns a single-entry
+///    list and ignores `repositories[]` / `github.org`.
+/// 2. For each `RepositoryConfig`:
+///    - if `repo.org` is set, derive `owner/name` from `org` + repo name
+///      (path basename or explicit `name`);
+///    - else, try `git remote get-url origin` on `repo.path`;
+///    - else, fall back to `github.org` as the owner with the repo's name.
+/// 3. Deduplicate; preserve first-seen order.
+///
+/// Returns an empty vec if no resolution is possible — the caller should
+/// treat that as "skip PR fetching".
+///
+/// Why: org-wide deployments (issue #87) need to drive PR collection from
+/// `repositories[]` rather than a single `github.repo`. Mirrors the ADO PR
+/// fetcher's per-repo expansion strategy.
+/// What: walks the three fallback paths above and returns a deduped vec.
+/// Test: `resolve_github_repos_*` cases below.
+pub fn resolve_github_repos(
+    github: &GithubConfig,
+    repositories: &[RepositoryConfig],
+) -> Vec<(String, String)> {
+    // Mode 1: explicit single-repo slug wins.
+    if let Some(slug) = &github.repo {
+        if let Ok(pair) = parse_slug(slug) {
+            return vec![pair];
+        } else {
+            tracing::warn!(slug = %slug, "github.repo is malformed; falling back to repositories[]");
+        }
+    }
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    for repo_cfg in repositories {
+        // Repo display name: explicit `name`, else path basename.
+        let repo_name = repo_cfg
+            .name
+            .clone()
+            .or_else(|| {
+                repo_cfg
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+
+        // Owner: per-repo `org`, else `github.org`. We may still defer to the
+        // remote URL below when neither is present.
+        let owner_from_cfg = repo_cfg.org.clone().or_else(|| github.org.clone());
+
+        let pair = if let Some(owner) = &owner_from_cfg {
+            // We have an owner from config — pair it with the repo name. If
+            // the repo name is empty (no `name`, no path basename), the
+            // remote-URL path below is the only viable resolution.
+            if repo_name.is_empty() {
+                owner_repo_from_remote(&repo_cfg.path)
+            } else {
+                Some((owner.clone(), repo_name.clone()))
+            }
+        } else {
+            owner_repo_from_remote(&repo_cfg.path)
+        };
+
+        if let Some(p) = pair {
+            if seen.insert(p.clone()) {
+                out.push(p);
+            }
+        } else {
+            debug!(
+                path = %repo_cfg.path.display(),
+                "could not resolve owner/repo for repository; skipping for GitHub PR fetch"
+            );
+        }
+    }
+
+    out
+}
+
 impl GitHubClient {
     /// Build a client from a [`GithubConfig`].
     ///
@@ -156,34 +349,49 @@ impl GitHubClient {
             .repo
             .as_ref()
             .ok_or_else(|| CollectError::Config("github.repo is required (owner/name)".into()))?;
-        let (owner, repo) = repo_slug.split_once('/').ok_or_else(|| {
-            CollectError::Config(format!(
-                "github.repo must be 'owner/name', got '{repo_slug}'"
-            ))
-        })?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/vnd.github+json"),
-        );
-        if let Some(token) = &config.token {
-            let val = HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|e| CollectError::Config(format!("invalid token header: {e}")))?;
-            headers.insert(AUTHORIZATION, val);
-        }
-
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+        let (owner, repo) = parse_slug(repo_slug)?;
+        let http = build_http_client(config)?;
 
         Ok(Self {
-            client,
+            client: http,
             token: config.token.clone(),
-            owner: owner.to_string(),
-            repo: repo.to_string(),
+            owner: owner.clone(),
+            repo: repo.clone(),
+            repos: vec![(owner, repo)],
+        })
+    }
+
+    /// Construct a client that will fetch pull requests across every
+    /// `(owner, repo)` in `repos`.
+    ///
+    /// Why: org-wide / multi-repo deployments need to drive PR collection
+    /// from `repositories[]` (or `github.org` as fallback) rather than a
+    /// single `github.repo`. Mirrors the ADO PR-fetcher contract from #84.
+    /// What: stores the full list, uses the first entry as the "primary"
+    /// for issue-oriented endpoints. Issue endpoints remain single-repo —
+    /// the PM adapter still needs a concrete `owner/repo` to hit
+    /// `GET /repos/{o}/{r}/issues/{n}`.
+    /// Test: covered by `multi_repo_constructor_*` in this module.
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::Config`] if `repos` is empty.
+    /// - [`CollectError::Http`] if the underlying `reqwest::Client` cannot
+    ///   be built.
+    pub fn new_for_prs(config: &GithubConfig, repos: Vec<(String, String)>) -> Result<Self> {
+        if repos.is_empty() {
+            return Err(CollectError::Config(
+                "GitHubClient::new_for_prs requires at least one (owner, repo)".into(),
+            ));
+        }
+        let (primary_owner, primary_repo) = repos[0].clone();
+        let http = build_http_client(config)?;
+        Ok(Self {
+            client: http,
+            token: config.token.clone(),
+            owner: primary_owner,
+            repo: primary_repo,
+            repos,
         })
     }
 
@@ -196,11 +404,37 @@ impl GitHubClient {
     /// and [`CollectError::Json`] on payload parse failures.
     pub async fn fetch_pull_requests(&self) -> Result<Vec<PullRequest>> {
         let mut out: Vec<PullRequest> = Vec::new();
+        for (owner, repo) in &self.repos {
+            match self.fetch_pull_requests_for_repo(owner, repo).await {
+                Ok(mut prs) => out.append(&mut prs),
+                Err(e) => {
+                    // Partial-success semantics (issue #87): one bad repo
+                    // (404, no token access, transient 5xx after retries)
+                    // must not abort PR collection for the rest of the org.
+                    warn!(
+                        owner = %owner,
+                        repo = %repo,
+                        error = %e,
+                        "GitHub PR fetch failed for repo; continuing with remaining repos"
+                    );
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch all PRs for a single `(owner, repo)` pair, paginating until
+    /// exhausted. Internal helper for [`Self::fetch_pull_requests`].
+    async fn fetch_pull_requests_for_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<PullRequest>> {
+        let mut out: Vec<PullRequest> = Vec::new();
         let mut page = 1u32;
         loop {
             let url = format!(
-                "{GITHUB_API_BASE}/repos/{}/{}/pulls?state=all&per_page={PAGE_SIZE}&page={page}",
-                self.owner, self.repo
+                "{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls?state=all&per_page={PAGE_SIZE}&page={page}"
             );
             debug!(url = %url, "GET");
             let resp = self.retry_request(&url).await?;
@@ -622,5 +856,227 @@ mod tests {
         assert_eq!(issue.number, 7);
         assert!(issue.labels.is_empty());
         assert!(issue.body.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #87: multi-repo / org-wide resolution
+    // -----------------------------------------------------------------------
+
+    use std::path::PathBuf;
+
+    use crate::core::config::RepositoryConfig;
+
+    fn gh(repo: Option<&str>, org: Option<&str>) -> GithubConfig {
+        GithubConfig {
+            token: None,
+            org: org.map(str::to_string),
+            repo: repo.map(str::to_string),
+            fetch_prs: true,
+            ticket_regex: None,
+        }
+    }
+
+    fn repo_cfg(path: &str, name: Option<&str>, org: Option<&str>) -> RepositoryConfig {
+        RepositoryConfig {
+            path: PathBuf::from(path),
+            name: name.map(str::to_string),
+            org: org.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// Why: `github.repo: owner/name` is the simplest case and must short-
+    /// circuit resolution to a single-entry list regardless of what's in
+    /// `repositories[]`.
+    /// What: passes a single slug, asserts a one-element vec.
+    /// Test: exact `(owner, repo)` parsed.
+    #[test]
+    fn resolve_github_repos_single_repo_mode() {
+        let cfg = gh(Some("acme/widget"), None);
+        let repos = resolve_github_repos(&cfg, &[]);
+        assert_eq!(repos, vec![("acme".to_string(), "widget".to_string())]);
+    }
+
+    /// Why: when `github.repo` is unset, an `org`-only config must drive
+    /// resolution from `repositories[]` (path basename + `github.org`).
+    /// What: two repos with no explicit `org:` field, `github.org=acme`.
+    /// Test: both pairs returned with `acme` as owner.
+    #[test]
+    fn resolve_github_repos_org_mode_uses_path_basename() {
+        let cfg = gh(None, Some("acme"));
+        let repos = vec![
+            repo_cfg("/tmp/widget", None, None),
+            repo_cfg("/tmp/gadget", None, None),
+        ];
+        let resolved = resolve_github_repos(&cfg, &repos);
+        assert_eq!(
+            resolved,
+            vec![
+                ("acme".to_string(), "widget".to_string()),
+                ("acme".to_string(), "gadget".to_string()),
+            ]
+        );
+    }
+
+    /// Why: per-repo `org:` should override `github.org` for that entry.
+    /// What: mix one repo with its own `org` and one without.
+    /// Test: first uses per-repo owner, second falls back to `github.org`.
+    #[test]
+    fn resolve_github_repos_per_repo_org_overrides() {
+        let cfg = gh(None, Some("default-org"));
+        let repos = vec![
+            repo_cfg("/tmp/alpha", None, Some("specific-org")),
+            repo_cfg("/tmp/beta", None, None),
+        ];
+        let resolved = resolve_github_repos(&cfg, &repos);
+        assert_eq!(
+            resolved,
+            vec![
+                ("specific-org".to_string(), "alpha".to_string()),
+                ("default-org".to_string(), "beta".to_string()),
+            ]
+        );
+    }
+
+    /// Why: explicit `name:` on a repo entry must be preferred over the path
+    /// basename so renames and non-canonical directory layouts work.
+    /// What: repo with mismatched path and `name`.
+    /// Test: resolved name follows the explicit `name`.
+    #[test]
+    fn resolve_github_repos_uses_explicit_name() {
+        let cfg = gh(None, Some("acme"));
+        let repos = vec![repo_cfg(
+            "/tmp/some-random-clone-dir",
+            Some("real-repo-name"),
+            None,
+        )];
+        let resolved = resolve_github_repos(&cfg, &repos);
+        assert_eq!(
+            resolved,
+            vec![("acme".to_string(), "real-repo-name".to_string())]
+        );
+    }
+
+    /// Why: with neither `github.repo` nor `github.org` (and no remote we
+    /// can read for these synthetic paths), resolution must yield an empty
+    /// vec so the caller can skip PR fetching gracefully.
+    /// What: empty github config + repos with no `org:` and unreadable paths.
+    /// Test: empty result.
+    #[test]
+    fn resolve_github_repos_returns_empty_when_unresolvable() {
+        let cfg = gh(None, None);
+        let repos = vec![repo_cfg("/tmp/no-such-clone", None, None)];
+        let resolved = resolve_github_repos(&cfg, &repos);
+        assert!(resolved.is_empty(), "got: {resolved:?}");
+    }
+
+    /// Why: with totally empty inputs, resolution must be a clean no-op.
+    /// What: no github config slugs, no repositories.
+    /// Test: empty result.
+    #[test]
+    fn resolve_github_repos_empty_inputs() {
+        let cfg = gh(None, None);
+        let resolved = resolve_github_repos(&cfg, &[]);
+        assert!(resolved.is_empty());
+    }
+
+    /// Why: duplicate `(owner, repo)` pairs in `repositories[]` (e.g. same
+    /// clone listed twice) must dedupe so the fetcher doesn't double-pull.
+    /// What: two entries that resolve to the same owner/name.
+    /// Test: deduped to one element.
+    #[test]
+    fn resolve_github_repos_deduplicates() {
+        let cfg = gh(None, Some("acme"));
+        let repos = vec![
+            repo_cfg("/clone-a/widget", None, None),
+            repo_cfg("/clone-b/widget", None, None),
+        ];
+        let resolved = resolve_github_repos(&cfg, &repos);
+        assert_eq!(resolved, vec![("acme".to_string(), "widget".to_string())]);
+    }
+
+    /// Why: the multi-repo constructor must validate non-empty input — an
+    /// empty list represents a programmer error from the orchestrator.
+    /// What: call `new_for_prs` with `vec![]`.
+    /// Test: returns `CollectError::Config`.
+    #[test]
+    fn new_for_prs_rejects_empty_repos() {
+        let cfg = gh(None, None);
+        match GitHubClient::new_for_prs(&cfg, vec![]) {
+            Ok(_) => panic!("expected error for empty repos"),
+            Err(CollectError::Config(msg)) => {
+                assert!(msg.contains("at least one"), "unexpected msg: {msg}")
+            }
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    /// Why: the multi-repo constructor must accept a populated list and
+    /// expose every entry on `repos`. The first entry doubles as the
+    /// "primary" repo for issue endpoints.
+    /// What: build a client with two repos and inspect the internal state.
+    /// Test: `repos.len() == 2`, primary owner/repo matches index 0.
+    #[test]
+    fn new_for_prs_stores_all_repos() {
+        let cfg = gh(None, Some("acme"));
+        let client = GitHubClient::new_for_prs(
+            &cfg,
+            vec![
+                ("acme".into(), "alpha".into()),
+                ("acme".into(), "beta".into()),
+            ],
+        )
+        .expect("client builds");
+        assert_eq!(client.repos.len(), 2);
+        assert_eq!(client.owner, "acme");
+        assert_eq!(client.repo, "alpha");
+    }
+
+    /// Why: the slug parser is a small but critical helper — bad slugs must
+    /// be rejected with a clear message rather than silently producing
+    /// `("", "repo")` or similar nonsense.
+    /// What: a handful of well- and ill-formed slugs.
+    /// Test: positives parse, negatives return `Config` errors.
+    #[test]
+    fn parse_slug_validates_input() {
+        assert_eq!(
+            parse_slug("owner/repo").unwrap(),
+            ("owner".to_string(), "repo".to_string())
+        );
+        assert!(parse_slug("no-slash").is_err());
+        assert!(parse_slug("/repo").is_err());
+        assert!(parse_slug("owner/").is_err());
+    }
+
+    /// Why: GitHub remotes come in several URL flavors — the URL parser
+    /// must cover the common HTTPS and SSH forms and reject non-GitHub
+    /// hosts.
+    /// What: probe each supported form and a couple of negative cases.
+    /// Test: each call returns the expected `(owner, repo)` or `None`.
+    #[test]
+    fn extract_owner_repo_from_url_handles_common_forms() {
+        assert_eq!(
+            extract_owner_repo_from_url("https://github.com/acme/widget.git"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+        assert_eq!(
+            extract_owner_repo_from_url("https://github.com/acme/widget"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+        assert_eq!(
+            extract_owner_repo_from_url("git@github.com:acme/widget.git"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+        assert_eq!(
+            extract_owner_repo_from_url("ssh://git@github.com/acme/widget.git"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+        assert_eq!(
+            extract_owner_repo_from_url("https://user@github.com/acme/widget"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+        // Non-GitHub hosts: unsupported.
+        assert!(extract_owner_repo_from_url("https://gitlab.com/acme/widget").is_none());
+        assert!(extract_owner_repo_from_url("nonsense").is_none());
     }
 }

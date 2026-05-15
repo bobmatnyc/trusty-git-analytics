@@ -180,6 +180,16 @@ pub struct RepositoryConfig {
     /// Inclusive end date for commit collection (ISO 8601).
     #[serde(default)]
     pub until_date: Option<String>,
+
+    /// Optional GitHub organization / owner for this repository.
+    ///
+    /// When set, this is used by the GitHub PR fetcher to construct the
+    /// `owner/name` slug for org-wide / multi-repo collection without
+    /// requiring `github.repo` to be set. Accepts the alias `owner:` in YAML
+    /// for human readability (`org` is canonical to match the existing
+    /// `github.org` convention).
+    #[serde(default, alias = "owner")]
+    pub org: Option<String>,
 }
 
 /// Team roster and identity aliases.

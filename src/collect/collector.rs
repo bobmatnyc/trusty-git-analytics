@@ -239,9 +239,28 @@ impl CollectionPipeline {
 
         if let Some(gh_cfg) = &self.config.github {
             if gh_cfg.fetch_prs {
-                match GitHubClient::new(gh_cfg) {
-                    Ok(gh) => providers.push(Box::new(gh)),
-                    Err(e) => stats.errors.push(format!("GitHub client init failed: {e}")),
+                // Multi-repo resolution (#87): drive from `repositories[]` or
+                // `github.org` when `github.repo` is not set. If nothing
+                // resolves, skip GitHub PR fetching gracefully.
+                let repos = crate::collect::github::client::resolve_github_repos(
+                    gh_cfg,
+                    &self.config.repositories,
+                );
+                if repos.is_empty() {
+                    info!(
+                        "GitHub PR fetch skipped: no github.repo, no per-repo org, \
+                         and no github.org resolvable from repositories[]"
+                    );
+                } else {
+                    info!(
+                        repo_count = repos.len(),
+                        "GitHub PR fetcher will scan {} repo(s)",
+                        repos.len()
+                    );
+                    match GitHubClient::new_for_prs(gh_cfg, repos) {
+                        Ok(gh) => providers.push(Box::new(gh)),
+                        Err(e) => stats.errors.push(format!("GitHub client init failed: {e}")),
+                    }
                 }
             }
         }
