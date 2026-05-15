@@ -11,10 +11,26 @@ GitHub: https://github.com/bobmatnyc/gitflow-analytics
 1. **Implement** — write code and tests, verify all pass (`cargo test`)
 2. **Lint** — `cargo clippy -- -D warnings` must pass
 3. **Format** — `cargo fmt --check` must pass
-4. **Commit** — staged files only, passing pre-commit hooks
+4. **Commit** — staged files only, passing pre-commit hooks. When a commit resolves a GitHub issue, include `closes #N` in the commit message body (not the subject line) so GitHub auto-closes the issue on push.
 5. **Update docs** — update CHANGELOG.md, README.md if needed
 6. **Bump version** — Cargo.toml workspace version, commit + tag
 7. **Push** — `git push origin main && git push origin vX.Y.Z`
+8. **Monitor CI/CD** — after every push, delegate to version-control agent to check `gh run list` status; do NOT declare release complete until all CI gates are green
+
+## CI/CD Monitoring (MANDATORY)
+
+After every `git push` to main or a version tag:
+
+1. **Delegate to version-control agent**: `gh run list --repo bobmatnyc/trusty-git-analytics --limit 5`
+2. **Wait for runs to complete** — if any run is `in_progress` or `queued`, poll until settled
+3. **If any run fails**: immediately triage the failure (clippy / test / rustdoc / release), fix it, and push a follow-up commit before closing the task
+4. **Release is only complete** when: all CI matrix jobs green AND release workflow has published binaries
+
+Failure categories to watch for:
+- `cargo clippy -- -D warnings` — lint regressions from new code
+- Test failures — especially `duetto_contractors_config_resolves` (historically flaky)
+- Rustdoc broken links — stale module paths after refactors
+- Release workflow — binary build / upload failures
 
 ## Engineering Standards
 
