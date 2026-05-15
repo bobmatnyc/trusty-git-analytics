@@ -83,6 +83,37 @@ files are excluded from `filtered_insertions`/`filtered_deletions` and from `fil
 - **GitLab support**: not yet implemented (parity gap with Python predecessor)
 - **Pagination**: GitHub link-header driven, batched via `tokio::JoinSet`
 
+## PR Data Collection (Bitbucket Cloud)
+
+Implemented via [`crate::collect::pr_provider::PrProvider`], the same trait
+that wraps the GitHub client — both providers run concurrently when
+configured, dispatched from `tokio::task::JoinSet` in the collector. Bitbucket
+Server / Data Center is **not** supported.
+
+- **Library**: `reqwest` + `tokio`
+- **Auth precedence**: `bitbucket.token` (Bearer) > `username` + `app_password`
+  (Basic). Env fallbacks: `BITBUCKET_TOKEN`, `BITBUCKET_APP_PASSWORD`.
+- **Endpoint**: `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests`
+  with `state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED` (the default
+  filter is open-only, which would silently drop merged history).
+- **Pagination**: cursor-style. Each response carries an absolute `next` URL;
+  the client follows it until `next` is absent. `pagelen` capped at 50.
+- **Rate limits**: `~1000 req/hr/user`. The client warns when
+  `X-RateLimit-Remaining` drops below 5 and applies the same `1s → 2s → 4s`
+  exponential backoff used for GitHub on 429 / 5xx.
+- **State mapping**: `MERGED → merged`, `OPEN → open`,
+  `DECLINED | SUPERSEDED → closed` (the shared `pull_requests` schema has no
+  richer variants).
+- **Commit list**: only the merge commit hash is recorded in `commit_shas`,
+  matching the GitHub client's behavior. The per-PR commit endpoint is not
+  called in v1.
+- **`merged_at` precision**: Bitbucket Cloud's PR list endpoint exposes no
+  `merged_on` field, so the client records `merged_at = updated_on` for
+  merged PRs. Post-merge edits (title/description/reviewer changes) bump
+  `updated_on`, biasing recorded `merged_at` later than the actual merge
+  moment. Bias is one-directional and bounded in practice. See
+  [ADR-0003 §6](../adr/0003-bitbucket-pr-provider.md) for the full rationale.
+
 ### Incremental Fetch
 
 For each repo, the most recent `pull_request_cache.cached_at` is queried and used as the

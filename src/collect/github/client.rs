@@ -8,7 +8,10 @@ use rusqlite::params;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
+use async_trait::async_trait;
+
 use crate::collect::errors::{CollectError, Result};
+use crate::collect::pr_provider::PrProvider;
 use crate::core::config::GithubConfig;
 use crate::core::db::Database;
 use crate::core::models::{PrState, PullRequest};
@@ -488,6 +491,25 @@ impl GitHubClient {
             page += 1;
         }
         Ok(out)
+    }
+}
+
+#[async_trait]
+impl PrProvider for GitHubClient {
+    fn name(&self) -> &str {
+        "github"
+    }
+
+    async fn fetch_pull_requests(&self) -> Result<Vec<PullRequest>> {
+        GitHubClient::fetch_pull_requests(self).await
+    }
+
+    fn store_pull_requests(
+        &self,
+        db: &Database,
+        prs: &[PullRequest],
+    ) -> crate::core::Result<usize> {
+        GitHubClient::store_pull_requests(self, db, prs)
     }
 }
 

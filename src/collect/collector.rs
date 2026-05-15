@@ -7,14 +7,17 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use tracing::{info, warn};
 
 use crate::collect::azdo::AzureDevOpsClient;
+use crate::collect::bitbucket::BitbucketClient;
 use crate::collect::errors::Result;
 use crate::collect::git::GitCollector;
 use crate::collect::github::GitHubClient;
 use crate::collect::identity::IdentityResolver;
 use crate::collect::linear::LinearClient;
+use crate::collect::pr_provider::PrProvider;
 use crate::collect::weeks::{clamp_week_to_range, weeks_in_range};
 use crate::core::config::Config;
 use crate::core::db::{self, Database};
+use crate::core::models::PullRequest;
 
 /// Aggregate statistics for a single pipeline run.
 #[derive(Debug, Clone, Default)]
@@ -120,30 +123,10 @@ impl CollectionPipeline {
             }
         }
 
-        // Optional: GitHub PR fetch.
-        if let Some(gh_cfg) = &self.config.github {
-            if gh_cfg.fetch_prs {
-                match GitHubClient::new(gh_cfg) {
-                    Ok(gh) => match gh.fetch_pull_requests().await {
-                        Ok(prs) => match gh.store_pull_requests(db, &prs) {
-                            Ok(n) => {
-                                info!(prs = n, "stored pull requests");
-                                stats.prs_fetched += n;
-                            }
-                            Err(e) => {
-                                stats.errors.push(format!("PR store failed: {e}"));
-                            }
-                        },
-                        Err(e) => {
-                            stats.errors.push(format!("PR fetch failed: {e}"));
-                        }
-                    },
-                    Err(e) => {
-                        stats.errors.push(format!("GitHub client init failed: {e}"));
-                    }
-                }
-            }
-        }
+        // PR providers (GitHub, Bitbucket, …) run concurrently. Each
+        // provider fetches on its own task, then we persist the results
+        // sequentially on the main task because `Database` is not `Sync`.
+        self.fetch_and_store_prs(db, &mut stats).await;
 
         // Optional: Azure DevOps connection probe + work-item enrichment.
         if let Some(azdo_cfg) = self.config.azure_devops_config() {
@@ -243,6 +226,108 @@ impl CollectionPipeline {
         }
 
         Ok(stats)
+    }
+
+    /// Build the set of [`PrProvider`] instances enabled by the current
+    /// configuration. Each provider's construction is independent — a failure
+    /// is logged on `stats.errors` but does not abort the run.
+    fn build_pr_providers(
+        &self,
+        stats: &mut CollectionStats,
+    ) -> Vec<Box<dyn PrProvider + Send + Sync>> {
+        let mut providers: Vec<Box<dyn PrProvider + Send + Sync>> = Vec::new();
+
+        if let Some(gh_cfg) = &self.config.github {
+            if gh_cfg.fetch_prs {
+                match GitHubClient::new(gh_cfg) {
+                    Ok(gh) => providers.push(Box::new(gh)),
+                    Err(e) => stats.errors.push(format!("GitHub client init failed: {e}")),
+                }
+            }
+        }
+        if let Some(bb_cfg) = &self.config.bitbucket {
+            if bb_cfg.fetch_prs {
+                match BitbucketClient::new(bb_cfg) {
+                    Ok(bb) => providers.push(Box::new(bb)),
+                    Err(e) => stats
+                        .errors
+                        .push(format!("Bitbucket client init failed: {e}")),
+                }
+            }
+        }
+        providers
+    }
+
+    /// Run every configured PR provider concurrently, then persist their
+    /// results on the main task.
+    ///
+    /// We spawn one task per provider so a slow remote (or the second
+    /// provider being absent) doesn't gate the others. Each task returns the
+    /// fetched `Vec<PullRequest>` so the `Database` — which is not `Sync` —
+    /// is only ever touched by the orchestrator.
+    async fn fetch_and_store_prs(&self, db: &mut Database, stats: &mut CollectionStats) {
+        let providers = self.build_pr_providers(stats);
+        if providers.is_empty() {
+            return;
+        }
+
+        let mut set: tokio::task::JoinSet<(String, Result<Vec<PullRequest>>)> =
+            tokio::task::JoinSet::new();
+        // Keep providers alive in an Arc so the spawned task can return its
+        // name and the orchestrator can still call `store_pull_requests`.
+        let providers: Vec<std::sync::Arc<dyn PrProvider + Send + Sync>> =
+            providers.into_iter().map(std::sync::Arc::from).collect();
+
+        for p in &providers {
+            let p = std::sync::Arc::clone(p);
+            let name = p.name().to_string();
+            set.spawn(async move {
+                let result = p.fetch_pull_requests().await;
+                (name, result)
+            });
+        }
+
+        // Drain results as they complete. Persistence runs on the main task
+        // (where `&mut Database` is safe to use) and uses the matching
+        // provider's `store_pull_requests`.
+        while let Some(joined) = set.join_next().await {
+            let (provider_name, fetch_result) = match joined {
+                Ok(t) => t,
+                Err(e) => {
+                    stats.errors.push(format!("PR fetch task panicked: {e}"));
+                    continue;
+                }
+            };
+            match fetch_result {
+                Ok(prs) => {
+                    // Find the matching provider for storage.
+                    let Some(provider) = providers.iter().find(|p| p.name() == provider_name)
+                    else {
+                        stats.errors.push(format!(
+                            "internal: no provider registered for '{provider_name}' \
+                             when storing PRs"
+                        ));
+                        continue;
+                    };
+                    match provider.store_pull_requests(db, &prs) {
+                        Ok(n) => {
+                            info!(provider = %provider_name, prs = n, "stored pull requests");
+                            stats.prs_fetched += n;
+                        }
+                        Err(e) => {
+                            stats
+                                .errors
+                                .push(format!("{provider_name} PR store failed: {e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    stats
+                        .errors
+                        .push(format!("{provider_name} PR fetch failed: {e}"));
+                }
+            }
+        }
     }
 
     /// Collect a single repository week-by-week, skipping `(repo, ISO-week)`
