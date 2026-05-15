@@ -5,6 +5,17 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-05-15
+
+### Fixed
+
+- **ADO connectionData probe now uses api-version=7.1-preview.1 (#85)** — The connectivity probe sent during ADO initialization previously used a deprecated API version, causing intermittent auth failures on newer Azure DevOps organizations. The probe now sends `api-version=7.1-preview.1` for consistent compatibility.
+- **ADO workitemsbatch now sends errorPolicy=omit (#86)** — The batch work-items endpoint previously returned a full-batch 404 when any single work item ID was invalid or inaccessible. Requests now include `errorPolicy=omit` so valid items in the batch are returned even when some IDs cannot be resolved.
+
+### Added
+
+- **GitHub PR fetcher supports org-wide / multi-repo configs (#87)** — The GitHub PR collection stage now accepts an `org` field and a `repositories[]` list in addition to the existing single-repo `repo` field. Repos are fetched concurrently with partial-success semantics: a failure on one repository is logged at `WARN` level but does not abort collection for the remaining repositories.
+
 ## [1.0.7] - 2026-05-15
 
 ### Added
