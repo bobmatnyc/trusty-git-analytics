@@ -210,8 +210,9 @@ impl BitbucketClient {
 
             let resp = resp.error_for_status()?;
             let page: BbPaged<BbPullRequest> = resp.json().await?;
+            let repository = format!("{}/{}", self.workspace, self.repo_slug);
             for pr in page.values {
-                out.push(map_pr(pr));
+                out.push(map_pr(pr, &repository));
             }
             next_url = page.next;
         }
@@ -221,11 +222,13 @@ impl BitbucketClient {
     /// Persist a batch of [`PullRequest`] rows into the database.
     ///
     /// Mirrors the GitHub client's persistence — same table, same columns.
-    /// Writes `provider = 'bitbucket'` so rows deduplicate against the
-    /// `(provider, pr_number)` unique index from migration
-    /// `0010_pull_requests_provider.sql` (fix #71), preventing collisions
+    /// Writes `provider = 'bitbucket'` and `repository = "<workspace>/<repo_slug>"`
+    /// so rows deduplicate against the
+    /// `(provider, repository, pr_number)` unique index from migration
+    /// `0012_pull_requests_repository.sql` (fix #88), preventing collisions
     /// with PRs collected by the GitHub or Azure DevOps providers that
-    /// happen to share the same numeric `pr_number`.
+    /// happen to share the same numeric `pr_number`, and preventing
+    /// cross-repo collisions when multiple Bitbucket repos are collected.
     ///
     /// # Errors
     ///
@@ -240,10 +243,11 @@ impl BitbucketClient {
         for pr in prs {
             conn.execute(
                 "INSERT OR REPLACE INTO pull_requests \
-                 (provider, pr_number, title, author, state, created_at, merged_at, commit_shas) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (provider, repository, pr_number, title, author, state, created_at, merged_at, commit_shas) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     "bitbucket",
+                    pr.repository,
                     pr.pr_number as i64,
                     pr.title,
                     pr.author,
@@ -300,11 +304,16 @@ impl BitbucketClient {
 
 /// Map a Bitbucket PR shape into the project's internal [`PullRequest`].
 ///
+/// `repository` is provided by the caller (formatted `"workspace/repo_slug"`)
+/// so that the row carries enough identity to participate in the
+/// `(provider, repository, pr_number)` unique constraint added in migration
+/// v12 (#88).
+///
 /// State mapping: `MERGED` → [`PrState::Merged`]; `OPEN` → [`PrState::Open`];
 /// `DECLINED` and `SUPERSEDED` collapse to [`PrState::Closed`] because the
 /// shared schema has no richer variants. The collapse is lossy but documented
 /// in the configuration reference.
-fn map_pr(pr: BbPullRequest) -> PullRequest {
+fn map_pr(pr: BbPullRequest, repository: &str) -> PullRequest {
     let state = match pr.state.as_str() {
         "MERGED" => PrState::Merged,
         "OPEN" => PrState::Open,
@@ -332,6 +341,7 @@ fn map_pr(pr: BbPullRequest) -> PullRequest {
     PullRequest {
         id: 0,
         pr_number: pr.id,
+        repository: repository.to_string(),
         title: pr.title,
         author,
         state,
@@ -399,8 +409,9 @@ mod tests {
         assert_eq!(page.values.len(), 1);
         assert!(page.next.is_some());
 
-        let mapped = map_pr(page.values.into_iter().next().unwrap());
+        let mapped = map_pr(page.values.into_iter().next().unwrap(), "w/r");
         assert_eq!(mapped.pr_number, 42);
+        assert_eq!(mapped.repository, "w/r");
         assert_eq!(mapped.state, PrState::Merged);
         assert_eq!(mapped.author, "ada");
         assert!(mapped.commit_shas.contains("deadbeefcafe"));
@@ -419,7 +430,7 @@ mod tests {
             "author": {"display_name": "Bob"}
         }"#;
         let pr: BbPullRequest = serde_json::from_str(json).expect("parses");
-        let mapped = map_pr(pr);
+        let mapped = map_pr(pr, "w/r");
         assert_eq!(mapped.pr_number, 7);
         assert_eq!(mapped.state, PrState::Closed);
         assert!(mapped.merged_at.is_none());
@@ -437,7 +448,7 @@ mod tests {
             "created_on": "2024-05-01T12:00:00Z"
         }"#;
         let pr: BbPullRequest = serde_json::from_str(json).expect("parses");
-        let mapped = map_pr(pr);
+        let mapped = map_pr(pr, "w/r");
         assert_eq!(mapped.state, PrState::Closed);
         // No author block — `author` should be empty rather than panicking.
         assert_eq!(mapped.author, "");

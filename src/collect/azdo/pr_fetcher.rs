@@ -119,16 +119,27 @@ where
     out
 }
 
-/// Return the set of `(provider, pr_number)` already persisted, for the given
-/// provider, so callers can skip work already on disk.
+/// Return the set of `pr_number`s already persisted for the given
+/// `(provider, repository)` scope, so callers can skip work already on disk.
+///
+/// `repository` is the per-provider repository identifier as written by
+/// [`upsert_pr`] (for Azure DevOps this is the project name); see migration
+/// `0012_pull_requests_repository.sql`. Scoping to a single repository
+/// matches the UNIQUE constraint and prevents one project's IDs from
+/// masking another's.
 ///
 /// # Errors
 ///
 /// Returns [`TgaError::DbError`] on SQL failure.
-pub fn get_existing_pr_numbers(conn: &Connection, provider: &str) -> CoreResult<HashSet<i64>> {
-    let mut stmt = conn.prepare("SELECT pr_number FROM pull_requests WHERE provider = ?1")?;
+pub fn get_existing_pr_numbers(
+    conn: &Connection,
+    provider: &str,
+    repository: &str,
+) -> CoreResult<HashSet<i64>> {
+    let mut stmt = conn
+        .prepare("SELECT pr_number FROM pull_requests WHERE provider = ?1 AND repository = ?2")?;
     let rows = stmt
-        .query_map(params![provider], |row| row.get::<_, i64>(0))
+        .query_map(params![provider, repository], |row| row.get::<_, i64>(0))
         .map_err(TgaError::from)?;
     let mut out = HashSet::new();
     for r in rows {
@@ -140,18 +151,22 @@ pub fn get_existing_pr_numbers(conn: &Connection, provider: &str) -> CoreResult<
 /// Upsert an [`AdoPullRequest`] into `pull_requests` (provider = 'azdo')
 /// and return the row id (existing or newly inserted).
 ///
-/// Why: ADO PRs reuse the shared `pull_requests` table; the provider column
-/// scopes uniqueness so GitHub and ADO PRs with the same numeric ID don't
-/// collide. We need the row id back to attach reviewers via FK.
-/// What: `INSERT OR REPLACE` keyed by `(provider, pr_number)` per migration
-/// `0010_pull_requests_provider.sql`, then a `SELECT id` to recover the
-/// row id (REPLACE may renumber on conflict).
+/// Why: ADO PRs reuse the shared `pull_requests` table; the
+/// `(provider, repository, pr_number)` triple scopes uniqueness so neither
+/// cross-provider IDs nor cross-project IDs collide. We need the row id
+/// back to attach reviewers via FK.
+/// What: `INSERT OR REPLACE` keyed by `(provider, repository, pr_number)`
+/// per migration `0012_pull_requests_repository.sql`, then a `SELECT id`
+/// to recover the row id (REPLACE may renumber on conflict). The
+/// `repository` parameter is the ADO project name — Azure DevOps PR IDs
+/// are project-scoped, not org-scoped, so the project is the right
+/// uniqueness boundary.
 /// Test: `upsert_pr_round_trips_basic_fields` exercises insert + re-insert.
 ///
 /// # Errors
 ///
 /// Returns [`TgaError::DbError`] on SQL failure.
-pub fn upsert_pr(conn: &Connection, pr: &AdoPullRequest) -> CoreResult<i64> {
+pub fn upsert_pr(conn: &Connection, pr: &AdoPullRequest, repository: &str) -> CoreResult<i64> {
     // Map ADO status to our PrState enum's string form so reports that
     // group by `state` (open/closed/merged) keep working.
     let state = match pr.status.to_ascii_lowercase().as_str() {
@@ -162,10 +177,11 @@ pub fn upsert_pr(conn: &Connection, pr: &AdoPullRequest) -> CoreResult<i64> {
 
     conn.execute(
         "INSERT OR REPLACE INTO pull_requests \
-         (provider, pr_number, title, author, state, created_at, merged_at, commit_shas) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (provider, repository, pr_number, title, author, state, created_at, merged_at, commit_shas) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             "azdo",
+            repository,
             pr.pr_number,
             pr.title,
             pr.author,
@@ -178,8 +194,8 @@ pub fn upsert_pr(conn: &Connection, pr: &AdoPullRequest) -> CoreResult<i64> {
 
     let id: i64 = conn
         .query_row(
-            "SELECT id FROM pull_requests WHERE provider = ?1 AND pr_number = ?2",
-            params!["azdo", pr.pr_number],
+            "SELECT id FROM pull_requests WHERE provider = ?1 AND repository = ?2 AND pr_number = ?3",
+            params!["azdo", repository, pr.pr_number],
             |row| row.get(0),
         )
         .map_err(TgaError::from)?;
@@ -431,7 +447,8 @@ impl AdoPrFetcher {
             info!("No 'Merged PR N:' references found; skipping ADO PR fetch");
             return Ok(0);
         }
-        let existing = get_existing_pr_numbers(conn, "azdo")?;
+        let project = self.config.project.clone();
+        let existing = get_existing_pr_numbers(conn, "azdo", &project)?;
         let to_fetch: Vec<i64> = ids
             .into_iter()
             .filter(|id| !existing.contains(id))
@@ -445,7 +462,7 @@ impl AdoPrFetcher {
         let prs = self.fetch_prs(&to_fetch).await;
         let mut stored = 0usize;
         for pr in &prs {
-            let pr_db_id = upsert_pr(conn, pr)?;
+            let pr_db_id = upsert_pr(conn, pr, &project)?;
             for reviewer in &pr.reviewers {
                 upsert_pr_reviewer(conn, pr_db_id, reviewer)?;
             }
@@ -533,25 +550,26 @@ mod tests {
         let db = Database::open_in_memory().expect("db");
         let conn = db.connection();
         let pr = sample_pr();
-        let row_id = upsert_pr(conn, &pr).expect("first upsert");
+        let row_id = upsert_pr(conn, &pr, "MyProject").expect("first upsert");
         assert!(row_id > 0);
 
         // Re-upsert: should not duplicate, should return the same logical
-        // identity (provider, pr_number).
-        let row_id2 = upsert_pr(conn, &pr).expect("second upsert");
+        // identity (provider, repository, pr_number).
+        let row_id2 = upsert_pr(conn, &pr, "MyProject").expect("second upsert");
         assert!(row_id2 > 0);
 
-        // Count rows for this (provider, pr_number) — must be exactly 1.
+        // Count rows for this (provider, repository, pr_number) — must be exactly 1.
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pull_requests WHERE provider = 'azdo' AND pr_number = ?1",
+                "SELECT COUNT(*) FROM pull_requests \
+                 WHERE provider = 'azdo' AND repository = 'MyProject' AND pr_number = ?1",
                 params![pr.pr_number],
                 |row| row.get(0),
             )
             .expect("count");
         assert_eq!(
             n, 1,
-            "should have exactly one row per (provider, pr_number)"
+            "should have exactly one row per (provider, repository, pr_number)"
         );
     }
 
@@ -560,7 +578,7 @@ mod tests {
         let db = Database::open_in_memory().expect("db");
         let conn = db.connection();
         let pr = sample_pr();
-        let pr_db_id = upsert_pr(conn, &pr).expect("pr upsert");
+        let pr_db_id = upsert_pr(conn, &pr, "MyProject").expect("pr upsert");
         for r in &pr.reviewers {
             upsert_pr_reviewer(conn, pr_db_id, r).expect("reviewer upsert");
         }
@@ -594,15 +612,49 @@ mod tests {
         let db = Database::open_in_memory().expect("db");
         let conn = db.connection();
         let pr = sample_pr();
-        upsert_pr(conn, &pr).expect("upsert");
+        upsert_pr(conn, &pr, "MyProject").expect("upsert");
 
-        let ids = get_existing_pr_numbers(conn, "azdo").expect("query");
+        let ids = get_existing_pr_numbers(conn, "azdo", "MyProject").expect("query");
         assert!(ids.contains(&pr.pr_number));
 
-        let ids_gh = get_existing_pr_numbers(conn, "github").expect("query gh");
+        let ids_gh = get_existing_pr_numbers(conn, "github", "MyProject").expect("query gh");
         assert!(
             !ids_gh.contains(&pr.pr_number),
             "provider scoping must hold"
+        );
+
+        // Cross-project scoping: same provider, different repository → must
+        // not return the row. This is the regression guard for #88.
+        let ids_other = get_existing_pr_numbers(conn, "azdo", "OtherProject").expect("query other");
+        assert!(
+            !ids_other.contains(&pr.pr_number),
+            "repository scoping must hold for #88"
+        );
+    }
+
+    #[test]
+    fn upsert_pr_allows_same_pr_number_in_different_repositories() {
+        // Regression test for issue #88: two PRs with the same pr_number in
+        // different repositories must coexist (no INSERT OR REPLACE
+        // collision).
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.connection();
+        let pr = sample_pr();
+
+        let id_a = upsert_pr(conn, &pr, "ProjectA").expect("upsert A");
+        let id_b = upsert_pr(conn, &pr, "ProjectB").expect("upsert B");
+        assert_ne!(id_a, id_b, "different repos must produce different rows");
+
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pull_requests WHERE provider = 'azdo' AND pr_number = ?1",
+                params![pr.pr_number],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            total, 2,
+            "same pr_number across two repos must yield two rows"
         );
     }
 
@@ -689,7 +741,7 @@ project: "MyProject"
         let conn = db.connection();
         let mut pr = sample_pr();
         pr.status = "abandoned".into();
-        let id = upsert_pr(conn, &pr).expect("upsert");
+        let id = upsert_pr(conn, &pr, "MyProject").expect("upsert");
         let state: String = conn
             .query_row(
                 "SELECT state FROM pull_requests WHERE id = ?1",
@@ -700,10 +752,11 @@ project: "MyProject"
         assert_eq!(state, "closed");
 
         pr.status = "active".into();
-        upsert_pr(conn, &pr).expect("upsert");
+        upsert_pr(conn, &pr, "MyProject").expect("upsert");
         let state: String = conn
             .query_row(
-                "SELECT state FROM pull_requests WHERE provider = 'azdo' AND pr_number = ?1",
+                "SELECT state FROM pull_requests \
+                 WHERE provider = 'azdo' AND repository = 'MyProject' AND pr_number = ?1",
                 params![pr.pr_number],
                 |row| row.get(0),
             )
