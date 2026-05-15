@@ -81,6 +81,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "pr_reviewers",
         sql: include_str!("sql/0011_pr_reviewers.sql"),
     },
+    Migration {
+        version: 12,
+        name: "pull_requests_repository",
+        sql: include_str!("sql/0012_pull_requests_repository.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -137,4 +142,114 @@ pub fn run(conn: &mut Connection) -> Result<()> {
         tx.commit().map_err(TgaError::from)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::db::Database;
+    use rusqlite::params;
+
+    /// Why: regression guard for issue #88. Before migration v12, the
+    /// UNIQUE(provider, pr_number) index collapsed cross-repo PRs that
+    /// happened to share a number (e.g. #1 in repo A and #1 in repo B),
+    /// losing ~62% of rows in real org-wide collection runs.
+    /// What: after running all migrations, two rows with identical
+    /// `(provider, pr_number)` but different `repository` must coexist;
+    /// inserting a third row with the same `(provider, repository, pr_number)`
+    /// must replace, not duplicate.
+    /// Test: open in-memory DB (runs all migrations), insert, assert counts.
+    #[test]
+    fn migration_v12_allows_same_pr_number_across_repositories() {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+
+        // Two PRs, same provider and pr_number, different repositories.
+        conn.execute(
+            "INSERT INTO pull_requests \
+             (provider, repository, pr_number, title, author, state, created_at, commit_shas) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "github",
+                "acme/widgets",
+                1_i64,
+                "first repo PR #1",
+                "alice",
+                "open",
+                "2024-01-01T00:00:00Z",
+                "[]"
+            ],
+        )
+        .expect("insert A");
+        conn.execute(
+            "INSERT INTO pull_requests \
+             (provider, repository, pr_number, title, author, state, created_at, commit_shas) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "github",
+                "acme/gadgets",
+                1_i64,
+                "second repo PR #1",
+                "bob",
+                "open",
+                "2024-01-02T00:00:00Z",
+                "[]"
+            ],
+        )
+        .expect("insert B");
+
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pull_requests WHERE provider = 'github' AND pr_number = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            total, 2,
+            "same (provider, pr_number) across two repositories must yield two rows after v12"
+        );
+
+        // INSERT OR REPLACE on the same triple must still deduplicate.
+        conn.execute(
+            "INSERT OR REPLACE INTO pull_requests \
+             (provider, repository, pr_number, title, author, state, created_at, commit_shas) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "github",
+                "acme/widgets",
+                1_i64,
+                "first repo PR #1 (updated)",
+                "alice",
+                "merged",
+                "2024-01-01T00:00:00Z",
+                "[]"
+            ],
+        )
+        .expect("replace A");
+
+        let still_two: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pull_requests WHERE provider = 'github' AND pr_number = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            still_two, 2,
+            "INSERT OR REPLACE on the same triple must not add a row"
+        );
+
+        let updated_state: String = conn
+            .query_row(
+                "SELECT state FROM pull_requests \
+                 WHERE provider = 'github' AND repository = 'acme/widgets' AND pr_number = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read state");
+        assert_eq!(
+            updated_state, "merged",
+            "REPLACE must update fields in place"
+        );
+    }
 }

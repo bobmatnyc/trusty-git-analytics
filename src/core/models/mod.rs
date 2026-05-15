@@ -130,6 +130,19 @@ pub struct PullRequest {
     /// PR number within its repository.
     pub pr_number: u64,
 
+    /// Repository this PR belongs to. Together with `provider` and
+    /// `pr_number` this forms the persistence-level unique identity of a
+    /// PR. GitHub assigns `pr_number` per-repository (so #1 in repo A is
+    /// not the same PR as #1 in repo B); without this field the
+    /// `(provider, pr_number)` unique index from migration v10 silently
+    /// dropped cross-repo collisions during multi-repo collection (#88).
+    ///
+    /// Format is provider-specific:
+    /// - GitHub: `"owner/repo"` (e.g. `"acme/widgets"`)
+    /// - Bitbucket: `"workspace/repo_slug"`
+    /// - Azure DevOps: `"project"` (PRs are project-scoped)
+    pub repository: String,
+
     /// PR title.
     pub title: String,
 

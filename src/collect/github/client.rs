@@ -472,6 +472,7 @@ impl GitHubClient {
                 out.push(PullRequest {
                     id: 0,
                     pr_number: p.number,
+                    repository: format!("{owner}/{repo}"),
                     title: p.title,
                     author: p.user.map(|u| u.login).unwrap_or_default(),
                     state,
@@ -490,9 +491,14 @@ impl GitHubClient {
 
     /// Persist a batch of [`PullRequest`] rows into the database.
     ///
-    /// Existing rows with the same `(provider, pr_number)` are replaced.
-    /// The `provider` column is set to `'github'` for all rows written by
-    /// this client (see migration `0010_pull_requests_provider.sql`).
+    /// Existing rows with the same `(provider, repository, pr_number)` are
+    /// replaced. The `provider` column is set to `'github'` for all rows
+    /// written by this client; `repository` comes from each `PullRequest`
+    /// in `"owner/repo"` form (see migrations
+    /// `0010_pull_requests_provider.sql` and
+    /// `0012_pull_requests_repository.sql`). Including `repository` in the
+    /// uniqueness key prevents cross-repo collisions on `pr_number` (fix
+    /// for issue #88).
     ///
     /// # Errors
     ///
@@ -507,10 +513,11 @@ impl GitHubClient {
         for pr in prs {
             conn.execute(
                 "INSERT OR REPLACE INTO pull_requests \
-                 (provider, pr_number, title, author, state, created_at, merged_at, commit_shas) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (provider, repository, pr_number, title, author, state, created_at, merged_at, commit_shas) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     "github",
+                    pr.repository,
                     pr.pr_number as i64,
                     pr.title,
                     pr.author,
