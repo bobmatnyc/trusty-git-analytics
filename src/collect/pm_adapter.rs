@@ -718,6 +718,10 @@ fn azdo_err_to_pm(e: crate::collect::azdo::AzdoError) -> PmError {
             id: "(connection)".into(),
         },
         AzdoError::Request(err) => PmError::Http(err),
+        AzdoError::Config(msg) => PmError::Config {
+            system: "azure_devops".into(),
+            message: msg,
+        },
         AzdoError::Parse(msg) | AzdoError::InvalidUrl(msg) => PmError::Other {
             system: "azure_devops".into(),
             message: msg,
@@ -842,7 +846,8 @@ mod tests {
                 azure_devops: Some(AzureDevOpsConfig {
                     organization_url: "https://dev.azure.com/myorg".into(),
                     pat: "x".into(),
-                    project: "MyProject".into(),
+                    project: Some("MyProject".into()),
+                    projects: vec![],
                     ticket_regex: r"AB#(\d+)".into(),
                     team_keys: vec![],
                     fetch_on_reference: true,
@@ -1004,7 +1009,8 @@ mod tests {
                 azure_devops: Some(AzureDevOpsConfig {
                     organization_url: "https://dev.azure.com/myorg".into(),
                     pat: "x".into(),
-                    project: "P".into(),
+                    project: Some("P".into()),
+                    projects: vec![],
                     ticket_regex: r"AB#(\d+)".into(),
                     team_keys: vec![],
                     fetch_on_reference: true,
@@ -1051,7 +1057,8 @@ mod tests {
                 azure_devops: Some(AzureDevOpsConfig {
                     organization_url: "https://dev.azure.com/myorg".into(),
                     pat: "x".into(),
-                    project: "P".into(),
+                    project: Some("P".into()),
+                    projects: vec![],
                     ticket_regex: r"AB#(\d+)".into(),
                     team_keys: vec![],
                     fetch_on_reference: true,
@@ -1269,7 +1276,8 @@ jira:
                 azure_devops: Some(AzureDevOpsConfig {
                     organization_url: "https://dev.azure.com/myorg".into(),
                     pat: "x".into(),
-                    project: "P".into(),
+                    project: Some("P".into()),
+                    projects: vec![],
                     ticket_regex: r"AB#(\d+)".into(),
                     team_keys: vec![],
                     fetch_on_reference: true,
