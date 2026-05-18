@@ -5,6 +5,16 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.10] - 2026-05-18
+
+### Fixed
+- **Honour `pm.azure_devops.ticket_regex` in work-item extraction (#90)** — The `ticket_regex` field in the ADO PM adapter config block was parsed but not applied during work-item ID extraction from commit messages. The adapter now compiles and uses the user-supplied pattern, consistent with the JIRA, GitHub, and Linear adapters.
+- **Persist ADO PR merge commit SHA in `commit_shas` (#92)** — Azure DevOps PRs were fetched and stored without recording the merge commit SHA in the `commit_shas` join table, breaking commit-to-PR linkage. The fetcher now writes the `lastMergeCommit.commitId` value into `commit_shas` when present.
+- **ADO PR fetcher supports multiple projects (#91)** — The Azure DevOps PR fetcher previously collected PRs from only the first project in the config. It now iterates over all configured projects, merging results with partial-success semantics (a failure on one project is logged at `WARN` level but does not abort collection for others).
+
+### Added
+- **`--force-refresh-prs` flag to backfill ADO `commit_shas` (#95)** — A new `--force-refresh-prs` flag on `tga collect` forces re-fetching of all ADO pull requests regardless of their cached state, enabling operators to backfill `commit_shas` rows that were missing due to the bug fixed in #92.
+
 ## [1.0.9] - 2026-05-15
 
 ### Fixed
