@@ -627,10 +627,11 @@ impl Config {
         if let Some(linear) = &self.linear {
             check("linear", &linear.ticket_regex)?;
         }
-        // `pm.azure_devops.ticket_regex` is a non-Option String (always
-        // defaulted to `AB#(\d+)`), so check it as `Some(_)` regardless of
-        // whether the user customised it. Issue #90: this used to be
-        // unchecked and bad patterns failed in the middle of collection.
+        // `pm.azure_devops.ticket_regex` is a non-Option String (serde
+        // applies `default_ticket_regex` when omitted), so check it as
+        // `Some(_)` regardless of whether the user customised it. Issue
+        // #90: this used to be unchecked and bad patterns failed in the
+        // middle of collection.
         if let Some(adc) = self.azure_devops_config() {
             check("pm.azure_devops", &Some(adc.ticket_regex.clone()))?;
         }
