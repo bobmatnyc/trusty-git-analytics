@@ -142,7 +142,10 @@ impl CollectionPipeline {
                 }
             }
             if azdo_cfg.fetch_on_reference {
-                if let Err(e) = self.fetch_and_persist_azdo_work_items(db, &client).await {
+                if let Err(e) = self
+                    .fetch_and_persist_azdo_work_items(db, &client, azdo_cfg)
+                    .await
+                {
                     stats
                         .errors
                         .push(format!("ADO work item persistence failed: {e}"));
@@ -551,9 +554,21 @@ impl CollectionPipeline {
         &self,
         db: &mut Database,
         client: &AzureDevOpsClient,
+        azdo_cfg: &crate::core::config::AzureDevOpsConfig,
     ) -> Result<()> {
         use crate::collect::azdo::extract_work_item_refs;
         use std::collections::{BTreeSet, HashMap};
+
+        // The ticket_regex pattern is validated at config load
+        // (`Config::validate_ticket_regexes`), so compilation here cannot fail
+        // under normal flow. We still propagate the error rather than panic
+        // to keep the no-`unwrap()` invariant in library code from CLAUDE.md.
+        let ticket_re = regex::Regex::new(&azdo_cfg.ticket_regex).map_err(|e| {
+            crate::collect::CollectError::Config(format!(
+                "pm.azure_devops.ticket_regex {:?} failed to compile: {e}",
+                azdo_cfg.ticket_regex
+            ))
+        })?;
 
         // 1. Pull (sha, message) pairs from the database.
         let rows: Vec<(String, String)> = {
@@ -573,7 +588,7 @@ impl CollectionPipeline {
         let mut commit_refs: HashMap<String, Vec<u32>> = HashMap::new();
         let mut all_ids: BTreeSet<u32> = BTreeSet::new();
         for (sha, msg) in &rows {
-            let ids = extract_work_item_refs(msg);
+            let ids = extract_work_item_refs(&ticket_re, msg);
             if !ids.is_empty() {
                 for id in &ids {
                     all_ids.insert(*id);
@@ -583,7 +598,10 @@ impl CollectionPipeline {
         }
 
         if all_ids.is_empty() {
-            info!("No AB# references found in commit messages; skipping ADO work item fetch");
+            info!(
+                pattern = %azdo_cfg.ticket_regex,
+                "No work-item references found in commit messages; skipping ADO work item fetch",
+            );
             return Ok(());
         }
 

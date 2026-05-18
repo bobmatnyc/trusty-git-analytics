@@ -602,8 +602,9 @@ impl Config {
     /// Why: surfaces invalid regexes immediately at load time rather than
     /// at first use deep inside the pipeline, with a clear error message
     /// naming the offending section.
-    /// What: compiles `jira.ticket_regex`, `github.ticket_regex`, and
-    /// `linear.ticket_regex` if present; returns the first failure.
+    /// What: compiles `jira.ticket_regex`, `github.ticket_regex`,
+    /// `linear.ticket_regex`, and `pm.azure_devops.ticket_regex` if present;
+    /// returns the first failure.
     /// Test: load a config with `jira.ticket_regex: "["` and assert the
     /// returned error is `TgaError::ConfigError` mentioning `jira`.
     fn validate_ticket_regexes(&self) -> Result<()> {
@@ -625,6 +626,13 @@ impl Config {
         }
         if let Some(linear) = &self.linear {
             check("linear", &linear.ticket_regex)?;
+        }
+        // `pm.azure_devops.ticket_regex` is a non-Option String (always
+        // defaulted to `AB#(\d+)`), so check it as `Some(_)` regardless of
+        // whether the user customised it. Issue #90: this used to be
+        // unchecked and bad patterns failed in the middle of collection.
+        if let Some(adc) = self.azure_devops_config() {
+            check("pm.azure_devops", &Some(adc.ticket_regex.clone()))?;
         }
         Ok(())
     }
@@ -742,5 +750,58 @@ impl Config {
             adzo_config.validate()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn azdo_cfg_with_regex(pat: &str) -> AzureDevOpsConfig {
+        AzureDevOpsConfig {
+            organization_url: "https://dev.azure.com/myorg".into(),
+            pat: "secret".into(),
+            project: "MyProject".into(),
+            ticket_regex: pat.into(),
+            team_keys: vec![],
+            fetch_on_reference: true,
+            fetch_prs: false,
+        }
+    }
+
+    fn cfg_with_ado_regex(pat: &str) -> Config {
+        Config {
+            pm: Some(PmConfig {
+                azure_devops: Some(azdo_cfg_with_regex(pat)),
+            }),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn validate_ticket_regexes_accepts_valid_ado_pattern() {
+        // Regression test for #90: a configured pm.azure_devops.ticket_regex
+        // is reachable from validate_ticket_regexes and accepted when valid.
+        cfg_with_ado_regex(r"#(\d{4,8})\b")
+            .validate_ticket_regexes()
+            .expect("valid ADO regex accepted");
+    }
+
+    #[test]
+    fn validate_ticket_regexes_rejects_bad_ado_pattern() {
+        // Regression test for #90: a malformed pm.azure_devops.ticket_regex
+        // must fail at config load, not deep inside the collector.
+        let err = cfg_with_ado_regex("[unclosed")
+            .validate_ticket_regexes()
+            .expect_err("malformed ADO ticket_regex must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("pm.azure_devops"),
+            "error should name the section: {msg}"
+        );
+        assert!(
+            msg.contains("ticket_regex"),
+            "error should name the field: {msg}"
+        );
     }
 }
