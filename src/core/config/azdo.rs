@@ -38,7 +38,22 @@ pub struct AzureDevOpsConfig {
     pub pat: String,
 
     /// Azure DevOps project name (e.g. `"MyProject"`).
-    pub project: String,
+    ///
+    /// Optional: when omitted, `projects` must be non-empty. When both `project`
+    /// and `projects` are set, they are combined (preserving order, deduped) by
+    /// [`Self::projects`]. Kept as `Option<String>` for back-compat with the
+    /// pre-#91 single-project schema.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Additional Azure DevOps project names to query (issue #91 — multi-project
+    /// ADO orgs).
+    ///
+    /// PR fetching iterates each project in order until a hit is found
+    /// (404 from project A falls through to project B). Empty by default to
+    /// preserve the single-project schema.
+    #[serde(default)]
+    pub projects: Vec<String>,
 
     /// Regex pattern used to detect ADO work-item references in commit messages.
     /// Default: `"(?i)\\bAB#(\\d+)\\b"` — case-insensitive with word boundaries,
@@ -88,7 +103,8 @@ impl AzureDevOpsConfig {
     /// - `organization_url` is an on-premises / TFS URL (only
     ///   `dev.azure.com` and `*.visualstudio.com` are accepted in Phase 1)
     /// - `pat` is empty or whitespace-only
-    /// - `project` is empty
+    /// - both `project` and `projects` are empty (at least one project must be
+    ///   configured)
     pub fn validate(&self) -> Result<(), TgaError> {
         if self.organization_url.trim().is_empty() {
             return Err(TgaError::ConfigError(
@@ -108,12 +124,36 @@ impl AzureDevOpsConfig {
                 "pm.azure_devops.pat must not be empty (Phase 1 uses PAT authentication)".into(),
             ));
         }
-        if self.project.trim().is_empty() {
+        if self.projects().is_empty() {
             return Err(TgaError::ConfigError(
-                "pm.azure_devops.project must not be empty".into(),
+                "pm.azure_devops.project (or .projects) must not be empty".into(),
             ));
         }
         Ok(())
+    }
+
+    /// Return the deduplicated, order-preserving union of `project` and
+    /// `projects`.
+    ///
+    /// Order: the single `project` (if any, and non-blank) comes first,
+    /// followed by entries from `projects` in declaration order. Blank /
+    /// whitespace-only entries are dropped. Used by PR fetching to try each
+    /// project in turn until a 200 hit (issue #91).
+    pub fn projects(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        if let Some(p) = self.project.as_deref() {
+            let t = p.trim();
+            if !t.is_empty() {
+                out.push(t);
+            }
+        }
+        for p in &self.projects {
+            let t = p.trim();
+            if !t.is_empty() && !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        out
     }
 }
 
@@ -134,7 +174,12 @@ mod tests {
         AzureDevOpsConfig {
             organization_url: url.to_string(),
             pat: pat.to_string(),
-            project: project.to_string(),
+            project: if project.is_empty() {
+                None
+            } else {
+                Some(project.to_string())
+            },
+            projects: vec![],
             ticket_regex: default_ticket_regex(),
             team_keys: vec![],
             fetch_on_reference: true,
@@ -217,11 +262,122 @@ team_keys: ["ENG", "PLATFORM"]
             serde_yaml::from_str(yaml).expect("should deserialize cleanly");
         assert_eq!(parsed.organization_url, "https://dev.azure.com/myorg");
         assert_eq!(parsed.pat, "secret-pat");
-        assert_eq!(parsed.project, "MyProject");
+        assert_eq!(parsed.project.as_deref(), Some("MyProject"));
         assert_eq!(parsed.team_keys, vec!["ENG", "PLATFORM"]);
         // Defaults applied.
         assert_eq!(parsed.ticket_regex, r"(?i)\bAB#(\d+)\b");
         assert!(parsed.fetch_on_reference);
+    }
+
+    // ----- Issue #91: multi-project tests -----
+
+    #[test]
+    fn projects_back_compat_single_project_field() {
+        // YAML using only the legacy `project:` field must produce a
+        // single-entry `projects()` list (back-compat with pre-#91 schema).
+        let yaml = r#"
+organization_url: "https://dev.azure.com/myorg"
+pat: "secret-pat"
+project: "BottomLineSystems"
+"#;
+        let parsed: AzureDevOpsConfig =
+            serde_yaml::from_str(yaml).expect("should deserialize cleanly");
+        assert_eq!(parsed.projects(), vec!["BottomLineSystems"]);
+        parsed.validate().expect("single project should validate");
+    }
+
+    #[test]
+    fn projects_new_list_form() {
+        // YAML using only the new `projects:` list returns entries in order.
+        let yaml = r#"
+organization_url: "https://dev.azure.com/myorg"
+pat: "secret-pat"
+projects: ["A", "B"]
+"#;
+        let parsed: AzureDevOpsConfig =
+            serde_yaml::from_str(yaml).expect("should deserialize cleanly");
+        assert_eq!(parsed.projects(), vec!["A", "B"]);
+        parsed.validate().expect("projects list should validate");
+    }
+
+    #[test]
+    fn projects_both_fields_set_single_first_then_list() {
+        // When both `project` and `projects` are set, the single value comes
+        // first and the list follows. Result is deduped while preserving order.
+        let yaml = r#"
+organization_url: "https://dev.azure.com/myorg"
+pat: "secret-pat"
+project: "A"
+projects: ["B", "C"]
+"#;
+        let parsed: AzureDevOpsConfig =
+            serde_yaml::from_str(yaml).expect("should deserialize cleanly");
+        assert_eq!(parsed.projects(), vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn projects_dedup_across_single_and_list() {
+        // A name appearing in both `project` and `projects` must only appear
+        // once in the output, in its first position.
+        let yaml = r#"
+organization_url: "https://dev.azure.com/myorg"
+pat: "secret-pat"
+project: "A"
+projects: ["A", "B"]
+"#;
+        let parsed: AzureDevOpsConfig =
+            serde_yaml::from_str(yaml).expect("should deserialize cleanly");
+        assert_eq!(parsed.projects(), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn projects_filters_blank_strings() {
+        // Empty / whitespace-only entries are dropped from both fields.
+        let yaml = r#"
+organization_url: "https://dev.azure.com/myorg"
+pat: "secret-pat"
+project: ""
+projects: ["", "B"]
+"#;
+        let parsed: AzureDevOpsConfig =
+            serde_yaml::from_str(yaml).expect("should deserialize cleanly");
+        assert_eq!(parsed.projects(), vec!["B"]);
+    }
+
+    #[test]
+    fn projects_both_empty_fails_validate() {
+        // No project and empty projects list → validate() errors.
+        let c = AzureDevOpsConfig {
+            organization_url: "https://dev.azure.com/myorg".to_string(),
+            pat: "secret".to_string(),
+            project: None,
+            projects: vec![],
+            ticket_regex: default_ticket_regex(),
+            team_keys: vec![],
+            fetch_on_reference: true,
+            fetch_prs: false,
+        };
+        let err = c
+            .validate()
+            .expect_err("empty project + empty projects must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("project"),
+            "error should mention project: {msg}"
+        );
+    }
+
+    #[test]
+    fn projects_order_preserved() {
+        // Declaration order is preserved (no alphabetical sort).
+        let yaml = r#"
+organization_url: "https://dev.azure.com/myorg"
+pat: "secret-pat"
+projects: ["Z", "A", "M"]
+"#;
+        let parsed: AzureDevOpsConfig =
+            serde_yaml::from_str(yaml).expect("should deserialize cleanly");
+        assert_eq!(parsed.projects(), vec!["Z", "A", "M"]);
     }
 
     #[test]

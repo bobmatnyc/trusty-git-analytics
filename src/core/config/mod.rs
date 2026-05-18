@@ -762,7 +762,8 @@ mod tests {
         AzureDevOpsConfig {
             organization_url: "https://dev.azure.com/myorg".into(),
             pat: "secret".into(),
-            project: "MyProject".into(),
+            project: Some("MyProject".into()),
+            projects: vec![],
             ticket_regex: pat.into(),
             team_keys: vec![],
             fetch_on_reference: true,
