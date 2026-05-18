@@ -67,6 +67,13 @@ pub struct AdoPullRequest {
     pub status: String,
     /// Reviewer list (may be empty).
     pub reviewers: Vec<AdoPrReviewer>,
+    /// Merge commit SHA from `lastMergeCommit.commitId`. `None` for PRs that
+    /// have never been merged (active/abandoned, or completed via squash
+    /// where ADO has not populated the field). When present, this is the
+    /// commit that appears on the target branch and matches the SHA in the
+    /// `commits` table — enabling the same `pull_requests.commit_shas` →
+    /// `commits.sha` join the GitHub provider exposes.
+    pub merge_commit_sha: Option<String>,
 }
 
 /// A single reviewer entry attached to an [`AdoPullRequest`].
@@ -175,6 +182,17 @@ pub fn upsert_pr(conn: &Connection, pr: &AdoPullRequest, repository: &str) -> Co
         _ => "open",
     };
 
+    // Match the shape the GitHub fetcher writes (see
+    // `src/collect/github/client.rs::collect_pull_requests`): a JSON array
+    // containing the merge commit SHA, or `[]` when none is available.
+    // Issue #92: this used to be hardcoded to `"[]"`, breaking the
+    // `pull_requests.commit_shas` → `commits.sha` join that downstream
+    // reports rely on.
+    let commit_shas = match &pr.merge_commit_sha {
+        Some(sha) => serde_json::to_string(&[sha.as_str()])?,
+        None => "[]".to_string(),
+    };
+
     conn.execute(
         "INSERT OR REPLACE INTO pull_requests \
          (provider, repository, pr_number, title, author, state, created_at, merged_at, commit_shas) \
@@ -188,7 +206,7 @@ pub fn upsert_pr(conn: &Connection, pr: &AdoPullRequest, repository: &str) -> Co
             state,
             pr.created_at.to_rfc3339(),
             pr.closed_at.map(|t| t.to_rfc3339()),
-            "[]",
+            commit_shas,
         ],
     )?;
 
@@ -264,6 +282,15 @@ struct PrRaw {
     target_ref_name: String,
     #[serde(default)]
     reviewers: Vec<ReviewerRaw>,
+    #[serde(default)]
+    last_merge_commit: Option<CommitRefRaw>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CommitRefRaw {
+    #[serde(default)]
+    commit_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -312,6 +339,23 @@ impl From<PrRaw> for AdoPullRequest {
                 }
             })
             .collect();
+        // Pull the merge commit SHA from `lastMergeCommit.commitId` only
+        // for *completed* PRs. ADO populates `lastMergeCommit` even for
+        // active PRs — it's the most recent merge attempt, which for
+        // unmerged PRs is a virtual preview merge on `refs/pull/N/merge`,
+        // not a commit that ever landed on the target branch. Writing
+        // that SHA into `commit_shas` would produce non-joinable rows
+        // against the `commits` table (issue #92 review feedback). For
+        // GitHub parity we only emit a SHA once the PR has actually
+        // landed (status == "completed"). Empty strings are also treated
+        // as missing — some ADO previews return `lastMergeCommit: {}`.
+        let merge_commit_sha = if raw.status.eq_ignore_ascii_case("completed") {
+            raw.last_merge_commit
+                .and_then(|c| c.commit_id)
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
         AdoPullRequest {
             pr_number: raw.pull_request_id,
             title: raw.title,
@@ -323,6 +367,7 @@ impl From<PrRaw> for AdoPullRequest {
             target_branch: raw.target_ref_name,
             status: raw.status,
             reviewers,
+            merge_commit_sha,
         }
     }
 }
@@ -516,6 +561,7 @@ mod tests {
                 is_required: true,
                 is_container: false,
             }],
+            merge_commit_sha: Some("deadbeefcafef00d1234567890abcdef12345678".into()),
         }
     }
 
@@ -659,6 +705,53 @@ mod tests {
     }
 
     #[test]
+    fn upsert_pr_writes_commit_shas_when_merge_sha_present() {
+        // Regression test for issue #92: ADO PRs with a known
+        // `lastMergeCommit.commitId` must be persisted with a
+        // single-element JSON array in `commit_shas`, matching the
+        // GitHub fetcher's shape so downstream PR↔commit joins work.
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.connection();
+        let pr = sample_pr();
+        upsert_pr(conn, &pr, "MyProject").expect("upsert");
+
+        let stored: String = conn
+            .query_row(
+                "SELECT commit_shas FROM pull_requests \
+                 WHERE provider = 'azdo' AND repository = 'MyProject' AND pr_number = ?1",
+                params![pr.pr_number],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(
+            stored, r#"["deadbeefcafef00d1234567890abcdef12345678"]"#,
+            "merge commit SHA must be persisted as a JSON array"
+        );
+    }
+
+    #[test]
+    fn upsert_pr_writes_empty_commit_shas_when_no_merge_sha() {
+        // PRs without a merge commit (active, abandoned, or pre-merge
+        // squash) must still upsert cleanly and store an empty JSON array
+        // — the same fallback the GitHub provider uses.
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.connection();
+        let mut pr = sample_pr();
+        pr.merge_commit_sha = None;
+        upsert_pr(conn, &pr, "MyProject").expect("upsert");
+
+        let stored: String = conn
+            .query_row(
+                "SELECT commit_shas FROM pull_requests \
+                 WHERE provider = 'azdo' AND repository = 'MyProject' AND pr_number = ?1",
+                params![pr.pr_number],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(stored, "[]");
+    }
+
+    #[test]
     fn pr_raw_deserializes_full_payload() {
         let json = r#"{
             "pullRequestId": 12345,
@@ -681,7 +774,11 @@ mod tests {
                     "isRequired": true,
                     "isContainer": false
                 }
-            ]
+            ],
+            "lastMergeCommit": {
+                "commitId": "deadbeefcafef00d1234567890abcdef12345678",
+                "url": "https://dev.azure.com/.../commits/deadbeef..."
+            }
         }"#;
         let raw: PrRaw = serde_json::from_str(json).expect("parse");
         let pr: AdoPullRequest = raw.into();
@@ -693,6 +790,84 @@ mod tests {
         assert_eq!(pr.reviewers.len(), 1);
         assert_eq!(pr.reviewers[0].vote, 10);
         assert!(pr.reviewers[0].is_required);
+        assert_eq!(
+            pr.merge_commit_sha.as_deref(),
+            Some("deadbeefcafef00d1234567890abcdef12345678"),
+            "lastMergeCommit.commitId should be threaded through"
+        );
+    }
+
+    #[test]
+    fn pr_raw_treats_empty_last_merge_commit_as_none() {
+        // ADO's preview API sometimes returns `lastMergeCommit: {}` for
+        // PRs that haven't been merged. Either an absent object or an
+        // empty `commitId` should map to `None` so callers don't try to
+        // join against an empty SHA. Use `status: completed` so the
+        // status gate below doesn't mask the empty-payload logic we're
+        // exercising here.
+        let json = r#"{
+            "pullRequestId": 7,
+            "creationDate": "2024-01-15T10:30:00Z",
+            "status": "completed",
+            "lastMergeCommit": {}
+        }"#;
+        let raw: PrRaw = serde_json::from_str(json).expect("parse");
+        let pr: AdoPullRequest = raw.into();
+        assert!(pr.merge_commit_sha.is_none());
+
+        let json = r#"{
+            "pullRequestId": 8,
+            "creationDate": "2024-01-15T10:30:00Z",
+            "status": "completed",
+            "lastMergeCommit": {"commitId": ""}
+        }"#;
+        let raw: PrRaw = serde_json::from_str(json).expect("parse");
+        let pr: AdoPullRequest = raw.into();
+        assert!(pr.merge_commit_sha.is_none());
+    }
+
+    #[test]
+    fn pr_raw_drops_merge_sha_for_non_completed_status() {
+        // Issue #92 design review: ADO populates `lastMergeCommit` even
+        // for *active* PRs — it's a preview merge that never landed on
+        // the target branch, so writing it to `commit_shas` would create
+        // a non-joinable row against the `commits` table. Only completed
+        // PRs should expose a merge SHA, matching GitHub semantics.
+        for status in ["active", "abandoned", "notSet", "", "ACTIVE"] {
+            let json = format!(
+                r#"{{
+                    "pullRequestId": 42,
+                    "creationDate": "2024-01-15T10:30:00Z",
+                    "status": "{status}",
+                    "lastMergeCommit": {{"commitId": "feedfacecafef00d1234567890abcdef12345678"}}
+                }}"#
+            );
+            let raw: PrRaw = serde_json::from_str(&json).expect("parse");
+            let pr: AdoPullRequest = raw.into();
+            assert!(
+                pr.merge_commit_sha.is_none(),
+                "non-completed status {status:?} must not expose a merge SHA"
+            );
+        }
+
+        // Sanity check: completed PRs still get the SHA (case-insensitive).
+        for status in ["completed", "Completed", "COMPLETED"] {
+            let json = format!(
+                r#"{{
+                    "pullRequestId": 43,
+                    "creationDate": "2024-01-15T10:30:00Z",
+                    "status": "{status}",
+                    "lastMergeCommit": {{"commitId": "feedfacecafef00d1234567890abcdef12345678"}}
+                }}"#
+            );
+            let raw: PrRaw = serde_json::from_str(&json).expect("parse");
+            let pr: AdoPullRequest = raw.into();
+            assert_eq!(
+                pr.merge_commit_sha.as_deref(),
+                Some("feedfacecafef00d1234567890abcdef12345678"),
+                "completed status {status:?} should pass the gate (case-insensitive)",
+            );
+        }
     }
 
     #[test]
