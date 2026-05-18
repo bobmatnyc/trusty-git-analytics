@@ -41,8 +41,10 @@ pub struct AzureDevOpsConfig {
     pub project: String,
 
     /// Regex pattern used to detect ADO work-item references in commit messages.
-    /// Default: `"AB#(\\d+)"`. Bare `#N` is intentionally excluded — it collides
-    /// with GitHub PR/issue numbers.
+    /// Default: `"(?i)\\bAB#(\\d+)\\b"` — case-insensitive with word boundaries,
+    /// matching the regex previously hardcoded in `extract_work_item_refs`
+    /// before #90 made it configurable. Bare `#N` is intentionally excluded —
+    /// it collides with GitHub PR/issue numbers.
     #[serde(default = "default_ticket_regex")]
     pub ticket_regex: String,
 
@@ -66,7 +68,10 @@ pub struct AzureDevOpsConfig {
 }
 
 fn default_ticket_regex() -> String {
-    "AB#(\\d+)".to_string()
+    // Preserves byte-for-byte parity with the regex previously hardcoded
+    // inside `extract_work_item_refs` (case-insensitive, word-bounded).
+    // Changing this changes default-config user behaviour — see #90.
+    r"(?i)\bAB#(\d+)\b".to_string()
 }
 
 fn default_true() -> bool {
@@ -181,7 +186,23 @@ mod tests {
 
     #[test]
     fn default_ticket_regex_is_ab_hash() {
-        assert_eq!(default_ticket_regex(), r"AB#(\d+)");
+        // Must match the regex that was hardcoded in
+        // `extract_work_item_refs` before #90 — case-insensitive with
+        // word boundaries — so default-config users see identical behaviour
+        // after the regex became configurable.
+        assert_eq!(default_ticket_regex(), r"(?i)\bAB#(\d+)\b");
+    }
+
+    #[test]
+    fn default_ticket_regex_matches_lowercase_ab() {
+        // Regression guard: previously the hardcoded `(?i)` flag let
+        // `ab#42` / `Ab#42` resolve. Dropping the flag in the default would
+        // silently break ADO orgs that rely on case-insensitive matching.
+        let re = regex::Regex::new(&default_ticket_regex()).expect("default compiles");
+        for sample in ["AB#42", "ab#42", "Ab#42", "aB#42"] {
+            assert!(re.is_match(sample), "default regex should match {sample:?}");
+        }
+        assert!(!re.is_match("xAB#42y"), "word boundaries must still apply");
     }
 
     #[test]
@@ -199,7 +220,7 @@ team_keys: ["ENG", "PLATFORM"]
         assert_eq!(parsed.project, "MyProject");
         assert_eq!(parsed.team_keys, vec!["ENG", "PLATFORM"]);
         // Defaults applied.
-        assert_eq!(parsed.ticket_regex, r"AB#(\d+)");
+        assert_eq!(parsed.ticket_regex, r"(?i)\bAB#(\d+)\b");
         assert!(parsed.fetch_on_reference);
     }
 

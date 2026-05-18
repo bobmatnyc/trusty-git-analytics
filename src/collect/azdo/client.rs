@@ -1436,15 +1436,17 @@ fn extract_commit_shas_from_relations(relations: &[WorkItemRelationRaw]) -> Vec<
     out
 }
 
-/// Extract Azure DevOps work-item IDs from arbitrary text.
+/// Extract Azure DevOps work-item IDs from arbitrary text using a
+/// caller-provided regex.
 ///
-/// Matches `AB#\d+` case-insensitively (so `ab#42`, `Ab#42`, `AB#42` all
-/// resolve to `42`). IDs are deduplicated in first-seen order.
-pub fn extract_work_item_refs(text: &str) -> Vec<u32> {
+/// The first capture group of `re` is treated as the numeric work-item ID.
+/// The default `AB#(\d+)` pattern lives on
+/// [`AzureDevOpsConfig::ticket_regex`](crate::core::config::AzureDevOpsConfig);
+/// callers are expected to compile it once and reuse the result. IDs are
+/// deduplicated in first-seen order. Captures whose first group does not
+/// parse as `u32` are silently skipped.
+pub fn extract_work_item_refs(re: &regex::Regex, text: &str) -> Vec<u32> {
     use std::collections::HashSet;
-    use std::sync::OnceLock;
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| regex::Regex::new(r"(?i)\bAB#(\d+)\b").expect("AB# regex compiles"));
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for cap in re.captures_iter(text) {
@@ -1485,20 +1487,23 @@ pub fn feed_azdo_users(
     }
 }
 
-/// Scan a list of commit messages (or other text) for `AB#N` references and
+/// Scan a list of commit messages (or other text) for work-item references and
 /// fetch the referenced work items in a single batch call (Phase 6).
 ///
+/// `re` is the caller-compiled work-item-reference pattern (typically
+/// [`AzureDevOpsConfig::ticket_regex`](crate::core::config::AzureDevOpsConfig)).
 /// IDs are deduplicated across all messages. `project` is currently unused —
 /// the batch endpoint is organisation-scoped — but is retained in the API for
 /// future per-project filtering and for symmetry with the other methods.
 ///
-/// Returns an empty vector if no `AB#N` references are found.
+/// Returns an empty vector if no references are found.
 ///
 /// # Errors
 ///
 /// Same set as [`AzureDevOpsClient::get_work_items`].
 pub async fn fetch_referenced_work_items(
     client: &AzureDevOpsClient,
+    re: &regex::Regex,
     messages: &[&str],
     _project: &str,
 ) -> Result<Vec<AzdoWorkItem>, AzdoError> {
@@ -1506,7 +1511,7 @@ pub async fn fetch_referenced_work_items(
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
     for msg in messages {
-        for id in extract_work_item_refs(msg) {
+        for id in extract_work_item_refs(re, msg) {
             if seen.insert(id) {
                 ids.push(id);
             }
@@ -2055,24 +2060,42 @@ mod tests {
         assert!(matches!(err, AzdoError::Forbidden));
     }
 
-    // ----- Phase 6: AB# reference detection -----
+    // ----- Phase 6: work-item reference detection -----
+
+    fn default_ab_regex() -> regex::Regex {
+        regex::Regex::new(r"(?i)\bAB#(\d+)\b").expect("default AB# regex compiles")
+    }
 
     #[test]
     fn extract_work_item_refs_finds_ids() {
-        let out = extract_work_item_refs("Fixes AB#42 and AB#100 and AB#42 again");
+        let re = default_ab_regex();
+        let out = extract_work_item_refs(&re, "Fixes AB#42 and AB#100 and AB#42 again");
         assert_eq!(out, vec![42, 100]);
     }
 
     #[test]
     fn extract_work_item_refs_is_case_insensitive() {
-        let out = extract_work_item_refs("see ab#7 and Ab#8 and AB#9");
+        let re = default_ab_regex();
+        let out = extract_work_item_refs(&re, "see ab#7 and Ab#8 and AB#9");
         assert_eq!(out, vec![7, 8, 9]);
     }
 
     #[test]
     fn extract_work_item_refs_returns_empty_when_no_match() {
-        let out = extract_work_item_refs("nothing to see here #42 PROJ-1");
+        let re = default_ab_regex();
+        let out = extract_work_item_refs(&re, "nothing to see here #42 PROJ-1");
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn extract_work_item_refs_honours_custom_regex() {
+        // Regression test for #90: orgs that don't use the AB# convention
+        // configure a different ticket_regex (e.g. bare `#NNNN` IDs) and
+        // expect the extractor to honour it instead of the AB# default.
+        let re = regex::Regex::new(r"\B#(\d{4,8})\b").expect("custom regex compiles");
+        let msg = "Merged PR 12: fix login (#12345) and #67890 follow-up";
+        let out = extract_work_item_refs(&re, msg);
+        assert_eq!(out, vec![12_345, 67_890]);
     }
 
     #[tokio::test]
@@ -2110,8 +2133,9 @@ mod tests {
             .await;
 
         let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        let re = default_ab_regex();
         let msgs = ["fix AB#7", "AB#7 again and AB#9"];
-        let items = fetch_referenced_work_items(&client, &msgs, "MyProject")
+        let items = fetch_referenced_work_items(&client, &re, &msgs, "MyProject")
             .await
             .expect("batch ok");
         assert_eq!(items.len(), 2);
@@ -2121,10 +2145,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_referenced_work_items_uses_custom_regex_end_to_end() {
+        // Regression test for #90: an ADO org configured with a bare-`#NNNN`
+        // ticket_regex must end up POSTing those IDs to workitemsbatch.
+        // Pre-fix, the hardcoded `AB#(\d+)` would extract zero IDs from
+        // messages like `Merged PR 12: fix (#12345)` and the batch call
+        // would never happen. The mock matches on the request body so this
+        // test fails (mock never fires) if the wrong IDs are extracted.
+        use wiremock::matchers::body_partial_json;
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "count": 2,
+            "value": [
+                {
+                    "id": 12345,
+                    "fields": {
+                        "System.Id": 12345,
+                        "System.Title": "Issue twelve-thousand",
+                        "System.State": "Active",
+                        "System.WorkItemType": "Task",
+                        "System.TeamProject": "MyProject"
+                    }
+                },
+                {
+                    "id": 67890,
+                    "fields": {
+                        "System.Id": 67890,
+                        "System.Title": "Follow-up",
+                        "System.State": "Closed",
+                        "System.WorkItemType": "Bug",
+                        "System.TeamProject": "MyProject"
+                    }
+                }
+            ]
+        });
+        Mock::given(method("POST"))
+            .and(path("/_apis/wit/workitemsbatch"))
+            .and(body_partial_json(
+                serde_json::json!({"ids": [12345, 67890]}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = AzureDevOpsClient::new(sample_config_for(&server.uri()));
+        // The actual ticket_regex from the #90 repro config.
+        let re = regex::Regex::new(r"\B#(\d{4,8})\b").expect("repro regex compiles");
+        let msgs = [
+            "Merged PR 12: fix login (#12345)",
+            "follow-up to #67890 thanks",
+        ];
+        let items = fetch_referenced_work_items(&client, &re, &msgs, "MyProject")
+            .await
+            .expect("batch ok with custom regex");
+        let ids: Vec<u32> = items.iter().map(|w| w.id).collect();
+        assert!(ids.contains(&12_345), "expected 12345 to be fetched");
+        assert!(ids.contains(&67_890), "expected 67890 to be fetched");
+        // `PR 12` is only 2 digits; the {4,8} length bound must keep it out.
+        assert!(!ids.contains(&12), "PR 12 must not be extracted");
+    }
+
+    #[tokio::test]
     async fn fetch_referenced_work_items_empty_when_no_refs() {
         let client = AzureDevOpsClient::new(sample_config());
+        let re = default_ab_regex();
         let msgs = ["nothing here", "PROJ-1 only"];
-        let items = fetch_referenced_work_items(&client, &msgs, "MyProject")
+        let items = fetch_referenced_work_items(&client, &re, &msgs, "MyProject")
             .await
             .expect("no HTTP should be triggered");
         assert!(items.is_empty());
