@@ -180,6 +180,18 @@ impl ClassificationPipeline {
         //    back, so the borrow checker doesn't see mutable refs into
         //    `results` while futures are in flight.
         if engine.config().use_llm {
+            // Single startup-time diagnostic when the LLM tier is on but no
+            // credential is reachable. Without this, the fallback would emit
+            // a warn-per-commit ("did not improve confidence") that obscures
+            // the real misconfiguration.
+            if matches!(engine.llm_has_api_key(), Some(false)) {
+                warn!(
+                    "LLM tier enabled but no API key resolved \
+                     (OPENAI_API_KEY / OPENROUTER_API_KEY unset); \
+                     fallback will short-circuit silently"
+                );
+            }
+
             let fallback_threshold = self
                 .config
                 .classification
@@ -218,8 +230,16 @@ impl ClassificationPipeline {
             let pb_ref = &pb;
             let new_results: Vec<(usize, ClassificationResult, f64)> =
                 futures::stream::iter(pending.into_iter().map(
-                    |(idx, message, is_merge, original_conf)| async move {
-                        let r = engine_ref.classify(&message, is_merge).await;
+                    |(idx, message, _is_merge, original_conf)| async move {
+                        // Direct LLM dispatch — calling `engine_ref.classify`
+                        // here would re-run `classify_sync` first and short-
+                        // circuit on the same low-confidence tier-1-3 verdict
+                        // that triggered the fallback, so the LLM tier would
+                        // never be reached (issue #99).
+                        let r = engine_ref
+                            .llm_classify_only(&message)
+                            .await
+                            .unwrap_or_else(ClassificationResult::unclassified);
                         pb_ref.inc(1);
                         (idx, r, original_conf)
                     },

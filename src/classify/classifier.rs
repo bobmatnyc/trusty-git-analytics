@@ -248,16 +248,35 @@ impl ClassificationEngine {
             return r;
         }
 
-        if let Some(llm) = &self.llm {
-            if let Some(mut r) = llm.classify(message).await {
-                r.top_level = self.taxonomy.resolve(&r.category);
-                return r;
-            }
+        if let Some(r) = self.llm_classify_only(message).await {
+            return r;
         }
 
         let mut fallback = ClassificationResult::unclassified();
         fallback.ticket_id = RegexMatcher::extract_ticket_id(message);
         fallback
+    }
+
+    /// Invoke the LLM tier directly, bypassing tiers 0–3.5.
+    ///
+    /// Returns `None` when the LLM tier is not configured, no API key is
+    /// reachable, or the underlying request fails. The pipeline-level LLM
+    /// fallback uses this to route low-confidence catch-all verdicts to the
+    /// LLM without re-running `classify_sync` (which would short-circuit on
+    /// the same low-confidence verdict that triggered the fallback).
+    pub async fn llm_classify_only(&self, message: &str) -> Option<ClassificationResult> {
+        let llm = self.llm.as_ref()?;
+        let mut r = llm.classify(message).await?;
+        r.top_level = self.taxonomy.resolve(&r.category);
+        Some(r)
+    }
+
+    /// `Some(true)` when the LLM tier is enabled and has a reachable API
+    /// key, `Some(false)` when it is enabled but unconfigured, `None` when
+    /// the tier is disabled entirely. Callers can warn at startup when the
+    /// middle case occurs to avoid silent misconfiguration.
+    pub fn llm_has_api_key(&self) -> Option<bool> {
+        self.llm.as_ref().map(LlmClassifier::has_api_key)
     }
 
     /// Classify a batch of `(message, is_merge)` pairs in parallel using
