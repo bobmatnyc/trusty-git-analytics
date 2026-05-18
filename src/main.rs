@@ -177,6 +177,11 @@ pub struct CollectArgs {
     /// Perform all steps except writing to the database (log intent only).
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
+    /// Re-fetch ADO pull requests even if they are already in the database.
+    /// Use this to backfill rows persisted before v1.0.9 that have
+    /// `commit_shas = '[]'`.
+    #[arg(long, default_value_t = false)]
+    pub force_refresh_prs: bool,
     /// Run configuration validation and exit (0 on success, 1 on errors).
     #[arg(long, default_value_t = false)]
     pub validate_only: bool,

@@ -44,6 +44,7 @@ pub struct CollectionPipeline {
     config: Config,
     force: bool,
     no_fetch: bool,
+    force_refresh_prs: bool,
 }
 
 impl CollectionPipeline {
@@ -53,6 +54,7 @@ impl CollectionPipeline {
             config,
             force: false,
             no_fetch: false,
+            force_refresh_prs: false,
         }
     }
 
@@ -70,6 +72,18 @@ impl CollectionPipeline {
     /// when the caller has already fetched.
     pub fn with_no_fetch(mut self, no_fetch: bool) -> Self {
         self.no_fetch = no_fetch;
+        self
+    }
+
+    /// If `true`, re-fetch Azure DevOps pull requests even when their IDs are
+    /// already present in `pull_requests`.
+    ///
+    /// This bypasses the [`crate::collect::azdo::get_existing_pr_numbers`]
+    /// deduplication cache for the ADO provider, so stale rows persisted
+    /// before v1.0.9 (with `commit_shas = '[]'`) are re-fetched and
+    /// re-upserted with the correct merge SHA. Default is `false`.
+    pub fn with_force_refresh_prs(mut self, force_refresh_prs: bool) -> Self {
+        self.force_refresh_prs = force_refresh_prs;
         self
     }
 
@@ -671,7 +685,9 @@ impl CollectionPipeline {
     /// scoped by the `provider` column.
     /// What: pulls commit messages, extracts PR IDs, fetches each PR serially
     /// from `GET {org}/{project}/_apis/git/pullrequests/{id}`, and upserts
-    /// rows into `pull_requests` + `pr_reviewers`.
+    /// rows into `pull_requests` + `pr_reviewers`. When `force_refresh_prs`
+    /// is set, the PR-ID deduplication cache is bypassed so stale rows are
+    /// re-fetched.
     /// Test: PR-ID extraction, DB CRUD, and config wiring are covered in
     /// `azdo::pr_fetcher::tests`. The full path is exercised by integration
     /// tests gated on a live ADO instance.
@@ -707,7 +723,11 @@ impl CollectionPipeline {
         };
         let conn = db.connection();
         let stored = fetcher
-            .run(conn, messages.iter().map(String::as_str))
+            .run_with_options(
+                conn,
+                messages.iter().map(String::as_str),
+                self.force_refresh_prs,
+            )
             .await?;
         Ok(stored)
     }

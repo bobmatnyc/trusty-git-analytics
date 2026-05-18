@@ -476,6 +476,10 @@ impl AdoPrFetcher {
     /// already persisted under provider `'azdo'`, fetch the rest, and write
     /// the PRs and their reviewers to the database.
     ///
+    /// Equivalent to [`AdoPrFetcher::run_with_options`] with
+    /// `force_refresh = false`. Retained for callers that do not need to
+    /// bypass the deduplication cache.
+    ///
     /// Returns the number of PR rows newly written / refreshed.
     ///
     /// # Errors
@@ -487,17 +491,55 @@ impl AdoPrFetcher {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        self.run_with_options(conn, commit_messages, false).await
+    }
+
+    /// Top-level driver with an explicit cache-bypass option.
+    ///
+    /// Extracts PR IDs from `commit_messages`, optionally skips IDs already
+    /// persisted under provider `'azdo'`, fetches the rest, and writes the
+    /// PRs and their reviewers to the database.
+    ///
+    /// When `force_refresh` is `true`, the [`get_existing_pr_numbers`]
+    /// deduplication step is bypassed so every referenced PR is re-fetched
+    /// and re-upserted. This backfills rows persisted before v1.0.9 that
+    /// still store `commit_shas` as `'[]'`; [`upsert_pr`]'s
+    /// `INSERT OR REPLACE` keeps the operation idempotent.
+    ///
+    /// Returns the number of PR rows newly written / refreshed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TgaError::DbError`] for SQL failures. HTTP failures on
+    /// individual PRs are logged and do not abort the whole run.
+    pub async fn run_with_options<I, S>(
+        &self,
+        conn: &Connection,
+        commit_messages: I,
+        force_refresh: bool,
+    ) -> CoreResult<usize>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let ids = extract_pr_ids(commit_messages);
         if ids.is_empty() {
             info!("No 'Merged PR N:' references found; skipping ADO PR fetch");
             return Ok(0);
         }
         let project = self.config.project.clone();
-        let existing = get_existing_pr_numbers(conn, "azdo", &project)?;
-        let to_fetch: Vec<i64> = ids
-            .into_iter()
-            .filter(|id| !existing.contains(id))
-            .collect();
+        let to_fetch: Vec<i64> = if force_refresh {
+            info!(
+                count = ids.len(),
+                "force-refresh-prs: bypassing PR-ID dedup cache"
+            );
+            ids
+        } else {
+            let existing = get_existing_pr_numbers(conn, "azdo", &project)?;
+            ids.into_iter()
+                .filter(|id| !existing.contains(id))
+                .collect()
+        };
         if to_fetch.is_empty() {
             info!("All referenced ADO PRs already cached; skipping fetch");
             return Ok(0);
@@ -908,6 +950,61 @@ project: "MyProject"
         let parsed: AzureDevOpsConfig =
             serde_yaml::from_str(yaml).expect("should deserialize cleanly");
         assert!(!parsed.fetch_prs, "fetch_prs default must be false");
+    }
+
+    /// Mirror of the `to_fetch` selection inside
+    /// [`AdoPrFetcher::run_with_options`]. Exercising the decision in
+    /// isolation lets us verify the `--force-refresh-prs` semantics without
+    /// standing up an HTTP server for `fetch_prs`.
+    fn select_to_fetch(
+        conn: &Connection,
+        project: &str,
+        ids: Vec<i64>,
+        force_refresh: bool,
+    ) -> Vec<i64> {
+        if force_refresh {
+            ids
+        } else {
+            let existing = get_existing_pr_numbers(conn, "azdo", project).expect("query existing");
+            ids.into_iter()
+                .filter(|id| !existing.contains(id))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn force_refresh_false_skips_existing_pr_ids() {
+        // Default behavior: a PR already in `pull_requests` must be excluded
+        // from the fetch set so `tga collect` reruns are cheap.
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.connection();
+        let pr = sample_pr(); // pr_number = 12345
+        upsert_pr(conn, &pr, "MyProject").expect("upsert");
+
+        let to_fetch = select_to_fetch(conn, "MyProject", vec![12345, 999], false);
+        assert_eq!(
+            to_fetch,
+            vec![999],
+            "cached PR 12345 must be skipped when force_refresh is false"
+        );
+    }
+
+    #[test]
+    fn force_refresh_true_re_fetches_existing_pr_ids() {
+        // With --force-refresh-prs, the dedup cache is bypassed: every
+        // referenced PR ID is re-fetched so stale `commit_shas = '[]'` rows
+        // can be backfilled (issue #95).
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.connection();
+        let pr = sample_pr(); // pr_number = 12345
+        upsert_pr(conn, &pr, "MyProject").expect("upsert");
+
+        let to_fetch = select_to_fetch(conn, "MyProject", vec![12345, 999], true);
+        assert_eq!(
+            to_fetch,
+            vec![12345, 999],
+            "force_refresh must NOT skip already-cached PR IDs"
+        );
     }
 
     #[test]
