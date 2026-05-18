@@ -264,10 +264,18 @@ impl ClassificationEngine {
     /// fallback uses this to route low-confidence catch-all verdicts to the
     /// LLM without re-running `classify_sync` (which would short-circuit on
     /// the same low-confidence verdict that triggered the fallback).
+    ///
+    /// Backfills `ticket_id` from the message text — the LLM verdict
+    /// itself does not surface ticket IDs, and without this the pipeline's
+    /// overwrite-guard would otherwise drop a ticket reference carried by
+    /// the original tier-1-3 verdict when the LLM result wins.
     pub async fn llm_classify_only(&self, message: &str) -> Option<ClassificationResult> {
         let llm = self.llm.as_ref()?;
         let mut r = llm.classify(message).await?;
         r.top_level = self.taxonomy.resolve(&r.category);
+        if r.ticket_id.is_none() {
+            r.ticket_id = RegexMatcher::extract_ticket_id(message);
+        }
         Some(r)
     }
 

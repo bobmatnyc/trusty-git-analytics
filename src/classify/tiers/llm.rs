@@ -349,6 +349,39 @@ mod tests {
         assert!(llm.classify("feat: anything").await.is_none());
     }
 
+    /// Regression for the hive-review finding in PR #(issue 99): the raw
+    /// `LlmClassifier` always sets `ticket_id: None`. The engine wrapper
+    /// (`Engine::llm_classify_only`) backfills it via regex extraction.
+    /// This test pins the raw classifier's contract so any future change
+    /// that starts surfacing `ticket_id` from the LLM verdict prompts the
+    /// engine wrapper to be revisited (so we don't double-backfill).
+    #[tokio::test]
+    async fn classify_does_not_set_ticket_id() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "{\"category\": \"bugfix\", \
+                                 \"subcategory\": null, \
+                                 \"confidence\": 0.8}"
+                }
+            }]
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let llm = LlmClassifier::new("gpt-4o-mini", Some("sk-test".to_string()))
+            .with_endpoint(format!("{}/v1/chat/completions", server.uri()));
+        let r = llm
+            .classify("fix: handle null in PROJ-1234 endpoint")
+            .await
+            .expect("LLM verdict");
+        assert_eq!(r.ticket_id, None);
+    }
+
     #[tokio::test]
     async fn classify_dispatches_to_endpoint_when_keyed() {
         // Regression: issue #99 — when the pipeline asks the LLM tier

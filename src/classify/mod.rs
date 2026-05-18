@@ -865,15 +865,42 @@ mod tests {
         assert_eq!(engine.llm_has_api_key(), None);
     }
 
+    /// Panic-safe env-var save/restore (mirrors the pattern in
+    /// `core::config::validator::tests::EnvVarGuard`). Without this, a
+    /// failing assertion between `remove_var` and the restore would leak
+    /// the cleared state to other parallel tests in the same binary.
+    struct EnvVarGuard {
+        name: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn remove(name: &'static str) -> Self {
+            let original = std::env::var(name).ok();
+            // SAFETY: 2024-edition env mutation; cleanup guaranteed by Drop.
+            unsafe { std::env::remove_var(name) };
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `EnvVarGuard::remove`.
+            unsafe {
+                match self.original.as_deref() {
+                    Some(v) => std::env::set_var(self.name, v),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn llm_has_api_key_signals_misconfiguration() {
         // Issue #99 follow-up: when use_llm is on but no env key is set,
         // the engine should expose `Some(false)` so the pipeline can warn
         // at startup instead of silently producing no LLM verdicts.
-        // We isolate from any ambient OPENAI_API_KEY by removing it for
-        // the duration of this test using the explicit openai provider.
-        let saved = std::env::var("OPENAI_API_KEY").ok();
-        std::env::remove_var("OPENAI_API_KEY");
+        let _guard = EnvVarGuard::remove("OPENAI_API_KEY");
 
         let engine = ClassificationEngine::new(
             rules::default_rules(),
@@ -885,10 +912,6 @@ mod tests {
         )
         .expect("engine");
         assert_eq!(engine.llm_has_api_key(), Some(false));
-
-        if let Some(v) = saved {
-            std::env::set_var("OPENAI_API_KEY", v);
-        }
     }
 
     #[tokio::test]
