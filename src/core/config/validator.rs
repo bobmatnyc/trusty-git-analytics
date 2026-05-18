@@ -98,6 +98,16 @@ pub enum ConfigError {
         /// Human-readable description of the conflict.
         message: String,
     },
+
+    /// `pm.azure_devops` failed schema validation (empty projects, non-cloud
+    /// URL, missing PAT). The message is forwarded from
+    /// [`AzureDevOpsConfig::validate`](crate::core::config::AzureDevOpsConfig::validate)
+    /// verbatim so users see the same text as runtime errors.
+    #[error("Invalid Azure DevOps config: {message}")]
+    InvalidAzureDevOpsConfig {
+        /// Forwarded error text from `AzureDevOpsConfig::validate`.
+        message: String,
+    },
 }
 
 /// Runs a battery of validation checks against a [`Config`].
@@ -126,9 +136,29 @@ impl<'a> ConfigValidator<'a> {
         self.check_github_token(&mut errors);
         self.check_bitbucket_config(&mut errors);
         self.check_jira_config(&mut errors);
+        self.check_azure_devops(&mut errors);
         self.check_llm_config(&mut errors);
         self.check_conflicting_flags(&mut errors);
         errors
+    }
+
+    /// Verify `pm.azure_devops` (when present) passes its own schema
+    /// validation.
+    ///
+    /// Why: `Config::validate` already calls `AzureDevOpsConfig::validate`,
+    /// but the CLI preflight only runs `ConfigValidator` — without this
+    /// hook, a config with `fetch_prs: true` and empty `project`/`projects`
+    /// would pass preflight, reach `AdoPrFetcher::fetch_pr`, and silently
+    /// return `Ok(None)` for every PR (follow-up to issue #91).
+    fn check_azure_devops(&self, errors: &mut Vec<ConfigError>) {
+        let Some(ado) = self.config.azure_devops_config() else {
+            return;
+        };
+        if let Err(e) = ado.validate() {
+            errors.push(ConfigError::InvalidAzureDevOpsConfig {
+                message: e.to_string(),
+            });
+        }
     }
 
     /// Verify every configured repository path exists on disk.
@@ -372,8 +402,8 @@ fn is_dir_writable(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::core::config::{
-        BitbucketConfig, ClassificationConfig, GithubConfig, JiraConfig, OutputConfig,
-        RepositoryConfig,
+        AzureDevOpsConfig, BitbucketConfig, ClassificationConfig, GithubConfig, JiraConfig,
+        OutputConfig, PmConfig, RepositoryConfig,
     };
     use std::path::PathBuf;
 
@@ -730,6 +760,35 @@ mod tests {
                 "got {errors:?}"
             );
         });
+    }
+
+    #[test]
+    fn config_validator_rejects_ado_with_no_projects() {
+        // Regression for the preflight gap surfaced after issue #91:
+        // ConfigValidator must reject a `pm.azure_devops` block whose
+        // `project` is None and `projects` is empty. Otherwise the CLI's
+        // `--validate-only` would pass, the collection would proceed, and
+        // every ADO PR fetch would silently return Ok(None).
+        let mut cfg = empty_config();
+        cfg.pm = Some(PmConfig {
+            azure_devops: Some(AzureDevOpsConfig {
+                organization_url: "https://dev.azure.com/myorg".into(),
+                pat: "secret-pat".into(),
+                project: None,
+                projects: vec![],
+                ticket_regex: r"AB#(\d+)".into(),
+                team_keys: vec![],
+                fetch_on_reference: true,
+                fetch_prs: true,
+            }),
+        });
+        let errors = ConfigValidator::new(&cfg).validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidAzureDevOpsConfig { .. })),
+            "expected InvalidAzureDevOpsConfig, got: {errors:?}"
+        );
     }
 
     #[test]

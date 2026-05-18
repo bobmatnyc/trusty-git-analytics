@@ -76,6 +76,15 @@ pub enum AzdoError {
     /// Response body could not be parsed as the expected JSON shape.
     #[error("response parse error: {0}")]
     Parse(String),
+
+    /// Azure DevOps configuration failed validation at fetcher
+    /// construction time: both `project` and `projects` are empty/blank.
+    ///
+    /// Returning this from `AdoPrFetcher::new` is the load-bearing check
+    /// that prevents a misconfigured fetcher from silently returning
+    /// `Ok(None)` for every PR (issue #91 regression guard).
+    #[error("invalid Azure DevOps configuration: {0}")]
+    Config(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -1537,7 +1546,8 @@ mod tests {
         AzureDevOpsConfig {
             organization_url: server_url.to_string(),
             pat: "secret-pat".into(),
-            project: "MyProject".into(),
+            project: Some("MyProject".into()),
+            projects: vec![],
             ticket_regex: r"AB#(\d+)".into(),
             team_keys: vec![],
             fetch_on_reference: true,
@@ -1549,7 +1559,8 @@ mod tests {
         AzureDevOpsConfig {
             organization_url: "https://dev.azure.com/myorg".into(),
             pat: "secret-pat".into(),
-            project: "MyProject".into(),
+            project: Some("MyProject".into()),
+            projects: vec![],
             ticket_regex: r"AB#(\d+)".into(),
             team_keys: vec![],
             fetch_on_reference: true,
