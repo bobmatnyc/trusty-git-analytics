@@ -339,14 +339,23 @@ impl From<PrRaw> for AdoPullRequest {
                 }
             })
             .collect();
-        // Pull the merge commit SHA from `lastMergeCommit.commitId` if ADO
-        // populated it. An empty string is treated the same as missing —
-        // some ADO API previews return `lastMergeCommit: {}` for PRs that
-        // haven't been merged yet.
-        let merge_commit_sha = raw
-            .last_merge_commit
-            .and_then(|c| c.commit_id)
-            .filter(|s| !s.is_empty());
+        // Pull the merge commit SHA from `lastMergeCommit.commitId` only
+        // for *completed* PRs. ADO populates `lastMergeCommit` even for
+        // active PRs — it's the most recent merge attempt, which for
+        // unmerged PRs is a virtual preview merge on `refs/pull/N/merge`,
+        // not a commit that ever landed on the target branch. Writing
+        // that SHA into `commit_shas` would produce non-joinable rows
+        // against the `commits` table (issue #92 review feedback). For
+        // GitHub parity we only emit a SHA once the PR has actually
+        // landed (status == "completed"). Empty strings are also treated
+        // as missing — some ADO previews return `lastMergeCommit: {}`.
+        let merge_commit_sha = if raw.status.eq_ignore_ascii_case("completed") {
+            raw.last_merge_commit
+                .and_then(|c| c.commit_id)
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
         AdoPullRequest {
             pr_number: raw.pull_request_id,
             title: raw.title,
@@ -793,10 +802,13 @@ mod tests {
         // ADO's preview API sometimes returns `lastMergeCommit: {}` for
         // PRs that haven't been merged. Either an absent object or an
         // empty `commitId` should map to `None` so callers don't try to
-        // join against an empty SHA.
+        // join against an empty SHA. Use `status: completed` so the
+        // status gate below doesn't mask the empty-payload logic we're
+        // exercising here.
         let json = r#"{
             "pullRequestId": 7,
             "creationDate": "2024-01-15T10:30:00Z",
+            "status": "completed",
             "lastMergeCommit": {}
         }"#;
         let raw: PrRaw = serde_json::from_str(json).expect("parse");
@@ -806,11 +818,56 @@ mod tests {
         let json = r#"{
             "pullRequestId": 8,
             "creationDate": "2024-01-15T10:30:00Z",
+            "status": "completed",
             "lastMergeCommit": {"commitId": ""}
         }"#;
         let raw: PrRaw = serde_json::from_str(json).expect("parse");
         let pr: AdoPullRequest = raw.into();
         assert!(pr.merge_commit_sha.is_none());
+    }
+
+    #[test]
+    fn pr_raw_drops_merge_sha_for_non_completed_status() {
+        // Issue #92 design review: ADO populates `lastMergeCommit` even
+        // for *active* PRs — it's a preview merge that never landed on
+        // the target branch, so writing it to `commit_shas` would create
+        // a non-joinable row against the `commits` table. Only completed
+        // PRs should expose a merge SHA, matching GitHub semantics.
+        for status in ["active", "abandoned", "notSet", "", "ACTIVE"] {
+            let json = format!(
+                r#"{{
+                    "pullRequestId": 42,
+                    "creationDate": "2024-01-15T10:30:00Z",
+                    "status": "{status}",
+                    "lastMergeCommit": {{"commitId": "feedfacecafef00d1234567890abcdef12345678"}}
+                }}"#
+            );
+            let raw: PrRaw = serde_json::from_str(&json).expect("parse");
+            let pr: AdoPullRequest = raw.into();
+            assert!(
+                pr.merge_commit_sha.is_none(),
+                "non-completed status {status:?} must not expose a merge SHA"
+            );
+        }
+
+        // Sanity check: completed PRs still get the SHA (case-insensitive).
+        for status in ["completed", "Completed", "COMPLETED"] {
+            let json = format!(
+                r#"{{
+                    "pullRequestId": 43,
+                    "creationDate": "2024-01-15T10:30:00Z",
+                    "status": "{status}",
+                    "lastMergeCommit": {{"commitId": "feedfacecafef00d1234567890abcdef12345678"}}
+                }}"#
+            );
+            let raw: PrRaw = serde_json::from_str(&json).expect("parse");
+            let pr: AdoPullRequest = raw.into();
+            assert_eq!(
+                pr.merge_commit_sha.as_deref(),
+                Some("feedfacecafef00d1234567890abcdef12345678"),
+                "completed status {status:?} should pass the gate (case-insensitive)",
+            );
+        }
     }
 
     #[test]
