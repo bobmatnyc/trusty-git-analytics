@@ -916,7 +916,8 @@ mod tests {
             )
             .expect("query");
         assert_eq!(
-            stored, r#"["deadbeefcafef00d1234567890abcdef12345678"]"#, // pragma: allowlist secret
+            stored,
+            r#"["deadbeefcafef00d1234567890abcdef12345678"]"#, // pragma: allowlist secret
             "merge commit SHA must be persisted as a JSON array"
         );
     }
