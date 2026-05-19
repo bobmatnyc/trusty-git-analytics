@@ -64,6 +64,24 @@ struct ApiUser {
     login: String,
 }
 
+/// Compute the JSON-encoded `commit_shas` value for a PR row.
+///
+/// Why: GitHub populates `merge_commit_sha` even for open or
+/// closed-without-merge PRs — it's the SHA of a *test* merge commit on
+/// `refs/pull/N/merge` (a mergeability probe). That SHA exists on no
+/// branch and won't join against the `commits` table (issue #101). Only
+/// truly merged PRs (`merged_at` set) carry a joinable merge SHA.
+/// What: returns `["<sha>"]` only when the PR is merged and has a SHA;
+/// otherwise returns the empty array `[]`.
+/// Test: see `commit_shas_gated_on_merged_at` — non-merged PR with a
+/// populated SHA yields `"[]"`, merged PR yields `r#"["<sha>"]"#`.
+fn commit_shas_for_pull(p: &ApiPull) -> Result<String> {
+    match (&p.merge_commit_sha, p.merged_at.is_some()) {
+        (Some(s), true) => Ok(serde_json::to_string(&vec![s.clone()])?),
+        _ => Ok("[]".to_string()),
+    }
+}
+
 /// A GitHub issue as returned by the REST API.
 ///
 /// This is the normalized payload returned by
@@ -465,10 +483,7 @@ impl GitHubClient {
                 } else {
                     PrState::Open
                 };
-                let commit_shas = match &p.merge_commit_sha {
-                    Some(s) => serde_json::to_string(&vec![s.clone()])?,
-                    None => "[]".to_string(),
-                };
+                let commit_shas = commit_shas_for_pull(&p)?;
                 out.push(PullRequest {
                     id: 0,
                     pr_number: p.number,
@@ -1085,5 +1100,88 @@ mod tests {
         // Non-GitHub hosts: unsupported.
         assert!(extract_owner_repo_from_url("https://gitlab.com/acme/widget").is_none());
         assert!(extract_owner_repo_from_url("nonsense").is_none());
+    }
+
+    /// Confirm `commit_shas_for_pull` gates the merge SHA on `merged_at`.
+    ///
+    /// Why: issue #101 — GitHub populates `merge_commit_sha` even for open
+    /// or closed-without-merge PRs (a `refs/pull/N/merge` test merge that
+    /// exists on no branch), which would write a non-joinable value into
+    /// `pull_requests.commit_shas`. Only merged PRs carry a joinable SHA.
+    /// What: maps `ApiPull` payloads through `commit_shas_for_pull`.
+    /// Test: non-merged PR with a populated SHA yields `"[]"`; a merged PR
+    /// with a SHA yields `r#"["some-sha"]"#`.
+    #[test]
+    fn commit_shas_gated_on_merged_at() {
+        // Non-merged PR with a populated (test-merge) SHA -> empty array.
+        let json = r#"{
+            "number": 101,
+            "title": "Open PR",
+            "user": {"login": "octocat"},
+            "state": "open",
+            "created_at": "2024-01-15T10:30:00Z",
+            "merged_at": null,
+            "merge_commit_sha": "some-sha"
+        }"#;
+        let p: ApiPull = serde_json::from_str(json).expect("parses");
+        assert!(p.merge_commit_sha.is_some());
+        assert!(p.merged_at.is_none());
+        assert_eq!(
+            commit_shas_for_pull(&p).expect("encodes"),
+            "[]",
+            "non-merged PR with a populated SHA must not emit commit_shas",
+        );
+
+        // Closed-without-merge PR with a populated SHA -> empty array.
+        let json = r#"{
+            "number": 102,
+            "title": "Closed-no-merge PR",
+            "user": {"login": "octocat"},
+            "state": "closed",
+            "created_at": "2024-01-15T10:30:00Z",
+            "merged_at": null,
+            "merge_commit_sha": "some-sha"
+        }"#;
+        let p: ApiPull = serde_json::from_str(json).expect("parses");
+        assert_eq!(
+            commit_shas_for_pull(&p).expect("encodes"),
+            "[]",
+            "closed-without-merge PR must not emit commit_shas",
+        );
+
+        // Merged PR with a populated SHA -> joinable single-element array.
+        let json = r#"{
+            "number": 103,
+            "title": "Merged PR",
+            "user": {"login": "octocat"},
+            "state": "closed",
+            "created_at": "2024-01-15T10:30:00Z",
+            "merged_at": "2024-01-16T12:00:00Z",
+            "merge_commit_sha": "some-sha"
+        }"#;
+        let p: ApiPull = serde_json::from_str(json).expect("parses");
+        assert!(p.merged_at.is_some());
+        assert_eq!(
+            commit_shas_for_pull(&p).expect("encodes"),
+            r#"["some-sha"]"#,
+            "merged PR with a SHA should emit a joinable commit_shas array",
+        );
+
+        // Merged PR with no SHA at all -> still empty array.
+        let json = r#"{
+            "number": 104,
+            "title": "Merged PR missing SHA",
+            "user": {"login": "octocat"},
+            "state": "closed",
+            "created_at": "2024-01-15T10:30:00Z",
+            "merged_at": "2024-01-16T12:00:00Z",
+            "merge_commit_sha": null
+        }"#;
+        let p: ApiPull = serde_json::from_str(json).expect("parses");
+        assert_eq!(
+            commit_shas_for_pull(&p).expect("encodes"),
+            "[]",
+            "merged PR without a SHA yields the empty array",
+        );
     }
 }
