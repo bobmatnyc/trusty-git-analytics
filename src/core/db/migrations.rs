@@ -86,6 +86,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "pull_requests_repository",
         sql: include_str!("sql/0012_pull_requests_repository.sql"),
     },
+    Migration {
+        version: 13,
+        name: "complexity",
+        sql: include_str!("sql/0013_complexity.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

@@ -76,8 +76,20 @@ impl ClassificationPipeline {
     /// # Errors
     ///
     /// Returns an error if the DB queries, rule loading, or migrations fail.
-    pub async fn run(&self, db: &mut Database) -> Result<ClassificationStats> {
-        // 1. Build engine.
+    /// Build the [`ClassificationEngine`] from this pipeline's config.
+    ///
+    /// Why: both [`Self::run`] and [`Self::backfill_complexity`] need an
+    /// identically-configured engine; extracting this keeps the rule-merge
+    /// and config-mapping logic in one place.
+    /// What: loads/merges rules, maps `Config` → `ClassificationEngineConfig`,
+    /// and constructs the engine (without the DB-backed override tier).
+    /// Test: exercised indirectly by the pipeline integration tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if rules fail to load/compile or the LLM provider
+    /// fails to initialize.
+    fn build_engine(&self) -> Result<ClassificationEngine> {
         let ruleset = match self
             .config
             .classification
@@ -128,7 +140,7 @@ impl ClassificationPipeline {
             .map(|j| j.jira_project_mappings.clone())
             .unwrap_or_default();
 
-        let engine = ClassificationEngine::with_taxonomy_and_mappings(
+        ClassificationEngine::with_taxonomy_and_mappings(
             ruleset,
             engine_cfg,
             custom_taxonomy,
@@ -139,8 +151,43 @@ impl ClassificationPipeline {
             // still constructible via `with_taxonomy_and_mappings` for
             // single-threaded callers and tests.
             None,
-        )?;
+        )
+    }
 
+    /// Execute the pipeline against `db`.
+    ///
+    /// Workflow:
+    /// 1. Build the [`ClassificationEngine`] from config (rules + LLM tier).
+    /// 2. Query all commits with `classification_id IS NULL`.
+    /// 3. Classify in parallel (Rayon) using tiers 0–3.
+    /// 4. Optionally invoke the async LLM tier for low-confidence verdicts.
+    /// 5. Write `classifications` rows (including `complexity`) and update
+    ///    each commit's `classification_id` and `confidence`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the DB queries, rule loading, or migrations fail.
+    pub async fn run(&self, db: &mut Database) -> Result<ClassificationStats> {
+        // 1. Build engine.
+        let engine = self.build_engine()?;
+        self.run_with_engine(db, engine).await
+    }
+
+    /// Run the classification pipeline using a caller-supplied engine.
+    ///
+    /// Why: tests need to inject an engine wired to a mock LLM endpoint;
+    /// [`Self::run`] builds the engine itself and delegates here.
+    /// What: identical to [`Self::run`] but skips engine construction.
+    /// Test: the complexity-write integration test calls this directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if DB queries or write-back fail.
+    pub(crate) async fn run_with_engine(
+        &self,
+        db: &mut Database,
+        engine: ClassificationEngine,
+    ) -> Result<ClassificationStats> {
         // 2. Read unclassified commits.
         let commits = read_unclassified_commits(db)?;
         let total = commits.len();
@@ -291,6 +338,133 @@ impl ClassificationPipeline {
             .map(|c| c.min_coverage_pct)
             .unwrap_or(DEFAULT_MIN_COVERAGE_PCT)
     }
+
+    /// Backfill missing `complexity` scores for already-classified commits.
+    ///
+    /// Why: rows classified before this feature (or by non-LLM tiers) have
+    /// `complexity IS NULL`. This fills them in without disturbing the
+    /// existing category/confidence/method verdict, so a corpus can gain
+    /// complexity scores incrementally.
+    /// What: selects `classifications` rows where `complexity IS NULL` and
+    /// `method != 'exact_rule'`, asks the LLM for a complexity score per
+    /// commit, and writes only the `complexity` column back.
+    /// Test: see `tests/` — pre-seed a NULL row and a scored row, run this,
+    /// assert the NULL row is filled and the scored row is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if engine construction or DB access fails.
+    pub async fn backfill_complexity(&self, db: &mut Database) -> Result<usize> {
+        let engine = self.build_engine()?;
+        Self::backfill_complexity_with_engine(db, &engine).await
+    }
+
+    /// Backfill complexity using a caller-supplied engine.
+    ///
+    /// Why: tests inject an engine wired to a mock LLM endpoint;
+    /// [`Self::backfill_complexity`] builds the engine and delegates here.
+    /// What: the engine-agnostic core of the backfill.
+    /// Test: the backfill integration test calls this directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if DB access fails.
+    pub(crate) async fn backfill_complexity_with_engine(
+        db: &mut Database,
+        engine: &ClassificationEngine,
+    ) -> Result<usize> {
+        // Collect candidate rows. Rows produced by
+        // the `exact_rule` tier are excluded — they were never LLM-eligible.
+        let candidates = read_complexity_backfill_candidates(db)?;
+        let total = candidates.len();
+        info!(total, "starting complexity backfill");
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let pb = make_progress(total as u64, "Complexity backfill");
+        let mut updated = 0_usize;
+        {
+            let conn = db.connection_mut();
+            let tx = conn.transaction().map_err(crate::core::TgaError::from)?;
+            {
+                let mut update_stmt = tx
+                    .prepare("UPDATE classifications SET complexity = ?1 WHERE id = ?2")
+                    .map_err(crate::core::TgaError::from)?;
+                for cand in &candidates {
+                    let verdict = engine.llm_classify_only(&cand.message).await;
+                    let complexity = verdict.and_then(|r| r.complexity);
+                    match complexity {
+                        Some(score) => {
+                            update_stmt
+                                .execute(params![score as i64, cand.classification_id])
+                                .map_err(crate::core::TgaError::from)?;
+                            updated += 1;
+                            info!(
+                                commit_sha = %cand.commit_sha,
+                                score,
+                                "backfilled complexity"
+                            );
+                        }
+                        None => {
+                            warn!(
+                                commit_sha = %cand.commit_sha,
+                                "LLM returned no complexity score; leaving NULL"
+                            );
+                        }
+                    }
+                    pb.inc(1);
+                }
+            }
+            tx.commit().map_err(crate::core::TgaError::from)?;
+        }
+        pb.finish_and_clear();
+        info!(updated, total, "complexity backfill complete");
+        Ok(updated)
+    }
+}
+
+/// A `classifications` row eligible for complexity backfill.
+struct ComplexityBackfillCandidate {
+    /// Primary key of the `classifications` row to update.
+    classification_id: i64,
+    /// SHA of the linked commit (for logging/diagnostics).
+    commit_sha: String,
+    /// Commit message, used as LLM input.
+    message: String,
+}
+
+/// Read classification rows lacking a complexity score.
+///
+/// Why: the backfill must target only LLM-eligible rows; `exact_rule`
+/// verdicts never carried complexity, so they are excluded.
+/// What: joins `classifications` to `commits` via `classification_id` and
+/// returns rows where `complexity IS NULL` and `method != 'exact_rule'`.
+/// Test: covered by the backfill integration test.
+fn read_complexity_backfill_candidates(db: &Database) -> Result<Vec<ComplexityBackfillCandidate>> {
+    let mut stmt = db
+        .connection()
+        .prepare(
+            "SELECT cl.id, c.sha, c.message \
+             FROM classifications cl \
+             JOIN commits c ON c.classification_id = cl.id \
+             WHERE cl.complexity IS NULL AND cl.method != 'exact_rule'",
+        )
+        .map_err(crate::core::TgaError::from)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ComplexityBackfillCandidate {
+                classification_id: row.get(0)?,
+                commit_sha: row.get(1)?,
+                message: row.get(2)?,
+            })
+        })
+        .map_err(crate::core::TgaError::from)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(crate::core::TgaError::from)?);
+    }
+    Ok(out)
 }
 
 /// Look up manual classification overrides for the given commits.
@@ -338,6 +512,7 @@ fn read_overrides(
                         confidence: 1.0,
                         method: ClassificationMethod::Manual,
                         ticket_id: None,
+                        complexity: None,
                     },
                 );
             }
@@ -468,8 +643,9 @@ fn write_results(
     {
         let mut insert_classification = tx
             .prepare(
-                "INSERT INTO classifications (category, subcategory, ticket_id, confidence, method) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO classifications \
+                    (category, subcategory, ticket_id, confidence, method, complexity) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
             .map_err(crate::core::TgaError::from)?;
         let mut update_commit = tx
@@ -484,6 +660,7 @@ fn write_results(
                     result.ticket_id,
                     result.confidence,
                     result.method.as_str(),
+                    result.complexity.map(|v| v as i64),
                 ])
                 .map_err(crate::core::TgaError::from)?;
             let classification_id = tx.last_insert_rowid();
@@ -538,4 +715,183 @@ fn make_progress(len: u64, label: &str) -> ProgressBar {
     }
     pb.set_prefix(label.to_string());
     pb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::classify::classifier::{ClassificationEngine, ClassificationEngineConfig};
+    use crate::classify::rules::default_rules;
+    use crate::core::config::Config;
+    use rusqlite::params;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build an engine whose LLM tier points at `endpoint`.
+    fn engine_with_mock_llm(endpoint: &str) -> ClassificationEngine {
+        let cfg = ClassificationEngineConfig {
+            use_llm: true,
+            ..ClassificationEngineConfig::default()
+        };
+        ClassificationEngine::new(default_rules(), cfg)
+            .expect("build engine")
+            .with_test_llm_endpoint(endpoint)
+    }
+
+    /// Stand up a mock chat-completions endpoint returning a fixed verdict.
+    async fn mock_llm_server(category: &str, confidence: f64, complexity: u8) -> MockServer {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": format!(
+                        "{{\"category\":\"{category}\",\"subcategory\":null,\
+                          \"confidence\":{confidence},\"complexity\":{complexity}}}"
+                    )
+                }
+            }]
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Insert a commit row with no classification. Returns its row id.
+    fn insert_commit(db: &Database, sha: &str, message: &str) -> i64 {
+        db.connection()
+            .execute(
+                "INSERT INTO commits \
+                 (sha, author_name, author_email, timestamp, message, repository) \
+                 VALUES (?1, 'a', 'a@x', '2024-01-01T00:00:00Z', ?2, 'acme/widgets')",
+                params![sha, message],
+            )
+            .expect("insert commit");
+        db.connection().last_insert_rowid()
+    }
+
+    /// Why: a complexity score from the LLM must reach the `classifications`
+    /// table; if the INSERT drops the column the score is silently lost.
+    /// What: classify an unclassified commit via a mock LLM that returns
+    /// `complexity: 2`, then assert the persisted row has `complexity = 2`.
+    /// Test: in-memory DB + wiremock; run the pipeline, query the column.
+    #[tokio::test]
+    async fn pipeline_writes_complexity_to_db() {
+        let server = mock_llm_server("feature", 0.9, 2).await;
+        let endpoint = format!("{}/v1/chat/completions", server.uri());
+
+        let mut db = Database::open_in_memory().expect("db");
+        // A message long enough (>= 12 chars) to skip the fuzzy "short =
+        // chore" heuristic and devoid of rule keywords, so tiers 1–3 all
+        // miss and the commit falls through to the LLM tier.
+        insert_commit(&db, "sha-a", "zzz qqq vvv www yyy uuu");
+
+        // Route every tier-1..3 verdict through the LLM by setting a
+        // fallback threshold above any rule-tier confidence. Without this a
+        // low-confidence catch-all rule would pre-empt the LLM tier.
+        let classification = crate::core::config::ClassificationConfig {
+            use_llm: true,
+            llm_fallback_threshold: 1.0,
+            ..crate::core::config::ClassificationConfig::default()
+        };
+        let config = Config {
+            classification: Some(classification),
+            ..Config::default()
+        };
+
+        let pipeline = ClassificationPipeline::new(config);
+        let engine = engine_with_mock_llm(&endpoint);
+        pipeline
+            .run_with_engine(&mut db, engine)
+            .await
+            .expect("run pipeline");
+
+        let complexity: Option<i64> = db
+            .connection()
+            .query_row(
+                "SELECT cl.complexity FROM classifications cl \
+                 JOIN commits c ON c.classification_id = cl.id \
+                 WHERE c.sha = 'sha-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query complexity");
+        assert_eq!(complexity, Some(2));
+    }
+
+    /// Why: the backfill must fill NULL complexity rows without disturbing
+    /// rows that already have a score.
+    /// What: seed one classification with `complexity IS NULL` and one with
+    /// `complexity = 3`; run the backfill against a mock LLM that returns
+    /// `complexity: 4`; assert the NULL row becomes 4 and the other stays 3.
+    /// Test: in-memory DB + wiremock.
+    #[tokio::test]
+    async fn backfill_complexity_updates_only_null_rows() {
+        let server = mock_llm_server("feature", 0.9, 4).await;
+        let endpoint = format!("{}/v1/chat/completions", server.uri());
+
+        let mut db = Database::open_in_memory().expect("db");
+
+        // Row 1: classified, complexity NULL, non-exact method → a candidate.
+        db.connection()
+            .execute(
+                "INSERT INTO classifications (category, confidence, method, complexity) \
+                 VALUES ('feature', 0.5, 'regex_rule', NULL)",
+                [],
+            )
+            .expect("insert cl 1");
+        let cl1 = db.connection().last_insert_rowid();
+        let c1 = insert_commit(&db, "sha-null", "needs scoring");
+        db.connection()
+            .execute(
+                "UPDATE commits SET classification_id = ?1 WHERE id = ?2",
+                params![cl1, c1],
+            )
+            .expect("link 1");
+
+        // Row 2: already scored (complexity = 3) → must be left untouched.
+        db.connection()
+            .execute(
+                "INSERT INTO classifications (category, confidence, method, complexity) \
+                 VALUES ('bugfix', 0.8, 'regex_rule', 3)",
+                [],
+            )
+            .expect("insert cl 2");
+        let cl2 = db.connection().last_insert_rowid();
+        let c2 = insert_commit(&db, "sha-scored", "already scored");
+        db.connection()
+            .execute(
+                "UPDATE commits SET classification_id = ?1 WHERE id = ?2",
+                params![cl2, c2],
+            )
+            .expect("link 2");
+
+        let engine = engine_with_mock_llm(&endpoint);
+        let updated = ClassificationPipeline::backfill_complexity_with_engine(&mut db, &engine)
+            .await
+            .expect("backfill");
+        assert_eq!(updated, 1, "only the NULL row should be updated");
+
+        let filled: Option<i64> = db
+            .connection()
+            .query_row(
+                "SELECT complexity FROM classifications WHERE id = ?1",
+                params![cl1],
+                |row| row.get(0),
+            )
+            .expect("query filled");
+        assert_eq!(filled, Some(4), "NULL row backfilled to the LLM score");
+
+        let unchanged: Option<i64> = db
+            .connection()
+            .query_row(
+                "SELECT complexity FROM classifications WHERE id = ?1",
+                params![cl2],
+                |row| row.get(0),
+            )
+            .expect("query unchanged");
+        assert_eq!(unchanged, Some(3), "already-scored row must be unchanged");
+    }
 }

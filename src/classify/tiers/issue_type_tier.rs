@@ -93,6 +93,7 @@ impl IssueTypeTier {
             confidence: ISSUE_TYPE_CONFIDENCE,
             method: ClassificationMethod::ExactRule,
             ticket_id: None,
+            complexity: None,
         })
     }
 }

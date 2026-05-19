@@ -39,6 +39,7 @@ impl FuzzyClassifier {
                 confidence: 0.95,
                 method: ClassificationMethod::FuzzyMatch,
                 ticket_id: None,
+                complexity: None,
             });
         }
 
@@ -51,6 +52,7 @@ impl FuzzyClassifier {
                 confidence: 0.9,
                 method: ClassificationMethod::FuzzyMatch,
                 ticket_id: None,
+                complexity: None,
             });
         }
 
@@ -63,6 +65,7 @@ impl FuzzyClassifier {
                 confidence: 0.6,
                 method: ClassificationMethod::FuzzyMatch,
                 ticket_id: Some(ticket),
+                complexity: None,
             });
         }
 
@@ -75,6 +78,7 @@ impl FuzzyClassifier {
                 confidence: 0.4,
                 method: ClassificationMethod::FuzzyMatch,
                 ticket_id: None,
+                complexity: None,
             });
         }
 

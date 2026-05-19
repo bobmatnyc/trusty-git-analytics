@@ -104,6 +104,7 @@ impl JiraProjectTier {
             confidence: PROJECT_MAPPING_CONFIDENCE,
             method: ClassificationMethod::RegexRule,
             ticket_id,
+            complexity: None,
         })
     }
 }

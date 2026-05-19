@@ -96,6 +96,7 @@ impl OverrideTier {
                     confidence: 1.0,
                     method: ClassificationMethod::Manual,
                     ticket_id: None,
+                    complexity: None,
                 })
             }
             Ok(None) => None,

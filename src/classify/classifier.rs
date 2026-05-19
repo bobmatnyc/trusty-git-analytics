@@ -149,6 +149,23 @@ impl ClassificationEngine {
         &self.taxonomy
     }
 
+    /// Test-only seam: rebuild the LLM tier targeting an explicit endpoint
+    /// with a fixed API key.
+    ///
+    /// Why: integration tests that exercise the LLM tier (e.g. complexity
+    /// backfill) need to point the classifier at a `wiremock` server rather
+    /// than a real provider. Production code never calls this.
+    /// What: replaces `self.llm` with an `LlmClassifier` keyed for `endpoint`.
+    /// Test: used by the pipeline complexity-backfill integration tests.
+    #[cfg(test)]
+    pub(crate) fn with_test_llm_endpoint(mut self, endpoint: &str) -> Self {
+        self.llm = Some(
+            LlmClassifier::new(&self.config.llm_model, Some("sk-test".to_string()))
+                .with_endpoint(endpoint),
+        );
+        self
+    }
+
     /// Borrow the engine's effective configuration.
     pub fn config(&self) -> &ClassificationEngineConfig {
         &self.config
@@ -196,6 +213,7 @@ impl ClassificationEngine {
                 confidence: rule.confidence,
                 method: ClassificationMethod::ExactRule,
                 ticket_id: RegexMatcher::extract_ticket_id(message),
+                complexity: None,
             });
         }
 
@@ -216,6 +234,7 @@ impl ClassificationEngine {
                 confidence: rule.confidence,
                 method: ClassificationMethod::RegexRule,
                 ticket_id: RegexMatcher::extract_ticket_id(message),
+                complexity: None,
             });
         }
 

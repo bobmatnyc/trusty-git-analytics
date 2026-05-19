@@ -33,7 +33,15 @@ const OPENROUTER_TITLE: &str = "trusty-git-analytics";
 /// System prompt instructing the model to return strict JSON.
 const SYSTEM_PROMPT: &str = "You are a git commit classifier. Respond with ONLY a JSON \
 object: {\"category\": \"feature|bugfix|chore|documentation|refactor|test|ci|performance|style|build|revert|merge|breaking|uncategorized\", \
-\"subcategory\": \"optional string or null\", \"confidence\": 0.0-1.0}. No prose, no markdown.";
+\"subcategory\": \"optional string or null\", \"confidence\": 0.0-1.0, \
+\"complexity\": <integer 1-5>}. \
+Complexity 1-5: \
+1=trivial (config/version bump/typo), 2=simple (single-file bugfix), \
+3=moderate (multi-file feature), 4=complex (cross-module/arch change), \
+5=highly complex (system design/major refactor). \
+No prose, no markdown. \
+Example: {\"category\": \"bugfix\", \"subcategory\": \"null-check\", \
+\"confidence\": 0.9, \"complexity\": 2}";
 
 /// Tier-4 LLM-fallback classifier.
 pub struct LlmClassifier {
@@ -274,6 +282,8 @@ impl LlmClassifier {
             confidence: verdict.confidence.clamp(0.0, 1.0),
             method: ClassificationMethod::LlmFallback,
             ticket_id: None,
+            // Clamp out-of-range LLM scores into the documented 1–5 band.
+            complexity: verdict.complexity.map(|v| v.clamp(1, 5)),
         })
     }
 }
@@ -316,13 +326,17 @@ struct ChatChoiceMessage {
     content: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct LlmVerdict {
     category: String,
     #[serde(default)]
     subcategory: Option<String>,
     #[serde(default = "default_confidence")]
     confidence: f64,
+    /// Optional 1–5 complexity score. Missing or out-of-range values are
+    /// handled by the caller (clamped to 1–5, or left `None`).
+    #[serde(default)]
+    complexity: Option<u8>,
 }
 
 fn default_confidence() -> f64 {
@@ -380,6 +394,36 @@ mod tests {
             .await
             .expect("LLM verdict");
         assert_eq!(r.ticket_id, None);
+    }
+
+    /// Why: the LLM tier is the only producer of complexity scores; if the
+    /// `complexity` key stops deserializing, all scoring silently breaks.
+    /// What: a JSON verdict with `"complexity": 3` must deserialize to
+    /// `Some(3)`, and a verdict omitting the key must default to `None`.
+    /// Test: `serde_json::from_str` two payloads and assert the field.
+    #[test]
+    fn llm_verdict_deserializes_complexity() {
+        let with: LlmVerdict =
+            serde_json::from_str(r#"{"category":"feature","confidence":0.9,"complexity":3}"#)
+                .expect("deserialize verdict with complexity");
+        assert_eq!(with.complexity, Some(3));
+
+        let without: LlmVerdict =
+            serde_json::from_str(r#"{"category":"feature","confidence":0.9}"#)
+                .expect("deserialize verdict without complexity");
+        assert_eq!(without.complexity, None);
+    }
+
+    /// Why: the model only emits complexity if the prompt asks for it; this
+    /// pins the prompt so a future edit can't drop the request silently.
+    /// What: asserts the system prompt mentions the `complexity` key.
+    /// Test: substring check on `SYSTEM_PROMPT`.
+    #[test]
+    fn system_prompt_requests_complexity() {
+        assert!(
+            SYSTEM_PROMPT.contains("complexity"),
+            "system prompt must instruct the model to return a complexity score"
+        );
     }
 
     #[tokio::test]

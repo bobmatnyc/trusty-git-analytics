@@ -200,6 +200,13 @@ pub struct ClassifyArgs {
     /// Enable LLM fallback (overrides config).
     #[arg(long)]
     pub use_llm: bool,
+    /// Backfill missing complexity scores (1–5) for already-classified
+    /// commits via the LLM, without re-running the full classification.
+    ///
+    /// Only rows with `complexity IS NULL` and a non-`exact_rule` method
+    /// are updated; category, confidence, and method are left untouched.
+    #[arg(long)]
+    pub backfill_complexity: bool,
 }
 
 /// Arguments for `tga report`.

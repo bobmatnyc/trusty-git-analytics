@@ -47,10 +47,21 @@ pub struct ClassificationResult {
     pub method: ClassificationMethod,
     /// Optional extracted ticket id (e.g. `"PROJ-123"`).
     pub ticket_id: Option<String>,
+    /// Optional commit complexity score on a 1–5 scale.
+    ///
+    /// `None` means the commit was not scored — only the LLM tier produces
+    /// a complexity score; rule/regex/fuzzy tiers always leave this `None`.
+    /// The scale is: 1 = trivial, 2 = simple, 3 = moderate, 4 = complex,
+    /// 5 = highly complex.
+    #[serde(default)]
+    pub complexity: Option<u8>,
 }
 
 impl ClassificationResult {
     /// Construct an "unclassified" result used as a default when no tier matches.
+    ///
+    /// `complexity` defaults to `None` — unclassified commits are never
+    /// complexity-scored.
     pub fn unclassified() -> Self {
         Self {
             category: "uncategorized".to_string(),
@@ -59,6 +70,23 @@ impl ClassificationResult {
             confidence: 0.0,
             method: ClassificationMethod::FuzzyMatch,
             ticket_id: None,
+            complexity: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why: non-LLM tiers must never fabricate a complexity score; the
+    /// "unclassified" default is the canonical example.
+    /// What: asserts `ClassificationResult::unclassified()` leaves
+    /// `complexity` as `None`.
+    /// Test: construct the default and assert the field.
+    #[test]
+    fn unclassified_defaults_complexity_to_none() {
+        let r = ClassificationResult::unclassified();
+        assert_eq!(r.complexity, None);
     }
 }

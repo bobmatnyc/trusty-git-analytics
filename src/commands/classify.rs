@@ -27,6 +27,15 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
     }
 
     let pipeline = ClassificationPipeline::new(cfg);
+
+    // Backfill mode: fill in only the missing complexity scores and return,
+    // leaving existing category/confidence/method verdicts untouched.
+    if args.backfill_complexity {
+        let updated = pipeline.backfill_complexity(db).await?;
+        println!("Backfilled complexity for {updated} commit(s)");
+        return Ok(());
+    }
+
     let stats = pipeline.run(db).await?;
 
     println!(
