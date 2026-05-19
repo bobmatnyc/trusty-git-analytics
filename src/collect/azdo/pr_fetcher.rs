@@ -10,6 +10,26 @@
 //! covers work-item / WIQL flows. PR fetching is an independent surface area
 //! (different DB tables, different commit-message regex) and is easier to test
 //! in isolation here.
+//!
+//! # `merge_commit_sha` emission matrix (issue #96)
+//!
+//! ADO's `lastMergeCommit.commitId` is only join-compatible with the `commits`
+//! table for *true* merge commits. Squash and rebase completions rewrite
+//! history and produce SHAs that never appear on the target branch, so
+//! emitting them would create orphan `pr_commits` rows. The gate below
+//! restricts emission to strategies that preserve the merge SHA.
+//!
+//! | `status`     | `mergeStrategy`            | emitted `merge_commit_sha`        | rationale                                                              |
+//! |--------------|----------------------------|-----------------------------------|------------------------------------------------------------------------|
+//! | `completed`  | `noFastForward` or absent  | `Some(lastMergeCommit.commitId)`  | true merge — SHA lands on target branch and joins to `commits`         |
+//! | `completed`  | `squash`                   | `None`                            | squash rewrites history; merge SHA isn't on target branch              |
+//! | `completed`  | `rebase`                   | `None`                            | rebase replays commits; merge SHA isn't on target branch               |
+//! | `completed`  | `rebaseMerge`              | `None`                            | rebase-merge replays then merges; the SHA we'd emit isn't reliable     |
+//! | any non-`completed` (e.g. `active`, `abandoned`) | * | `None` | preview merge on `refs/pull/N/merge` never landed (issue #92)          |
+//!
+//! Strategy comparison is case-insensitive. The strategy is read from the
+//! top-level `mergeStrategy` field, falling back to
+//! `completionOptions.mergeStrategy` when the former is absent.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -284,6 +304,15 @@ struct PrRaw {
     reviewers: Vec<ReviewerRaw>,
     #[serde(default)]
     last_merge_commit: Option<CommitRefRaw>,
+    /// Top-level merge strategy (`noFastForward` / `squash` / `rebase` /
+    /// `rebaseMerge`). Preferred when present; otherwise we fall back to
+    /// [`PrRaw::completion_options`]. See the module-level matrix.
+    #[serde(default)]
+    merge_strategy: Option<String>,
+    /// Nested completion metadata. Older ADO API versions only surface the
+    /// merge strategy here, so we deserialize both shapes.
+    #[serde(default)]
+    completion_options: Option<CompletionOptionsRaw>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -291,6 +320,13 @@ struct PrRaw {
 struct CommitRefRaw {
     #[serde(default)]
     commit_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CompletionOptionsRaw {
+    #[serde(default)]
+    merge_strategy: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -340,22 +376,37 @@ impl From<PrRaw> for AdoPullRequest {
             })
             .collect();
         // Pull the merge commit SHA from `lastMergeCommit.commitId` only
-        // for *completed* PRs. ADO populates `lastMergeCommit` even for
-        // active PRs — it's the most recent merge attempt, which for
-        // unmerged PRs is a virtual preview merge on `refs/pull/N/merge`,
-        // not a commit that ever landed on the target branch. Writing
-        // that SHA into `commit_shas` would produce non-joinable rows
-        // against the `commits` table (issue #92 review feedback). For
-        // GitHub parity we only emit a SHA once the PR has actually
-        // landed (status == "completed"). Empty strings are also treated
-        // as missing — some ADO previews return `lastMergeCommit: {}`.
-        let merge_commit_sha = if raw.status.eq_ignore_ascii_case("completed") {
-            raw.last_merge_commit
-                .and_then(|c| c.commit_id)
-                .filter(|s| !s.is_empty())
-        } else {
-            None
+        // for *completed* PRs whose merge strategy actually preserves a
+        // merge commit on the target branch (issue #96). ADO populates
+        // `lastMergeCommit` even for active PRs — it's the most recent
+        // merge attempt, which for unmerged PRs is a virtual preview
+        // merge on `refs/pull/N/merge`, not a commit that ever landed on
+        // the target branch (issue #92). For squash / rebase / rebaseMerge
+        // completions the SHA likewise does not appear on the target
+        // branch, so emitting it would produce non-joinable rows against
+        // the `commits` table. We accept the SHA only when the strategy
+        // is `noFastForward` or absent (older API versions / true merges).
+        // Empty strings are treated as missing — some ADO previews return
+        // `lastMergeCommit: {}`.
+        let strategy_allows_merge_sha = {
+            let strategy = raw.merge_strategy.as_deref().or_else(|| {
+                raw.completion_options
+                    .as_ref()
+                    .and_then(|co| co.merge_strategy.as_deref())
+            });
+            match strategy {
+                None => true,
+                Some(s) => s.eq_ignore_ascii_case("noFastForward"),
+            }
         };
+        let merge_commit_sha =
+            if raw.status.eq_ignore_ascii_case("completed") && strategy_allows_merge_sha {
+                raw.last_merge_commit
+                    .and_then(|c| c.commit_id)
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            };
         AdoPullRequest {
             pr_number: raw.pull_request_id,
             title: raw.title,
@@ -1032,6 +1083,7 @@ mod tests {
                     "pullRequestId": 42,
                     "creationDate": "2024-01-15T10:30:00Z",
                     "status": "{status}",
+                    "mergeStrategy": "noFastForward",
                     "lastMergeCommit": {{"commitId": "feedfacecafef00d1234567890abcdef12345678"}}
                 }}"#
             );
@@ -1043,13 +1095,15 @@ mod tests {
             );
         }
 
-        // Sanity check: completed PRs still get the SHA (case-insensitive).
+        // Sanity check: completed PRs still get the SHA (case-insensitive)
+        // when the strategy gate (issue #96) allows it.
         for status in ["completed", "Completed", "COMPLETED"] {
             let json = format!(
                 r#"{{
                     "pullRequestId": 43,
                     "creationDate": "2024-01-15T10:30:00Z",
                     "status": "{status}",
+                    "mergeStrategy": "noFastForward",
                     "lastMergeCommit": {{"commitId": "feedfacecafef00d1234567890abcdef12345678"}}
                 }}"#
             );
@@ -1061,6 +1115,146 @@ mod tests {
                 "completed status {status:?} should pass the gate (case-insensitive)",
             );
         }
+    }
+
+    #[test]
+    fn pr_raw_emits_merge_sha_for_no_fast_forward_strategy() {
+        // Issue #96: noFastForward is the only strategy that lands a true
+        // merge commit on the target branch, so the gate must let it
+        // through. Spot-check a case-insensitive variant as well.
+        for strategy in ["noFastForward", "NOFASTFORWARD", "nofastforward"] {
+            let json = format!(
+                r#"{{
+                    "pullRequestId": 100,
+                    "creationDate": "2024-01-15T10:30:00Z",
+                    "status": "completed",
+                    "mergeStrategy": "{strategy}",
+                    "lastMergeCommit": {{"commitId": "feedfacecafef00d1234567890abcdef12345678"}}
+                }}"#
+            );
+            let raw: PrRaw = serde_json::from_str(&json).expect("parse");
+            let pr: AdoPullRequest = raw.into();
+            assert_eq!(
+                pr.merge_commit_sha.as_deref(),
+                Some("feedfacecafef00d1234567890abcdef12345678"),
+                "noFastForward variant {strategy:?} must pass the gate",
+            );
+        }
+    }
+
+    #[test]
+    fn pr_raw_emits_merge_sha_when_strategy_absent() {
+        // Older ADO API versions may omit `mergeStrategy` entirely. Preserve
+        // the pre-#96 behavior of emitting the SHA in that case.
+        let json = r#"{
+            "pullRequestId": 101,
+            "creationDate": "2024-01-15T10:30:00Z",
+            "status": "completed",
+            "lastMergeCommit": {"commitId": "feedfacecafef00d1234567890abcdef12345678"}
+        }"#;
+        let raw: PrRaw = serde_json::from_str(json).expect("parse");
+        let pr: AdoPullRequest = raw.into();
+        assert_eq!(
+            pr.merge_commit_sha.as_deref(),
+            Some("feedfacecafef00d1234567890abcdef12345678"),
+            "absent mergeStrategy must default to allowed (pre-#96 behavior)",
+        );
+    }
+
+    #[test]
+    fn pr_raw_drops_merge_sha_for_squash_strategy() {
+        // Issue #96: squash rewrites history, so `lastMergeCommit.commitId`
+        // does not appear on the target branch.
+        for strategy in ["squash", "SQUASH", "Squash"] {
+            let json = format!(
+                r#"{{
+                    "pullRequestId": 102,
+                    "creationDate": "2024-01-15T10:30:00Z",
+                    "status": "completed",
+                    "mergeStrategy": "{strategy}",
+                    "lastMergeCommit": {{"commitId": "feedfacecafef00d1234567890abcdef12345678"}}
+                }}"#
+            );
+            let raw: PrRaw = serde_json::from_str(&json).expect("parse");
+            let pr: AdoPullRequest = raw.into();
+            assert!(
+                pr.merge_commit_sha.is_none(),
+                "squash variant {strategy:?} must drop the merge SHA",
+            );
+        }
+    }
+
+    #[test]
+    fn pr_raw_drops_merge_sha_for_rebase_strategy() {
+        // Issue #96: rebase replays commits onto the target; no merge
+        // commit lands.
+        let json = r#"{
+            "pullRequestId": 103,
+            "creationDate": "2024-01-15T10:30:00Z",
+            "status": "completed",
+            "mergeStrategy": "rebase",
+            "lastMergeCommit": {"commitId": "feedfacecafef00d1234567890abcdef12345678"}
+        }"#;
+        let raw: PrRaw = serde_json::from_str(json).expect("parse");
+        let pr: AdoPullRequest = raw.into();
+        assert!(pr.merge_commit_sha.is_none());
+    }
+
+    #[test]
+    fn pr_raw_drops_merge_sha_for_rebase_merge_strategy() {
+        // Issue #96: rebaseMerge replays then merges; the SHA we'd emit
+        // does not reliably appear on the target branch.
+        let json = r#"{
+            "pullRequestId": 104,
+            "creationDate": "2024-01-15T10:30:00Z",
+            "status": "completed",
+            "mergeStrategy": "rebaseMerge",
+            "lastMergeCommit": {"commitId": "feedfacecafef00d1234567890abcdef12345678"}
+        }"#;
+        let raw: PrRaw = serde_json::from_str(json).expect("parse");
+        let pr: AdoPullRequest = raw.into();
+        assert!(pr.merge_commit_sha.is_none());
+    }
+
+    #[test]
+    fn pr_raw_reads_merge_strategy_from_completion_options_fallback() {
+        // Issue #96: some ADO API versions only surface `mergeStrategy`
+        // nested inside `completionOptions`. We accept both shapes.
+        let json = r#"{
+            "pullRequestId": 105,
+            "creationDate": "2024-01-15T10:30:00Z",
+            "status": "completed",
+            "completionOptions": {"mergeStrategy": "squash"},
+            "lastMergeCommit": {"commitId": "feedfacecafef00d1234567890abcdef12345678"}
+        }"#;
+        let raw: PrRaw = serde_json::from_str(json).expect("parse");
+        let pr: AdoPullRequest = raw.into();
+        assert!(
+            pr.merge_commit_sha.is_none(),
+            "squash via completionOptions fallback must drop the merge SHA",
+        );
+    }
+
+    #[test]
+    fn pr_raw_prefers_top_level_merge_strategy_over_completion_options() {
+        // Issue #96: when both shapes are present the top-level value
+        // wins. Here completionOptions claims `squash` but the top-level
+        // strategy is the merge-preserving `noFastForward`.
+        let json = r#"{
+            "pullRequestId": 106,
+            "creationDate": "2024-01-15T10:30:00Z",
+            "status": "completed",
+            "mergeStrategy": "noFastForward",
+            "completionOptions": {"mergeStrategy": "squash"},
+            "lastMergeCommit": {"commitId": "feedfacecafef00d1234567890abcdef12345678"}
+        }"#;
+        let raw: PrRaw = serde_json::from_str(json).expect("parse");
+        let pr: AdoPullRequest = raw.into();
+        assert_eq!(
+            pr.merge_commit_sha.as_deref(),
+            Some("feedfacecafef00d1234567890abcdef12345678"),
+            "top-level mergeStrategy must take precedence over completionOptions",
+        );
     }
 
     #[test]
