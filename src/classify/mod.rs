@@ -843,6 +843,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn llm_classify_only_returns_none_when_disabled() {
+        // Issue #99 regression: `llm_classify_only` must NOT fall back to
+        // `classify_sync`. When `use_llm: false`, calling it for a message
+        // that the regex tier would classify as `maintenance / 0.3` (the
+        // catch-all) must still return `None` — otherwise the pipeline's
+        // overwrite-guard would see the same low-confidence verdict back
+        // and the LLM tier would never run.
+        let engine = ClassificationEngine::new(
+            rules::default_rules(),
+            ClassificationEngineConfig {
+                use_llm: false,
+                ..Default::default()
+            },
+        )
+        .expect("engine");
+        assert!(engine
+            .llm_classify_only("xyzzy plugh frobnicate")
+            .await
+            .is_none());
+        assert_eq!(engine.llm_has_api_key(), None);
+    }
+
+    /// Panic-safe env-var save/restore (mirrors the pattern in
+    /// `core::config::validator::tests::EnvVarGuard`). Without this, a
+    /// failing assertion between `remove_var` and the restore would leak
+    /// the cleared state to other parallel tests in the same binary.
+    struct EnvVarGuard {
+        name: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn remove(name: &'static str) -> Self {
+            let original = std::env::var(name).ok();
+            // SAFETY: 2024-edition env mutation; cleanup guaranteed by Drop.
+            unsafe { std::env::remove_var(name) };
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `EnvVarGuard::remove`.
+            unsafe {
+                match self.original.as_deref() {
+                    Some(v) => std::env::set_var(self.name, v),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_has_api_key_signals_misconfiguration() {
+        // Issue #99 follow-up: when use_llm is on but no env key is set,
+        // the engine should expose `Some(false)` so the pipeline can warn
+        // at startup instead of silently producing no LLM verdicts.
+        let _guard = EnvVarGuard::remove("OPENAI_API_KEY");
+
+        let engine = ClassificationEngine::new(
+            rules::default_rules(),
+            ClassificationEngineConfig {
+                use_llm: true,
+                llm_provider: "openai".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("engine");
+        assert_eq!(engine.llm_has_api_key(), Some(false));
+    }
+
+    #[tokio::test]
     async fn pipeline_runs_against_in_memory_db() {
         use crate::core::config::Config;
         use crate::core::db::Database;
