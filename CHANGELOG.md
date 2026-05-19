@@ -5,6 +5,14 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.11] - 2026-05-19
+
+### Fixed
+
+- **LLM fallback bypasses cascade short-circuit (#99)** — The four-tier classification cascade was exiting early on exact-rule and regex matches but still invoking the LLM fallback path in some edge cases. The fallback is now gated correctly so it only runs when all preceding tiers produce no result.
+- **Gate ADO `merge_commit_sha` by merge strategy (#96)** — The Azure DevOps PR fetcher was writing `lastMergeCommit.commitId` as `merge_commit_sha` regardless of merge strategy. The value is now only persisted when the PR was completed via merge (not squash or rebase), matching the semantics expected by commit-to-PR linkage.
+- **Gate GitHub `merge_commit_sha` on `merged_at` (#101)** — The GitHub PR fetcher could write a non-null `merge_commit_sha` for PRs that were closed without merging. The field is now only set when `merged_at` is non-null, preventing phantom commit-to-PR associations.
+
 ## [1.0.10] - 2026-05-18
 
 ### Fixed
