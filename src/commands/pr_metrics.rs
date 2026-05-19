@@ -20,11 +20,18 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, Utc};
 use clap::Args;
-use rusqlite::params;
+use rusqlite::params_from_iter;
+use rusqlite::types::Value;
 use tga::core::config::Config;
 use tga::core::db::Database;
 
 /// Arguments for `tga pr-metrics`.
+///
+/// Note: the `pr_comments_given` and `avg_revisions` columns in the report
+/// are reserved for future use. The underlying review-comment and
+/// revision-count data is not yet tracked, so those columns currently
+/// always report `0.0`. The CLI shape is stable, so populating them later
+/// is a non-breaking change.
 #[derive(Args, Debug)]
 pub struct PrMetricsArgs {
     /// Limit metrics to PRs created within the last N weeks.
@@ -112,81 +119,61 @@ fn aggregate(
     since_cutoff: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<EngineerMetrics>> {
     let conn = db.connection();
-    let cutoff_str = since_cutoff.map(|t| t.to_rfc3339());
 
-    let (sql, has_cutoff) = if cutoff_str.is_some() {
-        (
+    // Build the query and its bound parameters in one place. The only
+    // difference between the cutoff and no-cutoff cases is a single `WHERE`
+    // clause and one bound parameter, so the row-processing loop is shared.
+    let (sql, sql_params): (&str, Vec<Value>) = match since_cutoff {
+        Some(cutoff) => (
             "SELECT author, state, created_at, merged_at \
              FROM pull_requests WHERE created_at >= ?1",
-            true,
-        )
-    } else {
-        (
+            vec![Value::Text(cutoff.to_rfc3339())],
+        ),
+        None => (
             "SELECT author, state, created_at, merged_at FROM pull_requests",
-            false,
-        )
+            Vec::new(),
+        ),
     };
 
     let mut stmt = conn.prepare(sql)?;
     let mut by_author: std::collections::BTreeMap<String, EngineerMetrics> =
         std::collections::BTreeMap::new();
 
-    let mut process_row =
-        |author: String, state: String, created_at: String, merged_at: Option<String>| {
-            if author.is_empty() {
-                return;
-            }
-            let entry = by_author
-                .entry(author.clone())
-                .or_insert_with(|| EngineerMetrics {
-                    author,
-                    ..Default::default()
-                });
-            entry.prs_opened += 1;
-            if state == "merged" {
-                entry.prs_merged += 1;
-            }
-            if let (Ok(created), Some(merged)) = (
-                DateTime::parse_from_rfc3339(&created_at),
-                merged_at
-                    .as_deref()
-                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok()),
-            ) {
-                let dur = merged.signed_duration_since(created);
-                let hours = dur.num_seconds() as f64 / 3600.0;
-                if hours >= 0.0 {
-                    entry.cycle_time_hours_total += hours;
-                    entry.cycle_time_samples += 1;
-                }
-            }
-        };
-
-    if has_cutoff {
-        let cutoff = cutoff_str.unwrap();
-        let rows = stmt.query_map(params![cutoff], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?;
-        for r in rows {
-            let (a, s, c, m) = r?;
-            process_row(a, s, c, m);
+    let rows = stmt.query_map(params_from_iter(sql_params.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    for r in rows {
+        let (author, state, created_at, merged_at) = r?;
+        if author.is_empty() {
+            continue;
         }
-    } else {
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?;
-        for r in rows {
-            let (a, s, c, m) = r?;
-            process_row(a, s, c, m);
+        let entry = by_author
+            .entry(author.clone())
+            .or_insert_with(|| EngineerMetrics {
+                author,
+                ..Default::default()
+            });
+        entry.prs_opened += 1;
+        if state == "merged" {
+            entry.prs_merged += 1;
+        }
+        if let (Ok(created), Some(merged)) = (
+            DateTime::parse_from_rfc3339(&created_at),
+            merged_at
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok()),
+        ) {
+            let dur = merged.signed_duration_since(created);
+            let hours = dur.num_seconds() as f64 / 3600.0;
+            if hours >= 0.0 {
+                entry.cycle_time_hours_total += hours;
+                entry.cycle_time_samples += 1;
+            }
         }
     }
 

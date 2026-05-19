@@ -203,10 +203,16 @@ fn backfill_ticket_ids(db: &mut Database, dry_run: bool) -> anyhow::Result<()> {
 ///   * messages starting with `revert:` (Conventional Commits style).
 fn is_revert(message: &str) -> bool {
     let trimmed = message.trim_start();
-    let lower_prefix: String = trimmed.chars().take(8).collect::<String>().to_lowercase();
-    lower_prefix.starts_with("revert ")
-        || lower_prefix.starts_with("revert:")
-        || lower_prefix.starts_with("revert\"")
+    // The longest prefix we test is 7 bytes (`revert ` / `revert:` /
+    // `revert"`). All candidates are pure ASCII, so a byte-bounded slice is
+    // a safe split point and avoids allocating a lowercased copy of the
+    // whole (potentially large) commit message on every commit.
+    let head = trimmed.as_bytes();
+    let bound = head.len().min(7);
+    let prefix = &head[..bound];
+    prefix.eq_ignore_ascii_case(b"revert ")
+        || prefix.eq_ignore_ascii_case(b"revert:")
+        || prefix.eq_ignore_ascii_case(b"revert\"")
 }
 
 /// Extract the first recognizable ticket identifier from a commit message.

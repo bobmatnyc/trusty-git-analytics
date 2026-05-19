@@ -55,11 +55,16 @@ tga analyze --config config.yaml
 
 **Step 3** — Find reports in `./reports/`:
 
+A full run writes 14 files: 9 CSV, 4 JSON, and 1 Markdown report. The most
+commonly used ones are:
+
 ```
 reports/
 ├── authors.csv         # Per-author commit summary
 ├── weekly_activity.csv # Week-by-week breakdown
+├── ... (7 more CSV files: DORA, velocity, quality, etc.)
 ├── report.json         # Full structured payload
+├── ... (3 more JSON files)
 └── report.md           # Narrative Markdown report
 ```
 
@@ -92,7 +97,7 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `classification.llm_model` | string | `gpt-4o-mini` | LLM model identifier |
 | `classification.confidence_threshold` | float | `0.7` | Minimum acceptance confidence |
 | `classification.llm_fallback_threshold` | float | `0.0` | Commits with confidence above this value skip the LLM tier |
-| `classification.llm_fallback_concurrency` | uint | `4` | Max concurrent LLM requests during fallback |
+| `classification.llm_fallback_concurrency` | uint | `8` | Max concurrent LLM requests during fallback |
 | `github.token` | string | `$GITHUB_TOKEN` | GitHub PAT for PR fetch |
 | `github.org` | string | — | Org slug for org-wide PR queries |
 | `github.repo` | string | — | Single repo slug (`owner/name`) |
@@ -134,7 +139,7 @@ developer_aliases:
     - "alice@personal.dev"
   "Bob Jones":
     - "bob@company.com"
-    - "129991831+bobgithub@users.noreply.github.com"
+    - "100000001+bobgithub@users.noreply.github.com"
 ```
 
 **`team.members`** (structured roster with canonical email):
@@ -172,6 +177,8 @@ Run the full pipeline: collect → classify → report.
 ```bash
 tga analyze [--config <PATH>] [--database <PATH>] [--output <DIR>]
             [--skip-collect] [--skip-classify] [--weeks <N>]
+            [--from <DATE>] [--to <DATE>] [--dry-run]
+            [--validate-only] [--no-validate]
 ```
 
 | Flag | Description |
@@ -180,6 +187,11 @@ tga analyze [--config <PATH>] [--database <PATH>] [--output <DIR>]
 | `--skip-classify` | Skip Stage 2; use existing classifications |
 | `--output <DIR>` | Override `output.directory` from config |
 | `--weeks <N>` | Limit collection to the last N weeks (overrides config `start_date`) |
+| `--from <DATE>` | Start date for collection (ISO 8601 `YYYY-MM-DD`); mutually exclusive with `--weeks` |
+| `--to <DATE>` | End date for collection (ISO 8601 `YYYY-MM-DD`); defaults to today |
+| `--dry-run` | Perform all steps against an in-memory database; the on-disk database is left untouched |
+| `--validate-only` | Run configuration validation and exit (0 on success, 1 on errors) |
+| `--no-validate` | Skip pre-flight configuration validation |
 
 ```bash
 # Full pipeline
@@ -195,18 +207,26 @@ Stage 1: extract commits from git repositories into the database.
 
 ```bash
 tga collect [--config <PATH>] [--database <PATH>]
-            [--repos <NAME,...>] [--since <DATE>] [--until <DATE>] [--weeks <N>]
+            [--repos <NAME,...>] [--from <DATE>] [--to <DATE>] [--weeks <N>]
+            [--since <DATE>] [--until <DATE>] [--dry-run]
+            [--force-refresh-prs] [--validate-only] [--no-validate]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--repos <NAME,...>` | Comma-separated list of repository names to collect; others are skipped |
-| `--since <DATE>` | Collect commits on or after this ISO 8601 date (overrides config and `--weeks`) |
-| `--until <DATE>` | Collect commits on or before this ISO 8601 date (overrides config) |
-| `--weeks <N>` | Limit collection to the last N weeks; `--since` takes precedence if both supplied |
+| `--from <DATE>` | Collect commits on or after this ISO 8601 date; mutually exclusive with `--weeks` |
+| `--to <DATE>` | Collect commits on or before this ISO 8601 date; defaults to today |
+| `--since <DATE>` | Legacy alias for `--from` (Python-predecessor compatibility); `--from` takes precedence |
+| `--until <DATE>` | Legacy alias for `--to` (Python-predecessor compatibility); `--to` takes precedence |
+| `--weeks <N>` | Limit collection to the last N weeks; `--weeks` takes precedence over `--from`/`--to` |
+| `--dry-run` | Run collection against an in-memory database; the on-disk database is left untouched |
+| `--force-refresh-prs` | Re-fetch ADO pull requests even when already cached (backfills pre-v1.0.9 rows) |
+| `--validate-only` | Run configuration validation and exit (0 on success, 1 on errors) |
+| `--no-validate` | Skip pre-flight configuration validation |
 
 ```bash
-tga collect --repos my-project --since 2024-01-01 --until 2024-03-31
+tga collect --repos my-project --from 2024-01-01 --to 2024-03-31
 tga collect --weeks 4   # collect last 4 weeks across all repos
 ```
 
@@ -216,13 +236,14 @@ Stage 2: run the classification cascade over collected commits.
 
 ```bash
 tga classify [--config <PATH>] [--database <PATH>]
-             [--rules <PATH>] [--use-llm]
+             [--rules <PATH>] [--use-llm] [--backfill-complexity]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--rules <PATH>` | Override `classification.rules_file` from config |
 | `--use-llm` | Enable LLM fallback regardless of config setting |
+| `--backfill-complexity` | Fill missing complexity scores (1–5) for already-classified commits via the LLM, without re-running the full cascade; category, confidence, and method are left untouched |
 
 ```bash
 tga classify --rules ./custom-rules.yaml --use-llm
@@ -244,6 +265,74 @@ tga report [--config <PATH>] [--database <PATH>]
 
 ```bash
 tga report --output ./q1-reports --formats csv,json
+```
+
+### tga pr-metrics
+
+Aggregate pull-request metrics per engineer from the `pull_requests` cache.
+
+```bash
+tga pr-metrics [--config <PATH>] [--database <PATH>]
+               [--weeks <N>] [--csv] [--output <PATH>]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--weeks <N>` | Limit metrics to PRs created within the last N weeks |
+| `--csv` | Emit CSV instead of an aligned text table |
+| `--output <PATH>` | Write output to a file (CSV with `--csv`, otherwise the text table) |
+
+```bash
+tga pr-metrics --weeks 12 --csv --output pr-metrics.csv
+```
+
+The `pr_comments_given` and `avg_revisions` columns are reserved for future
+use and currently always output `0.0`; the underlying review-comment and
+revision-count data is not yet tracked.
+
+### tga backfill
+
+Retroactive maintenance operations that update existing commit rows in place
+(outside the normal `collect → classify → report` pipeline).
+
+```bash
+tga backfill <SUBCOMMAND> [--dry-run]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `ai-detection` | Re-run LLM classification on low-confidence prior LLM verdicts |
+| `revert-flags` | Scan commit messages for revert patterns and set `is_revert` |
+| `ticket-ids` | Scan commit messages for ticket refs and update `ticket_id`/`ticketed` |
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Report how many rows would change without writing |
+
+```bash
+tga backfill revert-flags --dry-run
+tga backfill ticket-ids
+```
+
+### tga override
+
+Manage manual classification overrides (Tier 0). Rows here pin a commit's
+verdict regardless of what the rule-based or LLM tiers would produce.
+
+```bash
+tga override <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `add <SHA> <WORK_TYPE> <CHANGE_TYPE> [--notes <TEXT>] [--repo <PATH>]` | Insert (or replace) an override row for a commit SHA |
+| `list [--repo <PATH>]` | List every override row, optionally filtered by repository |
+| `remove <SHA> [--yes]` | Delete the override row(s) for a SHA (`--yes` skips confirmation) |
+
+```bash
+tga override add abc1234 feature feature --notes "manual review"
+tga override list
+tga override remove abc1234 --yes
 ```
 
 ## Pipeline Architecture
@@ -335,7 +424,9 @@ tga classify --rules ./my-rules.yaml
 
 ### CSV
 
-Two files are written when `csv` is in the format list:
+Nine CSV files are written when `csv` is in the format list (per-author,
+weekly activity, DORA metrics, velocity, quality, and related breakdowns).
+The two most commonly used are documented below.
 
 **`authors.csv`** — one row per author:
 
@@ -362,6 +453,10 @@ Two files are written when `csv` is in the format list:
 | `deletions` | Lines deleted in this bucket |
 
 ### JSON
+
+Four JSON files are written when `json` is in the format list:
+`report.json`, `velocity_summary.json`, `quality_summary.json`, and
+`dora_summary.json`. The primary one is documented below.
 
 **`report.json`** — full structured payload:
 

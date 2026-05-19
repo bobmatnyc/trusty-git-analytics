@@ -1,380 +1,286 @@
 # Database Schema
 
-`trusty-git-analytics` uses two SQLite databases, matching the schema of the Python
-predecessor. WAL journal mode is enabled to support concurrent reads during write-heavy
-collection phases.
+`tga` uses a single SQLite database file (`tga.db` by default). WAL journal mode is
+enabled on every open. All three pipeline stages (collect, classify, report) read from
+and write to this single file.
 
 ```sql
+-- Applied on every Database::open()
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
+PRAGMA synchronous  = NORMAL;
 PRAGMA foreign_keys = ON;
 ```
 
-## Files
-
-- `gitflow_cache.db` — primary cache of commits, PRs, issues, metrics, classifications
-- `identities.db` — developer identity resolution database (canonical IDs and aliases)
+The schema is managed by a versioned migration runner. Migrations are applied in order
+at startup and are idempotent (already-applied versions are skipped).
 
 ---
 
-## gitflow_cache.db Tables
+## Tables
 
-### `cached_commits`
+### `authors`
 
-Primary commit records extracted from git.
+Canonical developer identities. One row per unique developer after alias resolution.
 
-| Column | Type | Null | Notes |
-|--------|------|------|-------|
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
 | `id` | INTEGER PK | no | Autoincrement |
-| `commit_hash` | TEXT | no | Full OID hex |
-| `repo_path` | TEXT | no | Repository identifier |
-| `author_name` | TEXT | no | |
-| `author_email` | TEXT | no | |
-| `canonical_id` | TEXT | yes | FK to identities.db.developer_identities.id |
-| `timestamp` | DATETIME | no | UTC |
-| `iso_week` | TEXT | no | `YYYY-Www` |
-| `branch` | TEXT | yes | |
-| `is_merge` | BOOLEAN | no | parents > 1 |
-| `message` | TEXT | no | |
-| `files_changed` | JSON | no | Array of paths |
-| `lines_added` | INTEGER | no | |
-| `lines_deleted` | INTEGER | no | |
-| `filtered_insertions` | INTEGER | no | After exclude_paths |
-| `filtered_deletions` | INTEGER | no | After exclude_paths |
-| `story_points` | INTEGER | yes | From message regex |
-| `ticket_references` | JSON | no | Array of ticket refs |
-| `ai_confidence_score` | REAL | yes | 0–1 |
-| `ai_detection_method` | TEXT | yes | |
-| `created_at` | DATETIME | no | |
+| `canonical_name` | TEXT | no | Display name used in reports |
+| `canonical_email` | TEXT | no | Primary email; UNIQUE constraint |
+| `aliases` | TEXT | no | JSON array of alternate emails/handles; default `'[]'` |
 
-**Indexes**: UNIQUE(`commit_hash`, `repo_path`), INDEX(`iso_week`), INDEX(`canonical_id`),
-INDEX(`timestamp`).
+**Indexes**: UNIQUE(`canonical_email`).
 
-### `qualitative_commits`
+---
 
-Classification results per commit. FK to `cached_commits.id`.
+### `commits`
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PK | |
-| `commit_id` | INTEGER | FK → `cached_commits.id` ON DELETE CASCADE |
-| `change_type` | TEXT | One of 19 taxonomy values |
-| `work_type` | TEXT | After taxonomy_mapping remap |
-| `confidence` | REAL | 0–1 |
-| `tier` | TEXT | `override` / `issue_type` / `jira_mapping` / `llm` / `rule_based` |
-| `risk_level` | TEXT | `low` / `medium` / `high` |
-| `domain` | TEXT | |
-| `complexity_score` | REAL | |
-| `model_used` | TEXT | LLM model identifier |
-| `classified_at` | DATETIME | |
+Raw git commit records. One row per commit SHA.
 
-**Indexes**: UNIQUE(`commit_id`), INDEX(`change_type`), INDEX(`work_type`).
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `sha` | TEXT | no | Full OID hex; UNIQUE constraint |
+| `author_id` | INTEGER | yes | FK → `authors(id)` ON DELETE SET NULL |
+| `author_name` | TEXT | no | Raw name from git log |
+| `author_email` | TEXT | no | Raw email from git log |
+| `timestamp` | TEXT | no | ISO 8601 UTC timestamp |
+| `message` | TEXT | no | Full commit message |
+| `repository` | TEXT | no | Repository name (from config `name` field) |
+| `files_changed` | INTEGER | no | Count of changed files; default 0 |
+| `insertions` | INTEGER | no | Lines added; default 0 |
+| `deletions` | INTEGER | no | Lines removed; default 0 |
+| `classification_id` | INTEGER | yes | FK → `classifications(id)` ON DELETE SET NULL |
+| `confidence` | REAL | yes | Classification confidence [0, 1] |
+| `is_merge` | INTEGER | no | Boolean (0/1); default 0 |
+| `ticketed` | INTEGER | no | Boolean — ticket reference detected; default 0 |
+| `ticket_id` | TEXT | yes | Detected ticket reference (e.g. `ENG-123`, `AB#456`) |
+| `is_revert` | INTEGER | no | Boolean — commit is a revert; default 0 |
+| `complexity` | INTEGER | yes | Complexity score 1–5 (populated by `--backfill-complexity`) |
 
-### `daily_commit_batches`
+**Indexes**: UNIQUE(`sha`), INDEX(`author_id`), INDEX(`repository`), INDEX(`timestamp`).
 
-Daily aggregation per repo for classification batch tracking.
+---
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PK | |
-| `repo_path` | TEXT | |
-| `date` | DATE | |
-| `iso_week` | TEXT | |
-| `commit_count` | INTEGER | |
-| `classification_status` | TEXT | `pending` / `running` / `complete` / `failed` |
-| `classified_count` | INTEGER | |
-| `last_attempted_at` | DATETIME | |
+### `classifications`
 
-**Constraint**: UNIQUE(`repo_path`, `date`).
+Classification results. One row per distinct verdict. Referenced by `commits.classification_id`.
 
-### `pull_request_cache`
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `category` | TEXT | no | Work category (e.g. `feature`, `bugfix`, `refactor`) |
+| `subcategory` | TEXT | yes | Optional leaf label for granular reporting |
+| `ticket_id` | TEXT | yes | Ticket reference extracted during classification |
+| `confidence` | REAL | no | Confidence score; default 0.0 |
+| `method` | TEXT | no | `exact_rule`, `regex_rule`, `fuzzy_match`, `llm_fallback`, or `manual` |
 
-GitHub PR records.
+---
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PK | |
-| `repo_path` | TEXT | |
-| `github_repo` | TEXT | `owner/name` |
-| `pr_number` | INTEGER | |
-| `title` | TEXT | |
-| `description` | TEXT | |
-| `author` | TEXT | GitHub login |
-| `author_canonical_id` | TEXT | |
-| `pr_state` | TEXT | `open` / `closed` / `merged` |
-| `created_at` | DATETIME | |
-| `updated_at` | DATETIME | |
-| `merged_at` | DATETIME | |
-| `closed_at` | DATETIME | |
-| `labels` | JSON | |
-| `commit_hashes` | JSON | |
-| `additions` | INTEGER | |
-| `deletions` | INTEGER | |
-| `changed_files` | INTEGER | |
-| `approvals` | INTEGER | |
-| `change_requests` | INTEGER | |
-| `time_to_first_review_seconds` | INTEGER | |
-| `revision_count` | INTEGER | |
-| `cached_at` | DATETIME | |
+### `files`
 
-**Constraint**: UNIQUE(`github_repo`, `pr_number`).
+File-level change records. One row per (commit, file) pair. Present only when
+`output.include_files: true` in config.
 
-### `issue_cache`
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `commit_id` | INTEGER | no | FK → `commits(id)` ON DELETE CASCADE |
+| `path` | TEXT | no | Relative file path |
+| `change_type` | TEXT | no | `added`, `modified`, `deleted`, or `renamed` |
+| `insertions` | INTEGER | no | Lines added; default 0 |
+| `deletions` | INTEGER | no | Lines removed; default 0 |
 
-External ticket records (JIRA, GitHub issues).
+**Indexes**: INDEX(`commit_id`).
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PK | |
-| `platform` | TEXT | `jira` / `github` |
-| `external_id` | TEXT | e.g. `API-123`, `42` |
-| `project_key` | TEXT | |
-| `issue_type` | TEXT | bug / story / task / etc. |
-| `title` | TEXT | |
-| `description` | TEXT | |
-| `status` | TEXT | |
-| `assignee` | TEXT | |
-| `story_points` | REAL | |
-| `labels` | JSON | |
-| `created_at` | DATETIME | |
-| `updated_at` | DATETIME | |
-| `resolved_at` | DATETIME | |
-| `cached_at` | DATETIME | |
+---
 
-**Constraint**: UNIQUE(`platform`, `external_id`).
+### `pull_requests`
 
-### `repository_analysis_status`
+Pull request metadata fetched from GitHub, Bitbucket, or Azure DevOps.
 
-Per-repo tracking of analysis state and coverage.
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `provider` | TEXT | no | `github`, `bitbucket`, or `azdo`; default `github` |
+| `pr_number` | INTEGER | no | PR number within the repository |
+| `title` | TEXT | no | PR title |
+| `author` | TEXT | no | Author login or display name |
+| `state` | TEXT | no | `open`, `closed`, or `merged` |
+| `created_at` | TEXT | no | ISO 8601 timestamp |
+| `merged_at` | TEXT | yes | ISO 8601 timestamp; NULL if not merged |
+| `commit_shas` | TEXT | no | JSON array of commit SHAs in the PR; default `'[]'` |
+| `merge_commit_sha` | TEXT | yes | SHA of the merge commit (when available) |
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `repo_path` | TEXT PK | |
-| `last_collected_at` | DATETIME | |
-| `last_classified_at` | DATETIME | |
-| `last_reported_at` | DATETIME | |
-| `status` | TEXT | `idle` / `collecting` / `classifying` / `reporting` / `failed` |
-| `total_commits` | INTEGER | |
-| `classified_commits` | INTEGER | |
-| `classification_coverage_pct` | REAL | |
-| `config_hash` | TEXT | blake3 hash of config inputs |
+**Indexes**: UNIQUE(`provider`, `pr_number`).
 
-### `daily_metrics`
+---
 
-Per-developer per-day aggregations.
+### `linear_issues`
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `canonical_id` | TEXT | |
-| `date` | DATE | |
-| `commits` | INTEGER | |
-| `lines_added` | INTEGER | |
-| `lines_deleted` | INTEGER | |
-| `prs_opened` | INTEGER | |
-| `prs_merged` | INTEGER | |
-| `story_points` | REAL | |
+Linear ticket data fetched on reference detection.
 
-**PK**: (`canonical_id`, `date`).
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `issue_id` | TEXT | no | Linear issue identifier (e.g. `ENG-123`) |
+| `title` | TEXT | yes | Issue title |
+| `state` | TEXT | yes | Issue state (e.g. `In Progress`, `Done`) |
+| `team_key` | TEXT | yes | Linear team key |
+| `url` | TEXT | yes | Issue URL |
+| `fetched_at` | TEXT | no | ISO 8601 timestamp |
 
-### `weekly_trends`
+**Indexes**: UNIQUE(`issue_id`).
 
-Per-developer per-ISO-week aggregations.
+---
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `canonical_id` | TEXT | |
-| `iso_week` | TEXT | |
-| `commits` | INTEGER | |
-| `lines_changed` | INTEGER | |
-| `prs_merged` | INTEGER | |
-| `activity_score` | REAL | |
+### `work_items`
 
-**PK**: (`canonical_id`, `iso_week`).
+Unified ticket/work-item records from JIRA, Linear, and Azure DevOps.
 
-### `weekly_pr_metrics`
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `provider` | TEXT | no | `jira`, `linear`, or `azdo` |
+| `external_id` | TEXT | no | Provider-specific ID (e.g. `ENG-123`, `AB#456`) |
+| `title` | TEXT | yes | |
+| `work_item_type` | TEXT | yes | Issue type (e.g. `Bug`, `Story`, `Task`) |
+| `state` | TEXT | yes | |
+| `fetched_at` | TEXT | no | ISO 8601 timestamp |
 
-Per-engineer per-ISO-week PR review/cycle-time metrics.
+**Indexes**: UNIQUE(`provider`, `external_id`).
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `engineer_identifier` | TEXT | |
-| `iso_week` | TEXT | |
-| `prs_opened` | INTEGER | |
-| `prs_merged` | INTEGER | |
-| `avg_cycle_time_hours` | REAL | |
-| `median_cycle_time_hours` | REAL | |
-| `avg_revision_count` | REAL | |
-| `total_approvals_given` | INTEGER | |
-| `total_change_requests_given` | INTEGER | |
+---
 
-**PK**: (`engineer_identifier`, `iso_week`).
+### `commit_work_items`
+
+Many-to-many join table linking commits to work items.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `commit_id` | INTEGER | no | FK → `commits(id)` ON DELETE CASCADE |
+| `work_item_id` | INTEGER | no | FK → `work_items(id)` ON DELETE CASCADE |
+
+**PK**: (`commit_id`, `work_item_id`).
+
+---
 
 ### `classification_overrides`
 
-Manual override entries (Tier 0).
+Manual Tier 0 overrides. Entries here take absolute priority over all rule-based and
+LLM classifications. Managed via `tga override add|list|remove`.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PK | |
-| `commit_hash` | TEXT | |
-| `repo_path` | TEXT | |
-| `change_type` | TEXT | |
-| `work_type` | TEXT | |
-| `reason` | TEXT | |
-| `created_by` | TEXT | |
-| `created_at` | DATETIME | |
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `commit_sha` | TEXT | no | Commit SHA |
+| `repo` | TEXT | yes | Repository name scope; NULL = applies to all repos |
+| `work_type` | TEXT | no | Override work type |
+| `change_type` | TEXT | no | Override change type |
+| `notes` | TEXT | yes | Justification/notes |
+| `created_at` | TEXT | no | ISO 8601 timestamp |
 
-**Constraint**: UNIQUE(`commit_hash`, `repo_path`).
+**Indexes**: UNIQUE(`commit_sha`, `repo`).
 
-### `schema_version`
-
-Migration tracking.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `version` | INTEGER PK | |
-| `applied_at` | DATETIME | |
-| `description` | TEXT | |
+---
 
 ### `collection_runs`
 
-Per-(repo, ISO-week) collection bookkeeping. One row per successfully
-collected `(repository, iso_year, iso_week)` tuple. The presence of a row
-signals to the per-week backfill iterator that this week is already
-collected (skip unless `--force` is supplied).
+Per-(repo, ISO year, ISO week) collection bookkeeping. Presence of a row signals that
+this (repo, year, week) tuple has already been collected. The `--force` flag bypasses
+this check and allows re-collection.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PK | Auto-increment |
-| `repo_name` | TEXT | |
-| `iso_year` | INTEGER | |
-| `iso_week` | INTEGER | |
-| `collected_at` | TEXT | ISO-8601 timestamp |
-| `commit_count` | INTEGER | Defaults to 0 |
-| `repo_count` | INTEGER | Size of `repositories[]` at write time. Added in migration v9 (#69). Defaults to 0 for legacy rows (treated as "unknown coverage"). |
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `repo_name` | TEXT | no | Repository name |
+| `iso_year` | INTEGER | no | ISO year (e.g. `2025`) |
+| `iso_week` | INTEGER | no | ISO week number 1–53 |
+| `collected_at` | TEXT | no | ISO 8601 timestamp |
+| `commit_count` | INTEGER | no | Number of commits collected; default 0 |
+| `repo_count` | INTEGER | no | Size of `repositories[]` at write time; default 0 |
 
-**Constraints**: UNIQUE(`repo_name`, `iso_year`, `iso_week`).
-**Indexes**: INDEX(`repo_name`, `iso_year`, `iso_week`).
+**Indexes**: UNIQUE(`repo_name`, `iso_year`, `iso_week`), INDEX(`repo_name`, `iso_year`, `iso_week`).
+
+`repo_count` (added in migration `0009`) enables week-over-week baseline drift detection
+when repository lists change.
+
+---
+
+### `repository_analysis_status`
+
+Per-repository tracking of pipeline state. One row per repository name.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `repo_name` | TEXT PK | no | Repository name |
+| `last_collected_at` | TEXT | yes | ISO 8601 timestamp |
+| `last_classified_at` | TEXT | yes | ISO 8601 timestamp |
+| `last_reported_at` | TEXT | yes | ISO 8601 timestamp |
+| `total_commits` | INTEGER | no | Total commits in DB for this repo |
+| `classified_commits` | INTEGER | no | Commits with a classification |
+| `classification_coverage_pct` | REAL | yes | `classified / total * 100` |
+| `config_hash` | TEXT | yes | BLAKE3 hash of config inputs; used to detect config drift |
+
+---
+
+### `azdo_iterations`
+
+Azure DevOps iteration/sprint data.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `iteration_id` | TEXT | no | ADO iteration ID |
+| `name` | TEXT | yes | Iteration display name |
+| `project` | TEXT | no | ADO project name |
+| `start_date` | TEXT | yes | ISO 8601 date |
+| `finish_date` | TEXT | yes | ISO 8601 date |
+| `fetched_at` | TEXT | no | ISO 8601 timestamp |
+
+**Indexes**: UNIQUE(`iteration_id`, `project`).
+
+---
 
 ### `pr_reviewers`
 
 Per-PR reviewer records. Supports ADO reviewer votes; the `provider` column allows
-future expansion to GitHub review requests. FK to `pull_requests.id`.
+future expansion to GitHub review requests.
 
-Added in migration `0011_pr_reviewers.sql` (v1.0.6 #84).
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | INTEGER PK | no | Autoincrement |
+| `pr_id` | INTEGER | no | FK → `pull_requests(id)` ON DELETE CASCADE |
+| `provider` | TEXT | no | `azdo`; future: `github`; default `azdo` |
+| `reviewer_id` | TEXT | no | Upstream identity ID |
+| `display_name` | TEXT | yes | Human-readable name |
+| `vote` | INTEGER | yes | ADO vote: 10=approved, 5=approved-with-suggestions, 0=no-vote, -5=waiting, -10=rejected |
+| `is_required` | INTEGER | yes | Boolean — whether reviewer approval is required |
+| `is_container` | INTEGER | yes | Boolean — whether entry represents a group/team |
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PK | Auto-increment |
-| `pr_id` | INTEGER | FK → `pull_requests.id` ON DELETE CASCADE |
-| `provider` | TEXT | `'azdo'` (default); future: `'github'`, etc. |
-| `reviewer_id` | TEXT | Upstream identity ID |
-| `display_name` | TEXT | Human-readable name |
-| `vote` | INTEGER | ADO vote: 10=approved, 5=approved-with-suggestions, 0=no-vote, -5=waiting, -10=rejected |
-| `is_required` | BOOLEAN | Whether reviewer approval is required |
-| `is_container` | BOOLEAN | Whether entry represents a group/team |
-
-**Constraint**: UNIQUE(`pr_id`, `provider`, `reviewer_id`).
-**Index**: INDEX(`pr_id`).
-
-### Additional Tables
-
-- `detailed_tickets` — full JIRA ticket detail snapshots
-- `commit_ticket_correlations` — many-to-many commits ↔ tickets
-- `classification_batches` — LLM batch dispatch tracking
-- `llm_usage_stats` — provider/model/token usage logging
-- `training_data` — manual labels for fine-tuning
-- `training_sessions` — training run history
-- `classification_models` — local model registry
-- `weekly_fetch_status` — per-repo per-ISO-week fetch immutability flag
-- `ticketing_activity_cache` — non-commit-linked ticket events
-- `confluence_page_cache` — Confluence document cache
+**Indexes**: UNIQUE(`pr_id`, `provider`, `reviewer_id`), INDEX(`pr_id`).
 
 ---
 
-## identities.db Tables
+## Migration History
 
-### `developer_identities`
-
-Canonical developer records.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | TEXT PK | UUID v4 |
-| `canonical_name` | TEXT | |
-| `canonical_email` | TEXT | |
-| `github_login` | TEXT | |
-| `created_at` | DATETIME | |
-| `last_seen_at` | DATETIME | |
-
-### `developer_aliases`
-
-Mapping from observed identity to canonical record.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PK | |
-| `canonical_id` | TEXT | FK → `developer_identities.id` |
-| `name` | TEXT | |
-| `email` | TEXT | |
-| `source` | TEXT | `git` / `github` / `jira` / `manual` |
-| `confidence` | REAL | |
-
-**Indexes**: INDEX(`email`), INDEX(`name`).
-
-### `pattern_cache`
-
-NLP feature cache keyed by canonical content hash.
-
----
-
-## Migration Versions (v1–v18)
-
-The Python predecessor introduced 18 schema migrations. The Rust port replays these as a
-sequence of versioned SQL migrations at startup. Summary:
-
-| Version | Description |
-|---------|-------------|
-| v1 | Initial schema (cached_commits, developer_identities, developer_aliases) |
-| v2 | Add `qualitative_commits` |
-| v3 | Add `pull_request_cache` |
-| v4 | Add `issue_cache` |
-| v5 | Add `daily_commit_batches`, classification_status enum |
-| v6 | Add `repository_analysis_status` with config_hash |
-| v7 | Add `daily_metrics`, `weekly_trends` |
-| v8 | Add `weekly_pr_metrics` with PR review fields |
-| v9 | Add `classification_overrides` (Tier 0) |
-| v10 | Add `commit_ticket_correlations` join table |
-| v11 | Add `detailed_tickets` for JIRA snapshots |
-| v12 | Add `llm_usage_stats` |
-| v13 | Add `classification_batches` |
-| v14 | Add `training_data`, `training_sessions` |
-| v15 | Add `classification_models` registry |
-| v16 | Add `weekly_fetch_status` immutability |
-| v17 | Add `ticketing_activity_cache` |
-| v18 | Add `confluence_page_cache` |
-
-### Rust port migrations (re-indexed `0001`–`0009`)
+Migrations are applied in order from `src/core/db/sql/`. Never modify an applied
+migration — always add a new one.
 
 | File | Description |
-|------|-------------|
-| `0001_initial_schema.sql` | Core tables for the Rust port |
-| `0002_linear_issues.sql` | Linear PM source |
-| `0003_commits_ticketed.sql` | `ticketed` flag on commits |
-| `0004_collection_runs.sql` | Per-(repo, ISO-week) bookkeeping |
-| `0005_work_items.sql` | Unified PM work-item table |
-| `0006_classification_overrides.sql` | Tier-0 manual overrides |
-| `0007_pr_metrics_and_backfill.sql` | PR metrics + ticket backfill |
-| `0008_azdo_iterations.sql` | Azure DevOps iterations |
-| `0009_collection_runs_repo_count.sql` | Issue #69 — `repo_count` column on `collection_runs` for WoW baseline drift detection |
-| `0010_pull_requests_provider.sql` | Issue #71 — adds `provider` column (default `'github'`) and UNIQUE index on `(provider, pr_number)` to `pull_requests` for correct per-provider deduplication |
-| `0011_pr_reviewers.sql` | Issue #84 — `pr_reviewers` table for ADO (and future) PR reviewer tracking with vote values |
+|---|---|
+| `0001_initial_schema.sql` | Core tables: `authors`, `commits`, `classifications`, `files`, `pull_requests` |
+| `0002_linear_issues.sql` | `linear_issues` table |
+| `0003_commits_ticketed.sql` | `ticketed` and `ticket_id` columns on `commits` |
+| `0004_collection_runs.sql` | `collection_runs` table for per-week bookkeeping |
+| `0005_work_items.sql` | `work_items` and `commit_work_items` tables |
+| `0006_classification_overrides.sql` | `classification_overrides` table (Tier 0) |
+| `0007_pr_metrics_and_backfill.sql` | PR metrics columns; `is_revert` on `commits` |
+| `0008_azdo_iterations.sql` | `azdo_iterations` table |
+| `0009_collection_runs_repo_count.sql` | `repo_count` column on `collection_runs` |
+| `0010_pull_requests_provider.sql` | `provider` column and updated UNIQUE index on `pull_requests` |
+| `0011_pr_reviewers.sql` | `pr_reviewers` table |
+| `0012_repository_analysis_status.sql` | `repository_analysis_status` table |
+| `0013_commits_complexity.sql` | `complexity` column on `commits` (1–5 scale) |
 
-Future migrations will be added as `0012_*.sql`, etc.
-
-## Rust Improvements Over Python
-
-- **WAL mode** enabled by default (Python predecessor used DELETE journal mode)
-- Better composite indexes for collection/classification join queries
-- Single connection per crate with explicit transactions for batch writes (no SQLAlchemy session overhead)
-- `PRAGMA mmap_size = 268435456;` (256 MB) for memory-mapped reads on large caches
+Future migrations continue from `0014_*.sql`.

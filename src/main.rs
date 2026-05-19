@@ -153,10 +153,14 @@ pub struct CollectArgs {
     /// Only collect from these repository names (comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub repos: Vec<String>,
-    /// Collect since date (ISO 8601, overrides config). Legacy alias for --from.
+    /// Legacy alias for --from, accepted for backwards compatibility with
+    /// scripts written against the Python `gitflow-analytics` predecessor.
+    /// If both --from and --since are supplied, --from takes precedence.
     #[arg(long)]
     pub since: Option<String>,
-    /// Collect until date (ISO 8601, overrides config). Legacy alias for --to.
+    /// Legacy alias for --to, accepted for backwards compatibility with
+    /// scripts written against the Python `gitflow-analytics` predecessor.
+    /// If both --to and --until are supplied, --to takes precedence.
     #[arg(long)]
     pub until: Option<String>,
     /// Start date for collection (ISO8601: YYYY-MM-DD). Mutually exclusive with --weeks.
