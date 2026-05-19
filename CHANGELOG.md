@@ -5,6 +5,12 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.12] - 2026-05-19
+
+### Added
+
+- **Native complexity scoring 1–5 with DB migration 0013 and `--backfill-complexity` flag (#97)** — Commits are now scored for complexity on a 1–5 scale using a native classifier. Schema migration 0013 adds the `complexity` column to the `commits` table, and the new `--backfill-complexity` flag allows retroactive scoring of existing commits in the database.
+
 ## [1.0.11] - 2026-05-19
 
 ### Fixed
