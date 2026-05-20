@@ -11,7 +11,7 @@ Analyze git repositories to measure developer productivity — classify commit w
 ### From crates.io (recommended)
 
 ```bash
-cargo install trusty-git-analytics
+cargo install tga
 ```
 
 This installs the `tga` binary to `~/.cargo/bin/`. Ensure `~/.cargo/bin` is in your `PATH`.
@@ -19,8 +19,8 @@ This installs the `tga` binary to `~/.cargo/bin/`. Ensure `~/.cargo/bin` is in y
 ### From source
 
 ```bash
-git clone https://github.com/bobmatnyc/trusty-git-analytics
-cd trusty-git-analytics
+git clone https://github.com/bobmatnyc/trusty-tools
+cd trusty-tools/crates/trusty-git-analytics
 cargo install --path .
 ```
 
