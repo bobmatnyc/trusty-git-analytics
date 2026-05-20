@@ -1,6 +1,7 @@
 [package]
 name = "tga"
 version = "1.0.12"
+publish = false
 edition = "2021"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 license = "Elastic-2.0"
