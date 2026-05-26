@@ -98,10 +98,10 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `classification.confidence_threshold` | float | `0.7` | Minimum acceptance confidence |
 | `classification.llm_fallback_threshold` | float | `0.0` | Commits with confidence above this value skip the LLM tier |
 | `classification.llm_fallback_concurrency` | uint | `8` | Max concurrent LLM requests during fallback |
-| `github.token` | string | `$GITHUB_TOKEN` | GitHub PAT for PR fetch |
+| `github.token` | string | `$GITHUB_TOKEN` | GitHub PAT for PR fetch. Required scopes: `public_repo` for public repos, `repo` for private repos. Without a token, GitHub rate-limits anonymous traffic to 60 requests/hour and most PRs will be missed. |
 | `github.org` | string | — | Org slug for org-wide PR queries |
 | `github.repo` | string | — | Single repo slug (`owner/name`) |
-| `github.fetch_prs` | bool | `false` | Fetch pull request metadata |
+| `github.fetch_prs` | bool | `false` | Fetch pull request metadata. **Must be `true` for `tga pr-metrics` to return data** — when left at the default, `tga collect` writes zero rows to `pull_requests` (issue #211). |
 | `github.ticket_regex` | string | — | Override regex for detecting GitHub ticket refs in commit messages |
 | `jira.url` | string | — | JIRA base URL |
 | `jira.username` | string | — | JIRA API username (email for Cloud) |
@@ -124,6 +124,13 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `cache.directory` | path | — | Cache directory (supports `~`) |
 | `version` | string | — | Schema version; stored for compatibility |
 | `profile` | string | — | Named profile; stored for compatibility |
+| `dora.deployment_source` | string | `git_tags` | Source for `tga deployments collect`. One of `git_tags`, `github_releases`, `github_actions`, `manual`. |
+| `dora.deployment_tag_pattern` | regex | `^v?[0-9]+\.[0-9]+\.[0-9]+(-...)?$` | Tags matching this regex are ingested as deployments. |
+| `dora.production_branch` | string | `main` | Default branch that production deployments come from. |
+| `dora.failure_signals` | list | `[]` | One signal per entry; `work_type` (classification category) and/or `commit_message_pattern` (regex) + `within_hours` window. |
+| `dora.datadog_dir` | path | — | Directory of Datadog incident exports (.json). Currently a stub — JIRA SRE path is the default MTTR source. |
+| `jira.jira_project_mappings` | map | `{}` | Project key → work type (issue #206). Fires as Tier 1.6 — outranks the generic ticket regex. |
+| `jira.jira_project_mapping_confidence` | float | `0.88` | Per-verdict confidence for the JIRA mapping tier. |
 
 Paths support `~` expansion. Config files from the Python `gitflow-analytics` tool load without changes — unknown keys are silently ignored.
 
@@ -335,6 +342,38 @@ tga override list
 tga override remove abc1234 --yes
 ```
 
+### tga rules
+
+Introspect the classification rule set (issue #209). Useful for tuning
+rules and answering "why was this commit classified as X?".
+
+```bash
+tga rules list                       # every loaded rule, sorted by priority
+tga rules show <commit-sha>          # verdict + method recorded for a commit
+tga rules test "feat: add login"     # dry-run the cascade against a message
+```
+
+### tga deployments / tga incidents / tga dora
+
+DORA metrics infrastructure (issues #207, #208, #212, #213).
+
+```bash
+# Step 1: ingest deployment events (default: git tags matching dora.deployment_tag_pattern)
+tga deployments collect
+
+# Step 2 (optional): ingest production incidents from JIRA SRE issues
+tga incidents collect
+
+# Step 3: compute Deployment Frequency, Lead Time, Change Failure Rate, MTTR.
+# Also rebuilds the `deployment_failures` derived join from the current
+# `dora.failure_signals` config — safe to re-run after a config edit.
+tga dora
+```
+
+The four DORA metrics land in pre-computed SQL views
+(`v_deployment_frequency`, `v_lead_time`, `v_change_failure_rate`,
+`v_mttr`) so dashboards can read them directly without re-aggregating.
+
 ## Pipeline Architecture
 
 ```
@@ -362,7 +401,19 @@ Each commit message is tested against tiers in order. The first tier to produce 
 
 **Tier 1.5 — Issue Type** (confidence 0.90): when the commit has ticket references resolving to rows in `issue_cache`, maps the upstream issue type (`bug`, `story`, `task`, `spike`, etc.) directly to a `change_type`.
 
-**Tier 3 — JIRA Project Mapping** (confidence 0.95): when `jira_project_mappings` is configured, maps the JIRA project key prefix of any `[A-Z]+-\d+` reference to a `change_type`.
+**Tier 1.6 — JIRA Project Mapping** (default confidence 0.88, override via `jira.jira_project_mapping_confidence`): when `jira.jira_project_mappings` is configured, maps the JIRA project key prefix of any `[A-Z]+-\d+` reference to a `change_type`. Fires *before* the regex tier so project mappings outrank the generic `jira-ticket` regex rule (issue #206). Example config:
+
+```yaml
+jira:
+  jira_project_mappings:
+    TQL: bug_fix
+    APEX: integration
+    INFRA: platform_infrastructure
+    SEC: security
+  jira_project_mapping_confidence: 0.88   # optional, default 0.88
+```
+
+Tier-0 manual overrides and exact-keyword conventional-commit prefixes (e.g. `fix:`) still beat this tier.
 
 **Tier 4 — Exact (Aho-Corasick)**: builds a single finite-state machine from every keyword list across every rule and scans the message in O(n) time. Matches `feat:`, `fix:`, `chore:`, etc. Confidence 0.85–0.95.
 
