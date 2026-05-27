@@ -5,6 +5,16 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-05-27
+
+### Fixed
+
+- **`commits.ticket_id` NULL for extractable JIRA IDs during `tga collect` (#316)** — 32.3% of uncategorized commits (2,006 of 6,212) had clearly extractable JIRA ticket IDs in their commit messages (e.g. `BB-2746`, `SRE-3104`, `DRE-405`) but NULL `ticket_id` because extraction only happened in `tga backfill ticket-ids`, not at INSERT time during `tga collect`. `extract_ticket_id` is now called inline during collection so `commits.ticket_id` is populated immediately without a separate backfill pass. The `tga backfill ticket-ids` subcommand is retained for patching legacy databases.
+
+### Changed
+
+- **`extract_ticket_id` moved to `tga::collect::ticket`** — The function was previously a private implementation detail of `src/commands/backfill.rs`. It is now a public API in `tga::collect::ticket` (alongside `is_ticketed`) so it can be reused by the collection pipeline. The `backfill` module now imports from `ticket` rather than maintaining its own duplicate.
+
 ## [1.0.12] - 2026-05-19
 
 ### Added
@@ -151,7 +161,7 @@ identity-resolution honesty, and a clean CI gate.
   of doc-links. `cargo doc --no-deps` is now warning-free.
 - **`duetto_contractors_config_resolves` identity resolver test** —
   Verified passing against the bundled `configs/duetto-contractors.yaml`
-  fixture; "Andre Ramos" and the other listed contractors resolve
+  fixture; "Pedro Silva" and the other listed contractors resolve
   correctly via the configured alias map.
 
 ### Documentation
