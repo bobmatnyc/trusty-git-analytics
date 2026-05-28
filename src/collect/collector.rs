@@ -19,6 +19,49 @@ use crate::core::config::Config;
 use crate::core::db::{self, Database};
 use crate::core::models::PullRequest;
 
+/// Outcome of a `git fetch origin` attempt for a single repository.
+///
+/// Why: fetch errors are invisible unless the user reads tracing logs;
+/// surfacing them in `CollectionStats` lets the CLI print an actionable
+/// end-of-run summary.
+/// What: three variants — Success (remote updated), Failed (network/auth error
+/// recorded as a string), Skipped (no-fetch flag or no remote configured).
+/// Test: covered by `commands::collect` integration tests.
+#[derive(Debug, Clone)]
+pub enum FetchOutcome {
+    /// Remote was fetched successfully.
+    Success {
+        /// Name of the remote (usually `"origin"`).
+        remote: String,
+    },
+    /// Fetch was attempted but failed.
+    Failed {
+        /// Name of the remote that was tried.
+        remote: String,
+        /// Human-readable error description.
+        error: String,
+    },
+    /// Fetch was not attempted.
+    Skipped {
+        /// Reason the fetch was skipped (e.g. `"--no-fetch"` or `"no remote"`).
+        reason: String,
+    },
+}
+
+/// Per-repository fetch result, collected into [`CollectionStats::fetch_outcomes`].
+///
+/// Why: groups the display name of the repo with its fetch outcome so the
+/// end-of-run summary can be printed without re-querying the git repo.
+/// What: plain data carrier.
+/// Test: covered by collection pipeline integration tests.
+#[derive(Debug, Clone)]
+pub struct PerRepoFetch {
+    /// Display name of the repository (from config `name` or dir basename).
+    pub repo: String,
+    /// Outcome of the fetch attempt for this repo.
+    pub outcome: FetchOutcome,
+}
+
 /// Aggregate statistics for a single pipeline run.
 ///
 /// Why: callers (CLI, integration tests) need a single typed object
@@ -47,6 +90,11 @@ pub struct CollectionStats {
     pub errors: Vec<String>,
     /// Total `fact_commit_reachability` rows upserted across all repos.
     pub reachability_rows: usize,
+    /// Per-repo fetch outcomes (one entry per repository attempted).
+    ///
+    /// Populated in the per-repo loop; used by the CLI to print the
+    /// end-of-collect fetch summary.
+    pub fetch_outcomes: Vec<PerRepoFetch>,
 }
 
 /// Top-level Stage 1 orchestrator.
@@ -67,6 +115,29 @@ pub struct CollectionPipeline {
     /// When `true`, skip the tag and release-branch reachability scan
     /// (i.e. do not populate `fact_commit_reachability` with tag/branch data).
     skip_tag_reachability: bool,
+    /// When `true`, seed every repository's revwalk from HEAD only (legacy
+    /// 1.x behaviour).  When `false` (default since 2.0.0), all local branch
+    /// heads and `refs/remotes/origin/*` refs are pushed so commits on
+    /// non-default branches are not silently excluded.
+    ///
+    /// A per-repo `head_only: true` in `RepositoryConfig` provides the same
+    /// opt-out for a single repository while keeping all-branch coverage for
+    /// the rest.  The global flag here is OR-ed with the per-repo flag — if
+    /// either is `true`, that repo walks HEAD only.
+    head_only: bool,
+    /// Explicit branch list for the `--branch` CLI filter.
+    ///
+    /// When non-empty, the revwalk is seeded from only these branch names
+    /// (both `refs/heads/<name>` and `refs/remotes/origin/<name>` for each).
+    /// Mutually exclusive with `head_only` — the CLI enforces this via
+    /// `conflicts_with`.  An empty Vec means "no restriction" (the default).
+    branches: Vec<String>,
+    /// When `true`, exit non-zero after the collect summary if any repo had a
+    /// fetch failure. Default `false` — failures are visible but non-fatal.
+    strict_fetch: bool,
+    /// When `true`, print a success line for every fetched repo in the summary
+    /// (not just failures). Default `false` — only failures are printed.
+    verbose_fetch: bool,
 }
 
 impl CollectionPipeline {
@@ -84,6 +155,10 @@ impl CollectionPipeline {
             no_fetch: false,
             force_refresh_prs: false,
             skip_tag_reachability: false,
+            head_only: false,
+            branches: Vec::new(),
+            strict_fetch: false,
+            verbose_fetch: false,
         }
     }
 
@@ -115,6 +190,76 @@ impl CollectionPipeline {
     pub fn with_skip_tag_reachability(mut self, skip: bool) -> Self {
         self.skip_tag_reachability = skip;
         self
+    }
+
+    /// Enable or disable the global HEAD-only revwalk escape hatch.
+    ///
+    /// Why: tga 2.0.0 changed the default to walk all local branches and remote
+    /// tracking refs. This method lets the CLI `--head-only` flag propagate to
+    /// every per-repo collector in the pipeline.  Per-repo `head_only: true` in
+    /// `RepositoryConfig` provides the same opt-out for individual repos.
+    /// What: when `true`, overrides all repos to seed from HEAD only; when
+    /// `false` (the default), repos use their per-config `head_only` setting.
+    /// Test: see `tests::head_only_legacy_behavior` in extractor.rs.
+    pub fn with_head_only(mut self, head_only: bool) -> Self {
+        self.head_only = head_only;
+        self
+    }
+
+    /// Restrict the revwalk to an explicit list of branch names.
+    ///
+    /// Why: the `--branch <NAME[,NAME…]>` CLI flag lets callers scope collection
+    /// to specific branches without touching the YAML config.  This is the
+    /// pipeline-level counterpart that threads the list down to each
+    /// `GitCollector`.
+    /// What: when `branches` is non-empty, each `GitCollector` seeds the
+    /// revwalk from `refs/heads/<name>` + `refs/remotes/origin/<name>` for
+    /// every listed name, emitting a warning for names not found in a given
+    /// repo.  An empty `branches` (the default) means "no restriction".
+    /// Mutually exclusive with `head_only` — enforced at the CLI layer via
+    /// `conflicts_with`.
+    /// Test: see `tests::branch_filter_walks_only_named_branch` in
+    /// `collect::git::extractor::tests`.
+    pub fn with_branches(mut self, branches: Vec<String>) -> Self {
+        self.branches = branches;
+        self
+    }
+
+    /// When `true`, the pipeline returns a non-zero exit signal to the CLI if
+    /// any repo had a fetch failure.
+    ///
+    /// Why: fetch failures are non-fatal by default (collection continues on
+    /// local refs); `--strict-fetch` lets CI pipelines treat stale data as an
+    /// error.
+    /// What: sets the flag; the CLI checks
+    /// [`CollectionStats::fetch_outcomes`] after `run()` and exits non-zero
+    /// if any `Failed` variant is present and this flag is set.
+    /// Test: the `commands::collect` handler reads this flag from `args`.
+    pub fn with_strict_fetch(mut self, strict: bool) -> Self {
+        self.strict_fetch = strict;
+        self
+    }
+
+    /// When `true`, print a success line per fetched repo in the end-of-run
+    /// summary (default: only failures are shown).
+    ///
+    /// Why: the default summary hides successful fetches to keep output brief;
+    /// `--verbose-fetch` is useful when debugging network topology.
+    /// What: sets the flag; the CLI uses it when printing the fetch summary.
+    /// Test: the `commands::collect` handler reads this flag from `args`.
+    pub fn with_verbose_fetch(mut self, verbose: bool) -> Self {
+        self.verbose_fetch = verbose;
+        self
+    }
+
+    /// Returns whether `--strict-fetch` was set.
+    pub fn strict_fetch(&self) -> bool {
+        self.strict_fetch
+    }
+
+    /// Returns whether `--verbose-fetch` was set.
+    pub fn verbose_fetch(&self) -> bool {
+        self.verbose_fetch
     }
 
     /// If `true`, re-fetch Azure DevOps pull requests even when their IDs are
@@ -149,8 +294,38 @@ impl CollectionPipeline {
         let resolver = IdentityResolver::from_config(&self.config);
 
         for repo_cfg in &self.config.repositories {
+            // Per-repo head_only is OR-ed with the global pipeline flag: if
+            // either is true, that repo walks HEAD only.  This lets operators
+            // set `--head-only` globally (the CLI flag) or `head_only: true`
+            // per repo in YAML without requiring both to be set.
+            let effective_head_only = self.head_only || repo_cfg.head_only;
+            // Build a pre-fetch collector (with no_fetch = self.no_fetch) solely
+            // to run perform_fetch once and capture the outcome. Then build the
+            // walk collector with no_fetch=true so the per-week collect_window
+            // calls don't re-fetch.
+            let pre_fetch_collector = match GitCollector::new(repo_cfg) {
+                Ok(c) => c
+                    .no_fetch(self.no_fetch)
+                    .with_head_only(effective_head_only)
+                    .with_explicit_branches(self.branches.clone()),
+                Err(e) => {
+                    let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
+                    warn!("{msg}");
+                    stats.errors.push(msg);
+                    continue;
+                }
+            };
+            // Perform the one-shot fetch and record the outcome (#334).
+            let fetch_result = pre_fetch_collector.perform_fetch();
+            stats.fetch_outcomes.push(fetch_result);
+
+            // Walk collector always has no_fetch=true: the fetch was either just
+            // performed above, or was intentionally skipped (--no-fetch).
             let collector = match GitCollector::new(repo_cfg) {
-                Ok(c) => c.no_fetch(self.no_fetch),
+                Ok(c) => c
+                    .no_fetch(true)
+                    .with_head_only(effective_head_only)
+                    .with_explicit_branches(self.branches.clone()),
                 Err(e) => {
                     let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
                     warn!("{msg}");

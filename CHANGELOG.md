@@ -5,6 +5,123 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-05-28
+
+### BREAKING CHANGES
+
+- **`tga collect` now walks ALL local branches and remote tracking refs by
+  default** (`refs/heads/*` + `refs/remotes/origin/*`), not just HEAD ancestry
+  (#331). This fixes a data-integrity bug where commits on non-default branches
+  (PR branches, feature branches, hotfixes) were silently excluded — the
+  HEAD-only walk was losing ~56% of commits in multi-branch repos.
+
+### Added
+
+- **`--head-only` flag on `tga collect`** — restores the legacy HEAD-only walk
+  (≤ 1.5.4 behaviour) for all repositories when passed on the command line.
+  For a per-repo opt-out, set `head_only: true` in the `repositories[].head_only`
+  field of your YAML config.
+
+- **`--branch <NAME[,NAME…]>` flag on `tga collect` (#332)** — restrict the
+  revwalk to one or more branch names (comma-separated). Seeds from both
+  `refs/heads/<name>` and `refs/remotes/origin/<name>`, so local and
+  remote-tracking copies are both covered. Mutually exclusive with `--head-only`.
+  Per-repo branch overrides in YAML (`repositories[].branch`) are unchanged and
+  still take precedence over the per-repo logic, but the new `--branch` flag
+  takes precedence over everything for the current CLI invocation.
+  Example: `tga collect --branch main,release/1.0 --repos my-service`
+
+- **Uniform `--repos`, `--weeks`, `--since`, `--until`, `--force` filters on
+  `tga classify` (#332)** — `tga classify` now accepts the same date/repo filter
+  flags used by `tga collect`, enabling surgical re-classification of a specific
+  slice without touching the full database:
+  ```bash
+  tga classify --force --repos my-service --weeks 4
+  tga classify --force --since 2026-01-01 --until 2026-03-31
+  ```
+  Supplying `--since`/`--until`/`--weeks` without `--force` emits a `WARN`
+  (the filter is a no-op for new commits but is a footgun without `--force`).
+
+- **Uniform global filter flags on all `tga backfill` subcommands (#332)** —
+  `--repos`, `--weeks`, `--since`, and `--until` are now declared as `global`
+  flags on `BackfillArgs`, scoping every subcommand (ticket-ids, revert-flags,
+  reachability, effort) uniformly. The old per-subcommand `--repo` flag on
+  `reachability` is replaced by the global `--repos` (plural, comma-separated).
+  ```bash
+  tga backfill ticket-ids --repos api --since 2026-01-01
+  tga backfill effort --repos core --weeks 8 --force
+  tga backfill reachability --repos my-service
+  ```
+
+- **Per-repo fetch visibility with `--strict-fetch` and `--verbose-fetch` (#334)** —
+  `tga collect` now tracks the outcome of the pre-walk `git fetch` for every
+  repository and prints an end-of-run fetch summary to stderr:
+
+  ```
+  Fetch summary: 116 / 118 repos updated (2 failure(s), 0 skipped)
+    - ml_pricing_engine: could not find remote 'origin'
+    - datapipelines: authentication required
+  ```
+
+  Successful fetches are omitted from the summary unless `--verbose-fetch` is
+  passed. `--strict-fetch` causes `tga collect` to exit non-zero after the
+  summary if any repository had a fetch failure — useful for CI pipelines that
+  treat stale-data as a hard error.
+
+  When `--no-fetch` is active, a warning is printed to stderr at the start of
+  collection:
+  ```
+  WARNING: --no-fetch active. Local clones may be stale. tga collect will walk
+  only what's already in your local object store.
+  ```
+
+  The optional per-repo `repositories[].fetch_timeout_secs: <N>` config field
+  stores a per-repo fetch timeout in seconds; enforcement via a watchdog thread
+  is scheduled for a future release.
+
+- **Comprehensive CLI documentation (#333)** — every subcommand now has:
+  - `about` (one-line description shown in `tga --help`)
+  - `long_about` (multi-paragraph context shown in `tga <subcommand> --help`)
+  - `after_help` with 2-3 concrete examples and `TIPS` lines
+  - Per-flag `help` strings on every newly-added flag
+  Subcommands with new docs: `analyze`, `classify`, `report`, `backfill`,
+  `pr-metrics`, `install`, `aliases`, `override`, `rules`, `deployments collect`,
+  `incidents collect`, `dora`.
+
+- **README "Common Workflows" section (#333)** — the README now opens with a
+  "Common Workflows" section covering first-time setup, routine weekly runs,
+  scoped re-runs, branch-restricted collection, rule tuning, backfill operations,
+  and the DORA metrics pipeline. A "CLI Subcommand Reference" table lists every
+  subcommand with its purpose and key flags.
+
+### Migration
+
+Existing `tga.db` files were collected with the buggy HEAD-only walker and are
+missing commits from non-default branches. To recover the full commit history:
+
+```bash
+tga collect --force
+```
+
+The `--force` flag bypasses the `collection_runs` skip mechanism, allowing
+already-"collected" weeks to be re-walked with the new all-branches coverage.
+Expect significantly more commits per week after re-collecting (the bug was
+losing ~56% of commits on multi-repo orgs).
+
+### Internal
+
+- New `head_only: bool` field on `GitCollector` and `CollectionPipeline` with
+  `with_head_only(bool)` builder method on each.
+- Revwalk seeding logic in `extractor.rs::collect_window` now has three arms:
+  explicit `branch` override (unchanged), `head_only = true` (legacy escape
+  hatch), and the new default (push all `refs/heads/*` + `refs/remotes/origin/*`
+  except `refs/remotes/origin/HEAD` which is a symref).
+- The all-branch walk falls back to `HEAD` for repos with a detached HEAD and
+  no local branches (common in CI shallow clones).
+- Regression tests added for all four scenarios: all-branch coverage,
+  `--head-only` legacy behaviour, explicit `branch:` override, and
+  detached-HEAD fallback (tests in `collect::git::extractor::tests`).
+
 ## [1.5.4] - 2026-05-28
 
 ### Added
