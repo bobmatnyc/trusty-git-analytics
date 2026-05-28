@@ -51,6 +51,23 @@ fn email_local_part(email: &str) -> String {
     }
 }
 
+/// Why: `IdentityResolver::upsert_author` and the suggester both need to ask
+/// "does this email live under the configured canonical_domain?". Centralising
+/// the check avoids subtle case- or `@`-prefix bugs at the two call sites.
+/// What: returns `true` when `email`'s domain portion equals `domain`
+/// (case-insensitive). Both inputs may include or omit a leading `@`.
+/// Test: see `tests::email_domain_matches_basic`.
+pub fn email_domain_matches(email: &str, domain: &str) -> bool {
+    let needle = domain.trim().trim_start_matches('@').to_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    match email.rfind('@') {
+        Some(i) => email[i + 1..].to_lowercase() == needle,
+        None => false,
+    }
+}
+
 /// Resolves observed author identities to canonical `(name, email)` pairs.
 pub struct IdentityResolver {
     /// Mapping of alias (lowercased name or email) → canonical name.
@@ -59,6 +76,14 @@ pub struct IdentityResolver {
     members: Vec<(String, String)>,
     /// Threshold for accepting a fuzzy match.
     threshold: f64,
+    /// Preferred email domain for canonical email selection (issue #349).
+    ///
+    /// When set, an inbound `(name, email)` pair that hashes to a new
+    /// identity but observes another email under the same canonical name
+    /// in the `authors` table will prefer the domain-matching variant as
+    /// the stored canonical email. See [`Self::upsert_author`] for the
+    /// selection policy.
+    canonical_domain: Option<String>,
 }
 
 impl IdentityResolver {
@@ -66,6 +91,7 @@ impl IdentityResolver {
     pub fn new(team: Option<&TeamConfig>) -> Self {
         let mut aliases: HashMap<String, String> = HashMap::new();
         let mut members: Vec<(String, String)> = Vec::new();
+        let mut canonical_domain: Option<String> = None;
         if let Some(team) = team {
             for (k, v) in &team.aliases {
                 aliases.insert(k.to_lowercase(), v.clone());
@@ -78,11 +104,17 @@ impl IdentityResolver {
                 // Also auto-register the canonical email as an alias to itself.
                 aliases.insert(m.email.to_lowercase(), m.name.clone());
             }
+            canonical_domain = team
+                .canonical_domain
+                .as_ref()
+                .map(|d| d.trim().trim_start_matches('@').to_lowercase())
+                .filter(|d| !d.is_empty());
         }
         Self {
             aliases,
             members,
             threshold: DEFAULT_SIMILARITY_THRESHOLD,
+            canonical_domain,
         }
     }
 
@@ -118,6 +150,7 @@ impl IdentityResolver {
             aliases,
             members,
             threshold: DEFAULT_SIMILARITY_THRESHOLD,
+            canonical_domain: None,
         }
     }
 
@@ -126,11 +159,24 @@ impl IdentityResolver {
     /// back to `team.members`.
     pub fn from_config(config: &crate::core::config::Config) -> Self {
         let map = config.resolved_aliases();
-        if !map.is_empty() {
+        let mut resolver = if !map.is_empty() {
             Self::from_alias_map(&map)
         } else {
             Self::new(config.team.as_ref())
+        };
+        // Pull canonical_domain from team config even when developer_aliases
+        // map is the primary identity source (the two YAML keys are
+        // orthogonal — the domain policy belongs under team:).
+        if resolver.canonical_domain.is_none() {
+            if let Some(team) = config.team.as_ref() {
+                resolver.canonical_domain = team
+                    .canonical_domain
+                    .as_ref()
+                    .map(|d| d.trim().trim_start_matches('@').to_lowercase())
+                    .filter(|d| !d.is_empty());
+            }
         }
+        resolver
     }
 
     /// Override the fuzzy-match threshold (0.0–1.0).
@@ -251,7 +297,14 @@ impl IdentityResolver {
 
     /// Upsert an author into the `authors` table, returning the row id.
     ///
-    /// Uses `canonical_email` as the natural key.
+    /// Why: `tga collect` calls this once per observed `(name, email)` pair;
+    /// it both registers new identities and routes commits to existing rows.
+    /// What: resolves the inbound pair to a canonical form, applies the
+    /// canonical-email policy (issue #349) when a configured
+    /// [`Self::canonical_domain`] is set, and writes the row keyed on
+    /// `canonical_email`.
+    /// Test: see `tests::canonical_domain_prefers_org_email` and
+    /// `tests::canonical_domain_merges_into_existing_org_email`.
     ///
     /// # Errors
     ///
@@ -262,8 +315,42 @@ impl IdentityResolver {
         name: &str,
         email: &str,
     ) -> crate::core::Result<i64> {
-        let (canon_name, canon_email) = self.resolve(name, email);
+        let (canon_name, mut canon_email) = self.resolve(name, email);
+
+        // Issue #349 canonical-email policy:
+        // 1. If `resolve()` already produced an email under the configured
+        //    canonical_domain, we are done (team.members already mapped it).
+        // 2. Otherwise, look for an existing authors row with the same
+        //    `canonical_name` whose email lives under canonical_domain and
+        //    reuse that as the canonical email (so all future commits route
+        //    to the org-domain row instead of creating a personal-email
+        //    duplicate).
+        // 3. Failing that, fall back to the resolved email (first-seen).
         let conn = db.connection();
+        if let Some(domain) = &self.canonical_domain {
+            if !email_domain_matches(&canon_email, domain) {
+                let alt: Option<String> = conn
+                    .query_row(
+                        "SELECT canonical_email FROM authors \
+                         WHERE LOWER(canonical_name) = LOWER(?1) \
+                           AND LOWER(SUBSTR(canonical_email, INSTR(canonical_email, '@') + 1)) = ?2 \
+                         LIMIT 1",
+                        params![canon_name, domain],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok();
+                if let Some(found) = alt {
+                    debug!(
+                        prior_email = %canon_email,
+                        chosen_email = %found,
+                        domain = %domain,
+                        "canonical_domain policy routed commit to existing org-domain identity"
+                    );
+                    canon_email = found;
+                }
+            }
+        }
+
         conn.execute(
             "INSERT INTO authors (canonical_name, canonical_email, aliases) \
              VALUES (?1, ?2, '[]') \
@@ -276,6 +363,16 @@ impl IdentityResolver {
             |row| row.get(0),
         )?;
         Ok(id)
+    }
+
+    /// Expose the configured canonical email domain, if any.
+    ///
+    /// Why: callers (e.g. `tga aliases suggest`) need the same policy to
+    /// compute confidence scores without re-parsing the config.
+    /// What: returns the lowercased, leading-`@`-stripped domain.
+    /// Test: covered indirectly via `tests::canonical_domain_*`.
+    pub fn canonical_domain(&self) -> Option<&str> {
+        self.canonical_domain.as_deref()
     }
 
     fn find_member_by_name(&self, name: &str) -> Option<(String, String)> {
@@ -302,6 +399,7 @@ mod tests {
                 aliases: vec!["bsmith@example.com".into()],
             }],
             aliases,
+            canonical_domain: None,
         }
     }
 
@@ -385,7 +483,7 @@ mod tests {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         map.insert(
             "Bob Matsuoka".to_string(),
-            vec!["bob.matsuoka@duettoresearch.com".into()],
+            vec!["bob.matsuoka@researchco.example".into()],
         );
         let r = IdentityResolver::from_alias_map(&map);
 
@@ -393,7 +491,7 @@ mod tests {
         // normalizes to "bob matsuoka" which matches the canonical name.
         let (n, e) = r.resolve("Bob M", "bob.matsuoka@otherdomain.com");
         assert_eq!(n, "Bob Matsuoka");
-        assert_eq!(e, "bob.matsuoka@duettoresearch.com");
+        assert_eq!(e, "bob.matsuoka@researchco.example");
     }
 
     /// Email case must not affect lookup — `ALICE@COMPANY.COM` resolves
@@ -450,29 +548,29 @@ mod tests {
     fn multiple_emails_same_person() {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         map.insert(
-            "Andre Ramos".to_string(),
+            "Pedro Silva".to_string(),
             vec![
-                "andre.ramos@duettoresearch.com".into(),
-                "129991831+andreramosduetto@users.noreply.github.com".into(),
-                "andre@personal.dev".into(),
+                "pedro.silva@researchco.example".into(),
+                "100000001+pedrosilvaextern@users.noreply.github.com".into(),
+                "pedro@personal.dev".into(),
             ],
         );
         let r = IdentityResolver::from_alias_map(&map);
 
-        let (n1, e1) = r.resolve("Andre Ramos", "andre.ramos@duettoresearch.com");
+        let (n1, e1) = r.resolve("Pedro Silva", "pedro.silva@researchco.example");
         let (n2, e2) = r.resolve(
-            "andreramosduetto",
-            "129991831+andreramosduetto@users.noreply.github.com",
+            "pedrosilvaextern",
+            "100000001+pedrosilvaextern@users.noreply.github.com",
         );
-        let (n3, e3) = r.resolve("A. Ramos", "andre@personal.dev");
+        let (n3, e3) = r.resolve("P. Silva", "pedro@personal.dev");
 
-        assert_eq!(n1, "Andre Ramos");
-        assert_eq!(n2, "Andre Ramos");
-        assert_eq!(n3, "Andre Ramos");
+        assert_eq!(n1, "Pedro Silva");
+        assert_eq!(n2, "Pedro Silva");
+        assert_eq!(n3, "Pedro Silva");
         // Canonical email is the first email-looking alias for each.
-        assert_eq!(e1, "andre.ramos@duettoresearch.com");
-        assert_eq!(e2, "andre.ramos@duettoresearch.com");
-        assert_eq!(e3, "andre.ramos@duettoresearch.com");
+        assert_eq!(e1, "pedro.silva@researchco.example");
+        assert_eq!(e2, "pedro.silva@researchco.example");
+        assert_eq!(e3, "pedro.silva@researchco.example");
     }
 
     /// Verify resolution end-to-end through `Config::load` + external
@@ -496,25 +594,25 @@ mod tests {
         let tmp = std::env::temp_dir().join(unique);
         std::fs::create_dir_all(&tmp).expect("create tmp");
 
-        // Aliases file with a subset of the real Duetto contractor map,
+        // Aliases file shaped like a contractor alias map,
         // including the cases the assertions below exercise (case-folding,
         // fuzzy match on email-local-part, non-email handle alias).
         let aliases_yaml = r#"
 developers:
-  - name: "Andre Ramos"
-    primary_email: "andre.ramos@duettoresearch.com"
+  - name: "Pedro Silva"
+    primary_email: "pedro.silva@researchco.example"
     aliases:
-      - "129991831+andreramosduetto@users.noreply.github.com"
-  - name: "Akash Arora"
-    primary_email: "akash.arora@duettoresearch.com"
+      - "100000001+pedrosilvaextern@users.noreply.github.com"
+  - name: "Rohan Mehta"
+    primary_email: "rohan.mehta@researchco.example"
     aliases:
-      - "Akash.Arora-c@duettoresearch.com"
-      - "akash-duetto"
-  - name: "Janga Vinod Kumar Reddy"
-    primary_email: "janga.reddy@duettoresearch.com"
+      - "Rohan.Mehta-c@researchco.example"
+      - "rohan-extern"
+  - name: "Kiran Anand Kumar Nayak"
+    primary_email: "kiran.nayak@researchco.example"
     aliases:
-      - "jangareddy-duetto"
-      - "164324948+jangareddy-duetto@users.noreply.github.com"
+      - "kirannayak-extern"
+      - "100000002+kirannayak-extern@users.noreply.github.com"
 "#;
         let aliases_path = tmp.join("aliases.yaml");
         std::fs::write(&aliases_path, aliases_yaml).expect("write aliases");
@@ -531,16 +629,16 @@ developers:
         let r = IdentityResolver::from_config(&cfg);
 
         // Known mapping from the YAML (canonical email match).
-        let (n, _) = r.resolve("whoever", "andre.ramos@duettoresearch.com");
-        assert_eq!(n, "Andre Ramos");
+        let (n, _) = r.resolve("whoever", "pedro.silva@researchco.example");
+        assert_eq!(n, "Pedro Silva");
 
         // Case-insensitive variant of an explicitly listed alias.
-        let (n, _) = r.resolve("whoever", "Akash.Arora-c@duettoresearch.com");
-        assert_eq!(n, "Akash Arora");
+        let (n, _) = r.resolve("whoever", "Rohan.Mehta-c@researchco.example");
+        assert_eq!(n, "Rohan Mehta");
 
         // Non-email login handle alias.
-        let (n, _) = r.resolve("jangareddy-duetto", "noise@nowhere.test");
-        assert_eq!(n, "Janga Vinod Kumar Reddy");
+        let (n, _) = r.resolve("kirannayak-extern", "noise@nowhere.test");
+        assert_eq!(n, "Kiran Anand Kumar Nayak");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -556,5 +654,128 @@ developers:
     fn email_local_part_basic() {
         assert_eq!(email_local_part("Bob@Example.COM"), "bob");
         assert_eq!(email_local_part("no-at-symbol"), "no-at-symbol");
+    }
+
+    #[test]
+    fn email_domain_matches_basic() {
+        // Why: regression guard for the helper used by both the canonical-
+        // email policy (#349) and the alias suggester (#347).
+        assert!(email_domain_matches(
+            "a@RESEARCHCO.EXAMPLE",
+            "researchco.example"
+        ));
+        assert!(email_domain_matches(
+            "a@researchco.example",
+            "@researchco.example"
+        ));
+        assert!(!email_domain_matches("a@other.com", "researchco.example"));
+        assert!(!email_domain_matches("invalid-email", "researchco.example"));
+        assert!(!email_domain_matches("a@researchco.example", ""));
+    }
+
+    #[test]
+    fn canonical_domain_prefers_org_email_for_team_member() {
+        // Why: when team.members lists an org email and the incoming commit
+        // uses a personal address, resolve() already returns the org email.
+        // This guards the existing happy path.
+        let team = TeamConfig {
+            members: vec![TeamMember {
+                name: "Alice Org".into(),
+                email: "alice@researchco.example".into(),
+                aliases: vec!["alice@personal.com".into()],
+            }],
+            aliases: HashMap::new(),
+            canonical_domain: Some("researchco.example".into()),
+        };
+        let r = IdentityResolver::new(Some(&team));
+        let (_, e) = r.resolve("Alice Org", "alice@personal.com");
+        assert_eq!(e, "alice@researchco.example");
+        assert_eq!(r.canonical_domain(), Some("researchco.example"));
+    }
+
+    #[test]
+    fn canonical_domain_routes_new_personal_email_to_existing_org_row() {
+        // Why: #349 — when the first-seen commit produces a row with an
+        // org-domain email, a subsequent commit by the same name under a
+        // non-org email must merge into the existing org row instead of
+        // creating a new personal-email identity.
+        let team = TeamConfig {
+            members: vec![],
+            aliases: HashMap::new(),
+            canonical_domain: Some("researchco.example".into()),
+        };
+        let r = IdentityResolver::new(Some(&team));
+        let db = Database::open_in_memory().expect("db");
+        // Seed an existing identity at the org-domain address.
+        let _ = r
+            .upsert_author(&db, "Bob Matsuoka", "bob@researchco.example")
+            .expect("seed");
+
+        // Now the same person commits from a personal address. With the
+        // canonical-domain policy this must collapse onto the existing row,
+        // not insert a second one.
+        let id = r
+            .upsert_author(&db, "Bob Matsuoka", "bob@personal.com")
+            .expect("upsert");
+        let stored_email: String = db
+            .connection()
+            .query_row(
+                "SELECT canonical_email FROM authors WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("lookup");
+        assert_eq!(stored_email, "bob@researchco.example");
+
+        // Exactly one row for "Bob Matsuoka".
+        let count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM authors WHERE canonical_name = 'Bob Matsuoka'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn canonical_domain_absent_falls_back_to_first_seen_email() {
+        // Why: without a configured canonical_domain we must preserve the
+        // legacy first-seen behaviour so existing setups are unchanged.
+        let r = IdentityResolver::new(None);
+        assert_eq!(r.canonical_domain(), None);
+        let db = Database::open_in_memory().expect("db");
+        let _ = r
+            .upsert_author(&db, "Carol", "carol@personal.com")
+            .expect("seed");
+        let _ = r
+            .upsert_author(&db, "Carol", "carol@work.com")
+            .expect("upsert");
+        let count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM authors WHERE canonical_name = 'Carol'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        // Without the policy, both emails become separate identities.
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn canonical_domain_read_from_config() {
+        // Why: confirms YAML deserialization wires the new key end-to-end.
+        let yaml = r#"
+team:
+  canonical_domain: "researchco.example"
+  members:
+    - name: "Alice"
+      email: "alice@researchco.example"
+"#;
+        let cfg: crate::core::config::Config = serde_yaml::from_str(yaml).expect("parse");
+        let r = IdentityResolver::from_config(&cfg);
+        assert_eq!(r.canonical_domain(), Some("researchco.example"));
     }
 }
