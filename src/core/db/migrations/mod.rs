@@ -8,6 +8,11 @@
 //! Adding a new migration:
 //! 1. Append a new entry to [`MIGRATIONS`] with a strictly increasing version.
 //! 2. Never edit an existing migration in place — write a follow-up migration.
+//! 3. If the migration requires a pre-flight column check (e.g. ADD COLUMN
+//!    guard), add a dedicated `v<N>.rs` submodule following the pattern in
+//!    `v17.rs`.
+
+mod v17;
 
 use rusqlite::Connection;
 use tracing::{debug, info};
@@ -29,102 +34,102 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
         name: "initial_schema",
-        sql: include_str!("sql/0001_initial_schema.sql"),
+        sql: include_str!("../sql/0001_initial_schema.sql"),
     },
     Migration {
         version: 2,
         name: "linear_issues",
-        sql: include_str!("sql/0002_linear_issues.sql"),
+        sql: include_str!("../sql/0002_linear_issues.sql"),
     },
     Migration {
         version: 3,
         name: "commits_ticketed",
-        sql: include_str!("sql/0003_commits_ticketed.sql"),
+        sql: include_str!("../sql/0003_commits_ticketed.sql"),
     },
     Migration {
         version: 4,
         name: "collection_runs",
-        sql: include_str!("sql/0004_collection_runs.sql"),
+        sql: include_str!("../sql/0004_collection_runs.sql"),
     },
     Migration {
         version: 5,
         name: "work_items",
-        sql: include_str!("sql/0005_work_items.sql"),
+        sql: include_str!("../sql/0005_work_items.sql"),
     },
     Migration {
         version: 6,
         name: "classification_overrides",
-        sql: include_str!("sql/0006_classification_overrides.sql"),
+        sql: include_str!("../sql/0006_classification_overrides.sql"),
     },
     Migration {
         version: 7,
         name: "pr_metrics_and_backfill",
-        sql: include_str!("sql/0007_pr_metrics_and_backfill.sql"),
+        sql: include_str!("../sql/0007_pr_metrics_and_backfill.sql"),
     },
     Migration {
         version: 8,
         name: "azdo_iterations",
-        sql: include_str!("sql/0008_azdo_iterations.sql"),
+        sql: include_str!("../sql/0008_azdo_iterations.sql"),
     },
     Migration {
         version: 9,
         name: "collection_runs_repo_count",
-        sql: include_str!("sql/0009_collection_runs_repo_count.sql"),
+        sql: include_str!("../sql/0009_collection_runs_repo_count.sql"),
     },
     Migration {
         version: 10,
         name: "pull_requests_provider",
-        sql: include_str!("sql/0010_pull_requests_provider.sql"),
+        sql: include_str!("../sql/0010_pull_requests_provider.sql"),
     },
     Migration {
         version: 11,
         name: "pr_reviewers",
-        sql: include_str!("sql/0011_pr_reviewers.sql"),
+        sql: include_str!("../sql/0011_pr_reviewers.sql"),
     },
     Migration {
         version: 12,
         name: "pull_requests_repository",
-        sql: include_str!("sql/0012_pull_requests_repository.sql"),
+        sql: include_str!("../sql/0012_pull_requests_repository.sql"),
     },
     Migration {
         version: 13,
         name: "complexity",
-        sql: include_str!("sql/0013_complexity.sql"),
+        sql: include_str!("../sql/0013_complexity.sql"),
     },
     Migration {
         version: 14,
         name: "dora_tables",
-        sql: include_str!("sql/0014_dora_tables.sql"),
+        sql: include_str!("../sql/0014_dora_tables.sql"),
     },
     Migration {
         version: 15,
         name: "tag_release_branch_reachability",
-        sql: include_str!("sql/0015_tag_release_branch_reachability.sql"),
+        sql: include_str!("../sql/0015_tag_release_branch_reachability.sql"),
     },
     Migration {
         version: 16,
         name: "fact_commit_effort",
-        sql: include_str!("sql/0016_fact_commit_effort.sql"),
+        sql: include_str!("../sql/0016_fact_commit_effort.sql"),
     },
     Migration {
         version: 17,
         name: "pushdown_445",
-        sql: include_str!("sql/0017_pushdown_445.sql"),
+        sql: include_str!("../sql/0017_pushdown_445.sql"),
     },
     Migration {
         version: 18,
         name: "fact_weekly_quality",
-        sql: include_str!("sql/0018_fact_weekly_quality.sql"),
+        sql: include_str!("../sql/0018_fact_weekly_quality.sql"),
     },
     Migration {
         version: 19,
         name: "effort_percentile_stats",
-        sql: include_str!("sql/0019_effort_percentile_stats.sql"),
+        sql: include_str!("../sql/0019_effort_percentile_stats.sql"),
     },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
-fn ensure_migrations_table(conn: &Connection) -> Result<()> {
+pub(super) fn ensure_migrations_table(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations ( \
             version    INTEGER PRIMARY KEY, \
@@ -147,6 +152,23 @@ fn current_version(conn: &Connection) -> Result<i64> {
     Ok(v.unwrap_or(0))
 }
 
+/// Return the set of column names for `table` by querying `PRAGMA table_info`.
+///
+/// Used by migration pre-flight checks to guard ADD COLUMN statements that
+/// may already have been applied by a pre-release build (SQLite has no
+/// `ALTER TABLE … ADD COLUMN IF NOT EXISTS`).
+pub(super) fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(TgaError::from)?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(TgaError::from)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(TgaError::from)?;
+    Ok(names)
+}
+
 /// Apply all migrations whose version is greater than the current schema version.
 ///
 /// Idempotent: running it twice in a row is a no-op the second time.
@@ -166,9 +188,21 @@ pub fn run(conn: &mut Connection) -> Result<()> {
         }
         info!(version = m.version, name = m.name, "applying migration");
         let tx = conn.transaction().map_err(TgaError::from)?;
-        tx.execute_batch(m.sql).map_err(|e| {
-            TgaError::MigrationError(format!("migration {} ({}) failed: {e}", m.version, m.name))
-        })?;
+
+        if m.version == 17 {
+            // Migration 17 requires a pre-flight column check because some
+            // pre-release builds added `effort_tshirt` directly in v16's
+            // CREATE TABLE; see `v17::apply` for details.
+            v17::apply(&tx)?;
+        } else {
+            tx.execute_batch(m.sql).map_err(|e| {
+                TgaError::MigrationError(format!(
+                    "migration {} ({}) failed: {e}",
+                    m.version, m.name
+                ))
+            })?;
+        }
+
         tx.execute(
             "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![m.version, m.name, chrono::Utc::now().to_rfc3339()],
@@ -183,103 +217,6 @@ pub fn run(conn: &mut Connection) -> Result<()> {
 mod tests {
     use crate::core::db::Database;
     use rusqlite::params;
-
-    /// Why: regression guard for issue #445. Migration v17 adds three additive
-    /// columns (`classifications.top_level_category`,
-    /// `fact_commit_effort.effort_tshirt`, `commits.is_ai_assisted`,
-    /// `commits.ai_tool`) plus three indexes. This test verifies the migration
-    /// applies without error and the new columns are writable/readable.
-    /// What: opens an in-memory DB (which runs all migrations), inserts rows
-    /// that exercise the new columns, and reads them back.
-    /// Test: this test itself.
-    #[test]
-    fn migration_v17_adds_pushdown_columns() {
-        let db = Database::open_in_memory().expect("open db");
-        let conn = db.connection();
-
-        // Verify commits accepts is_ai_assisted and ai_tool.
-        conn.execute(
-            "INSERT INTO commits \
-             (sha, author_name, author_email, timestamp, message, repository, \
-              is_ai_assisted, ai_tool) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                "sha_v17_test",
-                "Alice",
-                "alice@example.com",
-                "2026-01-01T00:00:00Z",
-                "feat: AI-assisted commit\n\nCo-Authored-By: Claude Opus <noreply@anthropic.com>",
-                "testrepo",
-                1_i64,
-                "claude",
-            ],
-        )
-        .expect("insert AI-assisted commit");
-
-        let (ai, tool): (i64, Option<String>) = conn
-            .query_row(
-                "SELECT is_ai_assisted, ai_tool FROM commits WHERE sha = 'sha_v17_test'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .expect("read back");
-        assert_eq!(ai, 1, "is_ai_assisted must be 1");
-        assert_eq!(tool, Some("claude".to_string()), "ai_tool must be 'claude'");
-
-        // Verify fact_commit_effort accepts effort_tshirt.
-        conn.execute(
-            "INSERT INTO fact_commit_effort \
-             (sha, repository, size, score, loc, files, test_loc, tests_factor, \
-              formula_version, computed_at, effort_tshirt) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                "sha_v17_test",
-                "testrepo",
-                "M",
-                9.5,
-                50_i64,
-                2_i64,
-                0_i64,
-                1.0_f64,
-                "v1",
-                1_000_000_i64,
-                3_i64, // M=3
-            ],
-        )
-        .expect("insert effort with tshirt");
-
-        let tshirt: i64 = conn
-            .query_row(
-                "SELECT effort_tshirt FROM fact_commit_effort WHERE sha = 'sha_v17_test'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("read effort_tshirt");
-        assert_eq!(tshirt, 3, "effort_tshirt M must be 3");
-
-        // Verify classifications accepts top_level_category.
-        conn.execute(
-            "INSERT INTO classifications \
-             (category, subcategory, confidence, method, top_level_category) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params!["feature", "feature", 0.95_f64, "exact_rule", "feature"],
-        )
-        .expect("insert classification with top_level_category");
-
-        let top: Option<String> = conn
-            .query_row(
-                "SELECT top_level_category FROM classifications WHERE category = 'feature' \
-                 ORDER BY id DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .expect("read top_level_category");
-        assert_eq!(
-            top,
-            Some("feature".to_string()),
-            "top_level_category must be 'feature'"
-        );
-    }
 
     /// Why: regression guard for issue #445 batch B. Migration v18 creates
     /// `fact_weekly_quality` with all required columns and a PRIMARY KEY on
