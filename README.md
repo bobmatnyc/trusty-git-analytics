@@ -80,6 +80,25 @@ Homebrew provides:
 - Standard macOS / Linux PATH integration
 - Easy dependency management
 
+### trusty-audit (macOS, Apple Silicon)
+
+`install.sh` at the repository root installs and launches `trusty-audit` (and
+its `taudit` alias) from this repository's GitHub releases:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-git-analytics/main/install.sh | sh
+```
+
+It downloads the `trusty-audit-<version>-aarch64-apple-darwin.tar.gz` asset of
+the newest `trusty-audit-v*` release, verifies its `.sha256` sidecar, and
+installs into `${CARGO_HOME:-$HOME/.cargo}/bin`. Set `TRUSTY_AUDIT_VERSION` to
+pin a version, `TRUSTY_AUDIT_INSTALL_DIR` to change the destination, and
+`TRUSTY_AUDIT_NO_LAUNCH=1` to install without launching.
+
+**The script resolves only once this repository has a `trusty-audit-v*`
+release.** Until then it stops with "No published trusty-audit-v* release found"
+and installs nothing; use `cargo install trusty-audit --locked` instead.
+
 ### Prerequisites & Special Cases
 
 #### System Requirements

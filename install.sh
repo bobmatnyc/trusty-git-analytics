@@ -2,7 +2,11 @@
 # install.sh — self-downloading macOS installer for `trusty-audit`.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/crates/trusty-audit/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-git-analytics/main/install.sh | sh
+#
+# It resolves only once bobmatnyc/trusty-git-analytics has published a
+# `trusty-audit-v*` GitHub release; until then it stops with "No published
+# trusty-audit-v* release found" and installs nothing.
 #
 # Why (#5870): the owner's requirement is "enter a URL, trusty-audit installs AND
 #   runs". Before this, the only delivery path was `trusty-audit distribute`
@@ -16,11 +20,11 @@
 #   an atomic rename, and launches it. Everything past that point — provider
 #   reachability, the credential, the collection tools — is trusty-audit's own.
 #
-# Test: `scripts/check_trusty_audit_install_selftest.sh` drives every arm against
+# Test: `scripts/install-sh-selftest.sh` drives every arm against
 #   stubbed `curl`/`uname` with no network — non-Darwin uname, Intel uname,
-#   checksum mismatch, failed download, happy path, and idempotent re-run.
-#   `sh -n` and `shellcheck --shell=sh` gate syntax and lint. All three run in
-#   `.github/workflows/trusty-audit-install.yml`.
+#   checksum mismatch, failed download, happy path, idempotent re-run, and
+#   every URL naming this repository. `sh -n` and `shellcheck --shell=sh`
+#   gate syntax and lint. All three run in `.github/workflows/install-sh.yml`.
 #
 # ── This is a BOOTSTRAP. trusty-audit is the installer. ─────────────────────
 # trusty-audit is an installer/collector/auditor: `src/tools.rs` already
@@ -67,13 +71,12 @@ set -eu
 
 # ---------------------------------------------------------------------------
 # Constants. Every magic string lives here, not scattered through the script.
-# These URL shapes are the SAME ones the Rust installer builds in
-# `crates/trusty-installer/src/download/release.rs` (`asset_url` /
-# `sha256_url`) and that `.github/workflows/release.yml` publishes. They are
-# one convention with three implementations, so any change to the asset naming
-# has to land in all three.
+# These URL shapes are the SAME ones the Rust installer builds in the
+# `trusty-installer` crate's `src/download/release.rs` (`asset_url` /
+# `sha256_url`), and the ones a `trusty-audit-v*` release must publish. A
+# change to the asset naming has to land in both, and in the release.
 # ---------------------------------------------------------------------------
-REPO="bobmatnyc/trusty-tools"
+REPO="bobmatnyc/trusty-git-analytics"
 CRATE="trusty-audit"
 PRIMARY_BIN="trusty-audit"
 ALIAS_BIN="taudit"
@@ -82,15 +85,15 @@ TAG_PREFIX="${CRATE}-v"
 API_RELEASES_URL="https://api.github.com/repos/${REPO}/releases"
 RELEASE_DL_BASE="https://github.com/${REPO}/releases/download"
 
-# The one supported target. `docs/distribution/INSTALL-CONVENTION.md` records
-# the workspace-wide decision: "Not supported: macOS x86_64 (Intel) — only
-# Apple Silicon (aarch64-apple-darwin) is targeted". No x86_64-apple-darwin
-# asset is built by the release workflow for ANY crate in this workspace, so an
-# Intel Mac is refused below rather than handed an arm64 binary it cannot exec.
+# The one supported target. trusty-tools' `docs/distribution/INSTALL-CONVENTION.md`
+# records the decision this repository inherited: "Not supported: macOS x86_64
+# (Intel) — only Apple Silicon (aarch64-apple-darwin) is targeted". No
+# x86_64-apple-darwin asset is published, so an Intel Mac is refused below
+# rather than handed an arm64 binary it cannot exec.
 TARGET="aarch64-apple-darwin"
 
-# Default install dir — the canonical cargo bin dir, matching the root
-# `install.sh` and every other write path in this workspace (#5777 / #4964: two
+# Default install dir — the canonical cargo bin dir, matching every other
+# trusty installer (trusty-tools#5777 / #4964: two
 # destinations meant PATH order decided which copy ran). It needs no `sudo`,
 # exists or is creatable on a stock Mac, and is already on PATH for anyone who
 # has used a Rust tool. No Rust toolchain is required to USE it — this is pure
@@ -189,8 +192,7 @@ What to do: run this on a Mac, or build from source with
 
     if [ "${arch}" != "arm64" ]; then
         die "Unsupported macOS architecture: ${arch} (Apple Silicon / arm64 required).
-No x86_64 (Intel) macOS asset is published for any crate in this workspace —
-see docs/distribution/INSTALL-CONVENTION.md, 'Not supported: macOS x86_64'.
+No x86_64 (Intel) macOS asset is published for ${CRATE}.
 Downloading the arm64 binary here would give you a file that cannot execute.
 What to do: run this on an Apple Silicon Mac, or build from source with
   cargo install --path crates/${CRATE} --locked"
@@ -241,7 +243,7 @@ pin a version with TRUSTY_AUDIT_VERSION=<x.y.z> to skip this lookup entirely."
     fi
 
     # Extract the highest-sorting `trusty-audit-v*` tag. grep/sed only — no jq
-    # dependency, matching the root install.sh approach.
+    # dependency.
     VERSION="$(
         tr ',' '\n' <"${api_out}" |
             sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"'"${TAG_PREFIX}"'\([0-9][^"]*\)".*/\1/p' |
@@ -252,8 +254,8 @@ pin a version with TRUSTY_AUDIT_VERSION=<x.y.z> to skip this lookup entirely."
     if [ -z "${VERSION}" ]; then
         die "No published ${TAG_PREFIX}* release found in the GitHub releases API.
 This means no ${CRATE} binary has been released yet, so there is nothing to
-install. The release is produced by tagging ${TAG_PREFIX}<version>, which drives
-.github/workflows/release.yml.
+install. A release is a GitHub release on ${REPO} tagged
+${TAG_PREFIX}<version> carrying the ${TARGET} tarball and its .sha256.
 What to do: ask for a released version, or build from source with
   cargo install --path crates/${CRATE} --locked"
     fi
@@ -275,8 +277,8 @@ What to do: ask for a released version, or build from source with
 # `.sha256` sidecar is published by the same workflow, to the same host, as the
 # tarball — an attacker who can replace one can replace the other. HTTPS to
 # github.com is what actually authenticates the origin here. This matches the
-# posture already documented in `crates/trusty-installer/src/download/
-# pinned.rs`. An independent gate would need a signature over a key not held by
+# posture already documented in the `trusty-installer` crate's
+# `src/download/pinned.rs`. An independent gate would need a signature over a key not held by
 # the pipeline; that does not exist yet for this crate.
 # ---------------------------------------------------------------------------
 download_and_verify() {
@@ -352,7 +354,7 @@ against ${REPO}. Nothing has been installed."
 # the published bytes are a working binary for this host. Executing
 # `--version` in the staging dir catches a mis-tagged or mis-built asset before
 # anything reaches PATH — the same reasoning, and the same accepted trade-off,
-# recorded in `crates/trusty-installer/src/download/pinned.rs` check 5.
+# recorded in the `trusty-installer` crate's `src/download/pinned.rs` check 5.
 # ---------------------------------------------------------------------------
 extract_and_prove() {
     step "Extracting"
