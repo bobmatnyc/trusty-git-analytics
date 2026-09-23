@@ -1447,6 +1447,12 @@ this corpus). Use `--no-external` for fast iteration on rule files.
 Full benchmark: [`docs/trusty-git-analytics/regression-testing/v1.3.0-2026-05-27.md`](
 ../../docs/trusty-git-analytics/regression-testing/v1.3.0-2026-05-27.md)
 
+## Issue References in History
+
+Commit messages from the trusty-tools era (the monorepo period, 2026-05-19 to 2026-09-23,
+extracted at trusty-tools `1c1ce516a`) cite issues as `trusty-tools#N`, meaning
+https://github.com/bobmatnyc/trusty-tools/issues/N.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
