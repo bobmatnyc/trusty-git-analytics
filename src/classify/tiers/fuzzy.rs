@@ -23,6 +23,20 @@ impl FuzzyClassifier {
     /// Returns `None` when no heuristic matched — the caller will then
     /// either invoke the LLM tier or fall back to "uncategorized".
     pub fn classify(&self, message: &str, is_merge: bool) -> Option<ClassificationResult> {
+        self.classify_traced(message, is_merge).map(|(r, _)| r)
+    }
+
+    /// [`Self::classify`] plus the name of the heuristic that fired (#111).
+    ///
+    /// Why: the eval harness measures precision per heuristic.
+    /// What: returns the same verdict as [`Self::classify`] paired with one of
+    /// `merge`, `revert`, `ticket_prefix`, `short_message`.
+    /// Test: `classify::trace_tests::traced_cascade_matches_untraced_verdicts`.
+    pub fn classify_traced(
+        &self,
+        message: &str,
+        is_merge: bool,
+    ) -> Option<(ClassificationResult, &'static str)> {
         let trimmed = message.trim();
         let lower = trimmed.to_lowercase();
 
@@ -32,54 +46,66 @@ impl FuzzyClassifier {
             || lower.starts_with("merge branch")
             || lower.starts_with("merge remote-tracking")
         {
-            return Some(ClassificationResult {
-                category: "merge".to_string(),
-                subcategory: None,
-                top_level: Some(TopLevelCategory::Maintenance),
-                confidence: 0.95,
-                method: ClassificationMethod::FuzzyMatch,
-                ticket_id: None,
-                complexity: None,
-            });
+            return Some((
+                ClassificationResult {
+                    category: "merge".to_string(),
+                    subcategory: None,
+                    top_level: Some(TopLevelCategory::Maintenance),
+                    confidence: 0.95,
+                    method: ClassificationMethod::FuzzyMatch,
+                    ticket_id: None,
+                    complexity: None,
+                },
+                "merge",
+            ));
         }
 
         // 2. Revert commits.
         if lower.starts_with("revert ") || lower.starts_with("revert:") {
-            return Some(ClassificationResult {
-                category: "revert".to_string(),
-                subcategory: None,
-                top_level: Some(TopLevelCategory::Maintenance),
-                confidence: 0.9,
-                method: ClassificationMethod::FuzzyMatch,
-                ticket_id: None,
-                complexity: None,
-            });
+            return Some((
+                ClassificationResult {
+                    category: "revert".to_string(),
+                    subcategory: None,
+                    top_level: Some(TopLevelCategory::Maintenance),
+                    confidence: 0.9,
+                    method: ClassificationMethod::FuzzyMatch,
+                    ticket_id: None,
+                    complexity: None,
+                },
+                "revert",
+            ));
         }
 
         // 3. Bare ticket-prefixed message — likely a feature/chore.
         if let Some(ticket) = bare_ticket_prefix(trimmed) {
-            return Some(ClassificationResult {
-                category: "feature".to_string(),
-                subcategory: Some("ticketed".to_string()),
-                top_level: Some(TopLevelCategory::Feature),
-                confidence: 0.6,
-                method: ClassificationMethod::FuzzyMatch,
-                ticket_id: Some(ticket),
-                complexity: None,
-            });
+            return Some((
+                ClassificationResult {
+                    category: "feature".to_string(),
+                    subcategory: Some("ticketed".to_string()),
+                    top_level: Some(TopLevelCategory::Feature),
+                    confidence: 0.6,
+                    method: ClassificationMethod::FuzzyMatch,
+                    ticket_id: Some(ticket),
+                    complexity: None,
+                },
+                "ticket_prefix",
+            ));
         }
 
         // 4. Very short messages — chore by convention.
         if trimmed.len() < 12 && !trimmed.is_empty() {
-            return Some(ClassificationResult {
-                category: "chore".to_string(),
-                subcategory: None,
-                top_level: Some(TopLevelCategory::Maintenance),
-                confidence: 0.4,
-                method: ClassificationMethod::FuzzyMatch,
-                ticket_id: None,
-                complexity: None,
-            });
+            return Some((
+                ClassificationResult {
+                    category: "chore".to_string(),
+                    subcategory: None,
+                    top_level: Some(TopLevelCategory::Maintenance),
+                    confidence: 0.4,
+                    method: ClassificationMethod::FuzzyMatch,
+                    ticket_id: None,
+                    complexity: None,
+                },
+                "short_message",
+            ));
         }
 
         None

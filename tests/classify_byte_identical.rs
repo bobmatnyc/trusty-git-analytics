@@ -17,6 +17,8 @@
 //! `TGA_BLESS_CLASSIFY_GOLDEN=1 cargo test --test classify_byte_identical`.
 //! Test: this file.
 
+// Only `message` is read here; the other fields serve the agentic-detection tests.
+#[allow(dead_code)]
 mod corpus_fixture;
 
 use std::collections::BTreeMap;

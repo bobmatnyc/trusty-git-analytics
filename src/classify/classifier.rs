@@ -18,6 +18,7 @@ use crate::classify::tiers::override_tier::OverrideTier;
 use crate::classify::tiers::regex_tier::RegexMatcher;
 use crate::classify::tiers::weighted_sum::WeightedSumClassifier;
 use crate::classify::tiers::ClassificationResult;
+use crate::classify::trace::{RuleSources, RuleTrace, TraceTier, TracedVerdict};
 use crate::core::creds::CredentialSource;
 use crate::core::models::ClassificationMethod;
 
@@ -114,6 +115,8 @@ pub struct ClassificationEngine {
     llm: Option<LlmClassifier>,
     taxonomy: TaxonomyRegistry,
     config: ClassificationEngineConfig,
+    /// #111: where each rule came from, for [`RuleTrace`] ids only.
+    rule_sources: RuleSources,
 }
 
 impl ClassificationEngine {
@@ -323,7 +326,19 @@ impl ClassificationEngine {
             llm,
             taxonomy,
             config,
+            rule_sources: RuleSources::default(),
         })
+    }
+
+    /// Attach rule provenance so traced verdicts name each rule's source.
+    ///
+    /// Why (#111): `RuleSet::merge` drops which rules file defined a rule, and
+    /// the eval harness reports precision per source-qualified rule id.
+    /// What: replaces the engine's [`RuleSources`]; verdicts are unaffected.
+    /// Test: `classify::trace_tests::traced_cascade_names_rule_sources`.
+    pub fn with_rule_sources(mut self, sources: RuleSources) -> Self {
+        self.rule_sources = sources;
+        self
     }
 
     /// Borrow the engine's taxonomy registry.
@@ -401,18 +416,43 @@ impl ClassificationEngine {
         repo_path: Option<&str>,
         issue_type: Option<&str>,
     ) -> Option<ClassificationResult> {
+        // #111: the untraced cascade is a projection of the traced one, so the
+        // verdict `tga classify` writes cannot drift from the traced verdict.
+        self.classify_sync_traced(message, is_merge, commit_sha, repo_path, issue_type)
+            .map(|t| t.verdict)
+    }
+
+    /// [`Self::classify_sync_with_context`] plus the rule that fired (#111).
+    ///
+    /// Why: the eval harness measures precision per rule, which the stored
+    /// `method` column cannot express.
+    /// What: walks tiers 0 → 3.5 in cascade order and returns the first
+    /// verdict with its [`RuleTrace`]; the verdict is exactly what the
+    /// untraced call returns. The trace lives in memory only.
+    /// Test: `classify::trace_tests::traced_cascade_matches_untraced_verdicts`,
+    /// `classify::trace_tests::traced_cascade_names_rule_sources`.
+    pub fn classify_sync_traced(
+        &self,
+        message: &str,
+        is_merge: bool,
+        commit_sha: Option<&str>,
+        repo_path: Option<&str>,
+        issue_type: Option<&str>,
+    ) -> Option<TracedVerdict> {
+        let traced = |verdict, trace| Some(TracedVerdict { verdict, trace });
+
         // Tier 0: manual override (DB lookup, short-circuits everything).
         if let (Some(tier), Some(sha), Some(repo)) =
             (self.override_tier.as_ref(), commit_sha, repo_path)
         {
             if let Some(r) = tier.lookup(sha, repo) {
-                return Some(r);
+                return traced(r, RuleTrace::new(TraceTier::Manual, "manual_override"));
             }
         }
 
         // Tier 1: exact keywords
         if let Some(rule) = self.exact.classify(message) {
-            return Some(ClassificationResult {
+            let r = ClassificationResult {
                 top_level: self.taxonomy.resolve(&rule.category),
                 category: rule.category.clone(),
                 subcategory: rule.subcategory.clone(),
@@ -420,14 +460,19 @@ impl ClassificationEngine {
                 method: ClassificationMethod::ExactRule,
                 ticket_id: RegexMatcher::extract_ticket_id(message),
                 complexity: None,
-            });
+            };
+            return traced(
+                r,
+                RuleTrace::for_rule(TraceTier::Exact, rule, &self.rule_sources),
+            );
         }
 
         // Tier 1.5: PM issue-type mapping.
         if let Some(it) = issue_type {
             if let Some(mut r) = self.issue_type.classify(it) {
                 r.ticket_id = RegexMatcher::extract_ticket_id(message);
-                return Some(r);
+                let id = format!("issue_type:{}", it.trim().to_lowercase());
+                return traced(r, RuleTrace::new(TraceTier::IssueType, id));
             }
         }
 
@@ -443,13 +488,20 @@ impl ClassificationEngine {
         // circuit above.
         if !self.jira_project.is_empty() {
             if let Some(r) = self.jira_project.classify(message) {
-                return Some(r);
+                let key = r
+                    .ticket_id
+                    .as_deref()
+                    .and_then(|t| t.split('-').next())
+                    .unwrap_or_default()
+                    .to_uppercase();
+                let id = format!("jira_project:{key}");
+                return traced(r, RuleTrace::new(TraceTier::JiraProject, id));
             }
         }
 
         // Tier 2: regex
         if let Some(rule) = self.regex.classify(message) {
-            return Some(ClassificationResult {
+            let r = ClassificationResult {
                 top_level: self.taxonomy.resolve(&rule.category),
                 category: rule.category.clone(),
                 subcategory: rule.subcategory.clone(),
@@ -457,7 +509,11 @@ impl ClassificationEngine {
                 method: ClassificationMethod::RegexRule,
                 ticket_id: RegexMatcher::extract_ticket_id(message),
                 complexity: None,
-            });
+            };
+            return traced(
+                r,
+                RuleTrace::for_rule(TraceTier::Regex, rule, &self.rule_sources),
+            );
         }
 
         // Tier 2.5: weighted-sum classifier.
@@ -470,7 +526,9 @@ impl ClassificationEngine {
         // File paths are not available in the synchronous path (they would
         // require a DB join); pass an empty slice so the signal contributes
         // zero rather than penalising the commit.
-        if let Some(mut result) = self.weighted_sum.classify(message, is_merge, &[]) {
+        if let Some((mut result, signal)) =
+            self.weighted_sum.classify_traced(message, is_merge, &[])
+        {
             if result.ticket_id.is_none() {
                 result.ticket_id = RegexMatcher::extract_ticket_id(message);
             }
@@ -479,7 +537,8 @@ impl ClassificationEngine {
             if let Some(top) = self.taxonomy.resolve(&result.category) {
                 result.top_level = Some(top);
             }
-            return Some(result);
+            let id = format!("weighted_sum:{}/{signal}", result.category);
+            return traced(result, RuleTrace::new(TraceTier::WeightedSum, id));
         }
 
         // Tier 3.5: fuzzy heuristics (only when extend_defaults is true).
@@ -487,7 +546,7 @@ impl ClassificationEngine {
         // "feature", "chore"). When the user's ruleset has extend_defaults:
         // false the fuzzy field is None, and this block is skipped entirely.
         if let Some(fuzzy) = &self.fuzzy {
-            if let Some(mut result) = fuzzy.classify(message, is_merge) {
+            if let Some((mut result, heuristic)) = fuzzy.classify_traced(message, is_merge) {
                 if result.ticket_id.is_none() {
                     result.ticket_id = RegexMatcher::extract_ticket_id(message);
                 }
@@ -496,7 +555,8 @@ impl ClassificationEngine {
                 if let Some(top) = self.taxonomy.resolve(&result.category) {
                     result.top_level = Some(top);
                 }
-                return Some(result);
+                let id = format!("fuzzy:{heuristic}");
+                return traced(result, RuleTrace::new(TraceTier::Fuzzy, id));
             }
         }
 
@@ -557,6 +617,23 @@ impl ClassificationEngine {
             .map(|(msg, is_merge)| {
                 self.classify_sync(msg, *is_merge)
                     .unwrap_or_else(ClassificationResult::unclassified)
+            })
+            .collect()
+    }
+
+    /// [`Self::classify_batch`] with each verdict's [`RuleTrace`] (#111).
+    ///
+    /// Why: the eval harness re-classifies a window of commits to learn
+    /// which rule produced each stored verdict.
+    /// What: same parallel tiers 1–3.5; a miss yields
+    /// [`TracedVerdict::unclassified`]. Nothing is written anywhere.
+    /// Test: `classify::trace_tests::traced_cascade_matches_untraced_verdicts`.
+    pub fn classify_batch_traced(&self, messages: &[(&str, bool)]) -> Vec<TracedVerdict> {
+        messages
+            .par_iter()
+            .map(|(msg, is_merge)| {
+                self.classify_sync_traced(msg, *is_merge, None, None, None)
+                    .unwrap_or_else(TracedVerdict::unclassified)
             })
             .collect()
     }
