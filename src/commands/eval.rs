@@ -166,6 +166,11 @@ fn run_sample(a: SampleArgs, config: Config, config_path: &Path) -> Result<()> {
         );
     }
     println!("Sampled {total} of {} requested.", s.requested_size);
+    if total < s.requested_size && total < s.population {
+        println!(
+            "Note: the per-repo and per-author --cap limited the sample; with few repositories or authors, raise --cap."
+        );
+    }
     if summary.drifted > 0 {
         println!(
             "Note: {} stored verdicts differ from the current rules; the sample measures the current rules.",
