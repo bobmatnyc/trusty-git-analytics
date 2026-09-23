@@ -19,12 +19,13 @@ export const GITHUB_URL = 'https://github.com/bobmatnyc/trusty-git-analytics';
 export const CRATES_IO_URL = 'https://crates.io/crates/tga';
 
 /**
- * Why: no production domain is assigned yet — that is Bob's decision (see
- * website/README.md, "Vercel project settings"). Rather than invent one,
- * this site emits no `<link rel="canonical">` and no `og:url` until a real
- * `SITE_URL` exists; add both to `+layout.svelte` in the same change that
- * assigns the domain.
+ * Why: the canonical link and `og:url` on every page need one origin, set
+ * once. Owner ruling (Bob): the Vercel project is `trusty-git-analytics`,
+ * domain `tga.trustytools.dev` — see website/README.md, "Vercel setup".
+ * What: the production origin. `+layout.svelte` appends the current route's
+ * pathname to build each page's canonical URL.
  */
+export const SITE_URL = 'https://tga.trustytools.dev';
 
 export const NAV_LINKS: { href: string; label: string }[] = [
 	{ href: '/', label: 'Home' },

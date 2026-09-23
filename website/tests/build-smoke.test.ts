@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { SITE_URL } from '../src/lib/site';
 
 /**
  * Why: every other test here reads source files. None of them prove the site
@@ -75,6 +76,23 @@ describe('production build', () => {
 		expect(landingPage).toContain('https://crates.io/crates/tga');
 	});
 
+	it('emits a canonical link and og:url pointing at tga.trustytools.dev', () => {
+		const pages: [string, string][] = [
+			['/', landingPage],
+			['/trusty-audit', readFileSync(path.join(STATIC, 'trusty-audit.html'), 'utf8')]
+		];
+		for (const [route, html] of pages) {
+			const canonical = `${SITE_URL}${route}`;
+			expect(html, `${route} canonical link`).toContain(
+				`<link rel="canonical" href="${canonical}"`
+			);
+			expect(html, `${route} og:url`).toContain(`<meta property="og:url" content="${canonical}"`);
+			expect(html, `${route} og:site_name`).toContain(
+				'<meta property="og:site_name" content="tga.trustytools.dev"'
+			);
+		}
+	});
+
 	it('renders the install page with the cargo and binary paths', () => {
 		const html = readFileSync(path.join(STATIC, 'install.html'), 'utf8');
 		expect(html).toContain('cargo install tga --locked');
@@ -90,12 +108,18 @@ describe('production build', () => {
 		expect(html).toContain('tga audit');
 	});
 
-	it('renders the trusty-audit page with the ten stages and the honest install caveat', () => {
+	it('renders the trusty-audit page with the ten stages and the root install.sh', () => {
 		const html = readFileSync(path.join(STATIC, 'trusty-audit.html'), 'utf8');
 		expect(html).toContain('cargo install trusty-review --locked');
 		expect(html).toContain('OPENROUTER_API_KEY');
-		expect(html).toContain('bobmatnyc/trusty-tools');
+		expect(html).toContain(
+			'https://raw.githubusercontent.com/bobmatnyc/trusty-git-analytics/main/install.sh'
+		);
+		expect(html).toContain('trusty-audit-v');
 		expect(html).toContain('jira sync');
+		expect(html, 'still names the pre-split crates/ path').not.toContain(
+			'crates/trusty-audit/install.sh'
+		);
 	});
 
 	it('names no fabricated crates.io claim for trusty-audit', () => {
@@ -103,11 +127,14 @@ describe('production build', () => {
 		expect(html).not.toContain('cargo install trusty-audit');
 	});
 
-	// The published site loads everything from its own origin at build time.
+	// `rel="canonical"` links are excluded: they are a reference to this
+	// site's own URL (SITE_URL), not a resource the page fetches, so an
+	// absolute href there is correct rather than a leak.
 	it('loads no subresource from a third-party origin', () => {
 		for (const page of PAGES) {
 			const html = readFileSync(path.join(STATIC, page), 'utf8');
 			const linkHrefs = [...html.matchAll(/<link\b[^>]*>/g)]
+				.filter((tag) => !/\brel="canonical"/.test(tag[0]))
 				.map((tag) => /\bhref="([^"]+)"/.exec(tag[0])?.[1])
 				.filter((href): href is string => Boolean(href));
 			const subresources = [

@@ -57,25 +57,39 @@ pre-split `bobmatnyc/trusty-tools` monorepo. `src/lib/site.test.ts` re-derives
 the MSRV, license, and subcommand list from the repository and fails if
 `src/lib/site.ts` drifts from it.
 
-## Vercel project settings (Bob's to configure)
+## Vercel setup (Bob's to configure; nothing deploys from this repository)
 
-This package has never been deployed. If and when a Vercel project is created
-for it:
+Owner ruling: Vercel project `trusty-git-analytics`, domain
+`tga.trustytools.dev`.
 
-| Setting                                              | Value                                                                                                                   |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Framework preset                                     | SvelteKit (auto-detected)                                                                                               |
-| Root Directory                                       | `website`                                                                                                               |
-| Build Command                                        | default (`vite build`, auto-detected)                                                                                   |
-| Output Directory                                     | default (`.vercel/output`, auto-detected)                                                                               |
-| Environment variables                                | none required                                                                                                           |
-| "Include source files outside of the Root Directory" | **not needed** — this package reads nothing outside `website/` at build time, unlike trusty-tools/website's docs reader |
+| Setting                                              | Value                                                                                                                                                                                           |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Project name                                         | `trusty-git-analytics`                                                                                                                                                                          |
+| Framework preset                                     | SvelteKit (auto-detected)                                                                                                                                                                       |
+| Root Directory                                       | `website`                                                                                                                                                                                       |
+| Build Command                                        | default (`vite build`, auto-detected)                                                                                                                                                           |
+| Output Directory                                     | default (`.vercel/output`, auto-detected)                                                                                                                                                       |
+| Environment variables                                | none required                                                                                                                                                                                   |
+| Domain                                               | `tga.trustytools.dev` — the zone is on Vercel DNS under the account that owns `trustytools.dev`, so adding the domain to the project creates the record; nothing to configure in DNS separately |
+| "Include source files outside of the Root Directory" | not needed — this package reads nothing outside `website/` at build time, unlike trusty-tools/website's docs reader                                                                             |
 
-No domain is assigned in this repository. `src/lib/site.ts` deliberately
-carries no `SITE_URL` and the layout emits no `<link rel="canonical">` or
-`og:url` until one exists — add both in the same change that assigns a
-domain, whether that domain is a `trustytools.dev` subpath or a standalone
-one. Nothing else in the build depends on which domain is chosen.
+`src/lib/site.ts`'s `SITE_URL` is `https://tga.trustytools.dev`, and
+`+layout.svelte` emits `<link rel="canonical">` and `og:url` from it on every
+page.
+
+### Ignored Build Step
+
+```
+git diff --quiet HEAD^ HEAD -- website/
+```
+
+Vercel runs the Ignored Build Step from the repository root regardless of the
+project's Root Directory setting, so the path is repo-relative (`website/`,
+not `./`) — the same convention
+[trusty-tools/website's README](https://github.com/bobmatnyc/trusty-tools/tree/main/website#ignored-build-step)
+documents. Vercel skips the build when the command exits 0. Verified against
+this repository's own history: a commit touching `website/` exits 1 (build
+runs); a commit that does not exits 0 (build skipped).
 
 This workflow adds no Vercel deployment configuration beyond what the build
 itself needs (no `vercel.json`, no deploy step in CI) — deploying is a

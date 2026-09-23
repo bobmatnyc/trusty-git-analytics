@@ -199,23 +199,20 @@
 		<div class="prose-block">
 			<h2 class="!mt-0">The <code>trusty-audit</code> binary itself</h2>
 			<p>
-				<code>crates/trusty-audit/install.sh</code> downloads a release tarball, verifies it against
-				its published SHA-256 checksum, installs it into
-				<code>$CARGO_HOME/bin</code> (or <code>~/.cargo/bin</code>) with an atomic rename, and
-				launches it. It runs on macOS Apple Silicon only — no Intel Mac or Linux asset is published
-				for this crate, and the script refuses rather than handing you a binary that cannot execute.
+				<code>install.sh</code>, at the root of this repository, downloads the
+				<code>trusty-audit-v*</code> release tarball for your platform, verifies it against its
+				published <code>.sha256</code> sidecar, installs it into <code>$CARGO_HOME/bin</code> (or
+				<code>~/.cargo/bin</code>) with an atomic rename, and launches it. It runs on macOS Apple
+				Silicon only — no Intel Mac or Linux asset is published for this crate, and the script
+				refuses rather than handing you a binary that cannot execute.
 			</p>
 			<p>
-				<strong class="font-semibold text-foundry-text">Current state:</strong> the script itself
-				now lives in this repository, but it still resolves <em>releases</em> from the pre-split
-				<code>bobmatnyc/trusty-tools</code> repository — it hard-codes
-				<code>REPO="bobmatnyc/trusty-tools"</code>, which is where <code>trusty-audit</code>
-				shipped before this repository split off. It will need repointing at this repository's own Releases,
-				and this repository will need to have cut a <code>trusty-audit</code>
-				release, before the command below actually installs anything.
+				It resolves once this repository has published its first <code>trusty-audit-v*</code>
+				GitHub release; until then it stops with "No published trusty-audit-v* release found" and installs
+				nothing.
 			</p>
 			<CommandBlock
-				command={`curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-git-analytics/main/crates/trusty-audit/install.sh | sh`}
+				command={`curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-git-analytics/main/install.sh | sh`}
 				label="Copy trusty-audit install command"
 			/>
 			<p>Until then, build it from a checkout instead:</p>
