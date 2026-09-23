@@ -12,7 +12,7 @@
 # NATIVE_LINUX_LINK=false, AL2023_VARIANT=false). This workflow keeps the
 # THREE-TARGET matrix (macOS arm64, Linux x86_64 glibc-2.17, Linux arm64
 # glibc-2.17) and the exact asset-naming / .sha256 / archive-contents
-# convention, and drops everything else. See NOTES.md for what got cut and
+# convention, and drops everything else. See docs/release-assets.md for what got cut and
 # why that is believed safe.
 #
 # OWNER RULING (2026-09-23): releases are manual, run by local-ops. This
@@ -21,7 +21,7 @@
 # and never touches a crates.io token.
 #
 # ASSET NAMING (must match trusty-installer's download/release.rs byte for
-# byte — see NOTES.md's asset-name table):
+# byte — see docs/release-assets.md's asset-name table):
 #   trusty-git-analytics-<version>-<target>.tar.gz(.sha256)   (crate: tga)
 #   trusty-audit-<version>-<target>.tar.gz(.sha256)           (crate: trusty-audit)
 # where <target> is one of:
@@ -64,7 +64,7 @@ jobs:
   # and emit the build matrix. Unlike trusty-tools' release.yml there is no
   # tag-prefix alias to canonicalize: this repo tags with the crate DIRECTORY
   # name directly (trusty-git-analytics-v*, trusty-audit-v*), never the `tga`
-  # package-name spelling — see docs/PUBLISHING.md and NOTES.md.
+  # package-name spelling — see docs/PUBLISHING.md and docs/release-assets.md.
   # ---------------------------------------------------------------------------
   setup:
     name: Parse tag / resolve crate config
@@ -294,7 +294,7 @@ jobs:
       # Asset naming / archive contents / .sha256 format: BYTE-FOR-BYTE the
       # same convention as trusty-tools' release.yml "Strip, package, and
       # checksum" step, which is what trusty-installer's download/release.rs
-      # (asset_url / asset_filename / sha256_url) parses. See NOTES.md.
+      # (asset_url / asset_filename / sha256_url) parses. See docs/release-assets.md.
       - name: Strip, package, and checksum
         id: package
         shell: bash

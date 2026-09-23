@@ -11,7 +11,7 @@
 # and `--exclude`d by hand on every workspace-wide command. A bare
 # `cargo build/test/clippy --workspace` in this repo never touches it and no
 # `--exclude` flag is needed anywhere below (confirmed against the root
-# Cargo.toml; see NOTES.md).
+# Cargo.toml; see docs/release-assets.md).
 #
 # Trimmed down from trusty-tools' ci.yml on purpose: that workflow's
 # complexity (docs-only diff classification, 8-way test sharding, fastembed
@@ -166,7 +166,7 @@ jobs:
             exit 1
           fi
           if echo "$OUT" | grep -E '^(ratatui|crossterm|libsqlite3-sys) v'; then
-            echo "::error::Duplicate ratatui, crossterm, or libsqlite3-sys versions in the dependency graph. tga and trusty-audit must agree on one ratatui/crossterm major and one rusqlite/libsqlite3-sys version — see this job's header comment and NOTES.md."
+            echo "::error::Duplicate ratatui, crossterm, or libsqlite3-sys versions in the dependency graph. tga and trusty-audit must agree on one ratatui/crossterm major and one rusqlite/libsqlite3-sys version — see this job's header comment and docs/release-assets.md."
             exit 1
           fi
           echo "OK — no duplicate ratatui, crossterm, or libsqlite3-sys version in the graph."

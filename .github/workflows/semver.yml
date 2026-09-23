@@ -57,7 +57,7 @@ jobs:
       # Three triggers, three ways to decide what to check:
       #   tag push          — the tag names its crate directly (this repo
       #                       tags trusty-git-analytics-v*/trusty-audit-v*,
-      #                       never the tga-v* alias — see NOTES.md).
+      #                       never the tga-v* alias — see docs/release-assets.md).
       #   workflow_dispatch — the package name the operator typed (tga or
       #                       trusty-audit).
       #   pull_request      — whichever crate(s) bumped their declared

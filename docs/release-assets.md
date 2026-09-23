@@ -17,7 +17,7 @@ checkout's `.github/workflows/{release,ci,semver-checks,trusty-audit-install}.ym
 .github/workflows/release.yml
 .github/workflows/semver.yml
 docs/PUBLISHING.md
-NOTES.md
+docs/release-assets.md
 ```
 
 ## YAML validation

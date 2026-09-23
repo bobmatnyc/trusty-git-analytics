@@ -112,7 +112,7 @@ bump (owner-authorized only), record it before publishing rather than
 disabling the gate: add a short note to the crate's changelog naming the
 break and the reason, and get explicit sign-off in the PR. This repo does not
 carry trusty-tools' `scripts/semver-accepted-breaks/` machine-readable
-override file — that is a deliberate simplification (see NOTES.md); if this
+override file — that is a deliberate simplification (see docs/release-assets.md); if this
 repo starts needing it routinely, port that mechanism rather than skipping
 the gate by hand.
 
@@ -125,7 +125,7 @@ are current — a stale pin naming a version that is not what this release
 actually ships is a real defect, not cosmetic. trusty-tools carries a
 dedicated `scripts/refresh-engagement-pins.sh` for this (CHECK 10 in
 `preflight-publish.sh`); this repo has not ported that script — check the
-`[tools]` table by hand until it does (see NOTES.md, open question).
+`[tools]` table by hand until it does (see docs/release-assets.md, open question).
 
 ## Worktree cleanup
 
@@ -136,4 +136,4 @@ worktree yourself. Whoever operates this repo's PM/orchestrator reclaims it.
 
 - CI's semver gate: `.github/workflows/semver.yml`
 - Release build/attach pipeline: `.github/workflows/release.yml`
-- Asset naming and the trusty-installer contract it must match: `NOTES.md`
+- Asset naming and the trusty-installer contract it must match: `docs/release-assets.md`
