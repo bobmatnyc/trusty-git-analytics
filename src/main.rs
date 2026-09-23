@@ -291,9 +291,11 @@ async fn run() -> anyhow::Result<()> {
     // session. For that one subcommand the writer becomes a `LogCapture` the
     // TUI arms and drains into its ACTIVITY pane, and ANSI is off because those
     // lines are re-rendered as ratatui text rather than written to a terminal.
-    // Every other subcommand takes the byte-identical stderr path it always
-    // had; nothing here changes `trusty_common::init_tracing` for any other
-    // binary, whose stderr default keeps stdout clean for MCP framing.
+    // Every other subcommand logs to stderr; nothing here changes
+    // `trusty_common::init_tracing` for any other binary.
+    // #111: `fmt()` defaults to stdout, which mixed log lines into output that
+    // callers pipe (`tga eval`, `--format json`); stdout carries only command
+    // output.
     let log_capture = commands::tui::LogCapture::new();
     if matches!(cli.command, Commands::Tui(_)) {
         tracing_subscriber::fmt()
@@ -302,7 +304,10 @@ async fn run() -> anyhow::Result<()> {
             .with_ansi(false)
             .init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .init();
     }
 
     // Update check: tga has no MCP stdio transport — all other subcommands are
