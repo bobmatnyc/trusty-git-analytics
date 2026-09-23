@@ -34,5 +34,7 @@ pub mod classify;
 pub mod collect;
 pub mod commands;
 pub mod core;
+// #111: classifier precision harness behind `tga eval`.
+pub mod eval;
 pub mod profile;
 pub mod report;

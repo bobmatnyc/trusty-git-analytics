@@ -45,6 +45,30 @@ commands:
       - cmd: tga inspect schema
       - cmd: tga inspect attest
       - cmd: tga inspect attest --json
+  eval:
+    description: Classifier precision harness — sample classified commits for labelling, then score the labels (outputs contain commit text; store them privately, outside any repository)
+    flags:
+      - name: db
+        description: "sample: a copy of tga.db, opened read-only"
+      - name: seed
+        description: "sample: RNG seed (required); same seed and database give the same sample"
+      - name: weeks
+        description: "sample: window length in weeks, ending at the newest commit (default 26)"
+      - name: size
+        description: "sample: total sample size (default 400)"
+      - name: cap
+        description: "sample: max commits per repo and per author within a stratum (default 5)"
+      - name: salt
+        description: "sample: author-hash salt; generated and saved when omitted"
+      - name: labels
+        description: "score: rater label file; repeat once for a second rater"
+      - name: adjudicated
+        description: "score: adjudicated labels that settle disagreements"
+      - name: out
+        description: Output directory (required; keep it outside any repository)
+    examples:
+      - cmd: tga eval sample --config config.yaml --db ~/private/tga-copy.db --seed 7 --out ~/private/eval
+      - cmd: tga eval score --sample ~/private/eval/sample.jsonl --labels ~/private/eval/a.csv --labels ~/private/eval/b.csv --out ~/private/eval
   analyze:
     description: Run the full pipeline (collect → classify → report)
     flags:

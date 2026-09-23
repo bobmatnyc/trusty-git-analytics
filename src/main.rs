@@ -30,6 +30,7 @@ use crate::commands::audit::AuditArgs;
 use crate::commands::author::AuthorArgs;
 use crate::commands::backfill::BackfillArgs;
 use crate::commands::dora::DoraArgs;
+use crate::commands::eval::EvalArgs;
 use crate::commands::inspect::InspectArgs;
 use crate::commands::install::InstallArgs;
 use crate::commands::override_cmd::OverrideArgs;
@@ -155,6 +156,8 @@ enum Commands {
     Audit(AuditArgs),
     /// Show the live database schema, or attest what it holds (#5218).
     Inspect(InspectArgs),
+    /// Classifier precision harness: draw a labelling sample, score the labels (#111).
+    Eval(EvalArgs),
 
     /// Manage inference provider configuration (API keys) — the universal
     /// `config keys set/list/test/unset` surface shared by every trusty-*
@@ -389,6 +392,20 @@ async fn run() -> anyhow::Result<()> {
         return commands::inspect::run(&db_path, args);
     }
 
+    // #111: the eval harness reads a database copy through its own read-only
+    // open (`--db`) and must never reach the creating, migrating open below.
+    if let Commands::Eval(args) = cli.command {
+        let config_explicit = {
+            use clap::CommandFactory;
+            Cli::command()
+                .try_get_matches_from(&argv)
+                .ok()
+                .and_then(|m| m.value_source("config"))
+                .is_some_and(|s| s == clap::parser::ValueSource::CommandLine)
+        };
+        return commands::eval::run(args, config, &cli.config, config_explicit);
+    }
+
     // #5465: `tga profile` opens the database through `ContributorSelector`,
     // which seeds the identity resolver from the same connection the rest of the
     // pipeline reads through — so it is dispatched before the shared open rather
@@ -436,6 +453,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::Tui(_) => unreachable!("tui dispatched above"),
         Commands::Profile(_) => unreachable!("profile dispatched above"),
         Commands::Inspect(_) => unreachable!("inspect dispatched above"),
+        Commands::Eval(_) => unreachable!("eval dispatched above"),
         Commands::Install(_) => unreachable!("install dispatched above"),
         Commands::Config(_) => unreachable!("config dispatched above"),
     }
