@@ -1,0 +1,415 @@
+# Binary release workflow for the standalone trusty-git-analytics repo
+# (split-plan step 6). Replaces trusty-tools' generic per-crate release.yml
+# for these two crates only.
+#
+# WHY THIS IS SIMPLER THAN trusty-tools' release.yml: that workflow's extra
+# machinery (AL2023 load-dynamic legs, native-vs-zigbuild toolchain choice,
+# numkong/ORT SIMD-probe workarounds, the release-completeness-audit job,
+# immutable-release detection, homebrew-bump) exists for crates that bundle
+# ONNX Runtime, embed a Svelte UI, or publish a Homebrew formula. Neither tga
+# nor trusty-audit does any of that (confirmed from trusty-tools'
+# release.yml per-crate config: both set SKIP_UI_BUILD=false,
+# NATIVE_LINUX_LINK=false, AL2023_VARIANT=false). This workflow keeps the
+# THREE-TARGET matrix (macOS arm64, Linux x86_64 glibc-2.17, Linux arm64
+# glibc-2.17) and the exact asset-naming / .sha256 / archive-contents
+# convention, and drops everything else. See docs/release-assets.md for what got cut and
+# why that is believed safe.
+#
+# OWNER RULING (2026-09-23): releases are manual, run by local-ops. This
+# workflow only builds the binaries and attaches them to a GitHub Release
+# that already carries the pushed tag's name — it never runs `cargo publish`
+# and never touches a crates.io token.
+#
+# ASSET NAMING (must match trusty-installer's download/release.rs byte for
+# byte — see docs/release-assets.md's asset-name table):
+#   trusty-git-analytics-<version>-<target>.tar.gz(.sha256)   (crate: tga)
+#   trusty-audit-<version>-<target>.tar.gz(.sha256)           (crate: trusty-audit)
+# where <target> is one of:
+#   aarch64-apple-darwin
+#   x86_64-unknown-linux-gnu   (glibc 2.17 baseline, via cargo zigbuild)
+#   aarch64-unknown-linux-gnu  (glibc 2.17 baseline, via cargo zigbuild, built
+#                               natively on an arm64 runner)
+name: Binary Release
+
+on:
+  push:
+    tags:
+      - "trusty-git-analytics-v*"
+      - "trusty-audit-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build as if it had just been pushed, e.g. trusty-git-analytics-v1.0.0-rc.1"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run — build but do not create/update the GitHub Release"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # setup — parse the tag into {crate, version}, resolve the per-crate config,
+  # and emit the build matrix. Unlike trusty-tools' release.yml there is no
+  # tag-prefix alias to canonicalize: this repo tags with the crate DIRECTORY
+  # name directly (trusty-git-analytics-v*, trusty-audit-v*), never the `tga`
+  # package-name spelling — see docs/PUBLISHING.md and docs/release-assets.md.
+  # ---------------------------------------------------------------------------
+  setup:
+    name: Parse tag / resolve crate config
+    runs-on: ubuntu-latest
+    outputs:
+      crate:    ${{ steps.parse.outputs.crate }}
+      tag:      ${{ steps.parse.outputs.tag }}
+      version:  ${{ steps.parse.outputs.version }}
+      dry_run:  ${{ steps.parse.outputs.dry_run }}
+      cargo_pkg: ${{ steps.config.outputs.cargo_pkg }}
+      binaries:  ${{ steps.config.outputs.binaries }}
+      readme_path: ${{ steps.config.outputs.readme_path }}
+      matrix:    ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Parse tag or dispatch input
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+            DRY_RUN="${{ inputs.dry_run }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            DRY_RUN="false"
+          fi
+
+          if [[ "$TAG" =~ ^(trusty-git-analytics|trusty-audit)-v([0-9].+)$ ]]; then
+            CRATE="${BASH_REMATCH[1]}"
+            VERSION="${BASH_REMATCH[2]}"
+          else
+            echo "::error::Tag '${TAG}' does not match trusty-git-analytics-v<version> or trusty-audit-v<version>."
+            exit 1
+          fi
+
+          {
+            echo "crate=$CRATE"
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "dry_run=$DRY_RUN"
+          } >> "$GITHUB_OUTPUT"
+          echo "Parsed: crate=$CRATE tag=$TAG version=$VERSION dry_run=$DRY_RUN"
+
+      # Per-crate config table. Only two entries — see the file-header comment
+      # for why neither needs the SKIP_UI_BUILD / AL2023 / native-link
+      # machinery trusty-tools' equivalent table carries.
+      - name: Resolve per-crate config
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          CRATE="${{ steps.parse.outputs.crate }}"
+          if [[ "$CRATE" == "trusty-git-analytics" ]]; then
+            # Repo root IS the tga crate (Cargo package name "tga"). Single
+            # [[bin]] `tga` at src/main.rs.
+            CARGO_PKG="tga"
+            BINARIES="tga"
+            README_PATH="README.md"
+          elif [[ "$CRATE" == "trusty-audit" ]]; then
+            # crates/trusty-audit, Cargo package name "trusty-audit". Two
+            # [[bin]] targets over one src/main.rs: trusty-audit + taudit
+            # (the name crates/trusty-audit/install.sh downloads and launches).
+            CARGO_PKG="trusty-audit"
+            BINARIES="trusty-audit taudit"
+            README_PATH="crates/trusty-audit/README.md"
+          else
+            echo "::error::Unhandled crate '$CRATE' — add a config branch above."
+            exit 1
+          fi
+          {
+            echo "cargo_pkg=$CARGO_PKG"
+            echo "binaries=$BINARIES"
+            echo "readme_path=$README_PATH"
+          } >> "$GITHUB_OUTPUT"
+
+      # Build matrix: one macOS arm64 leg (native) + two Linux legs (zigbuild,
+      # glibc 2.17 baseline — see trusty-tools' release.yml file-header
+      # comment, issue #2037, for why the baseline is pinned rather than left
+      # at the runner's own glibc). All three legs are REQUIRED (no
+      # best_effort) — neither crate carries the ORT/numkong toolchain
+      # quirks that make trusty-tools mark some legs best-effort.
+      - name: Generate build matrix
+        id: matrix
+        shell: python3 {0}
+        env:
+          CRATE: ${{ steps.parse.outputs.crate }}
+          VERSION: ${{ steps.parse.outputs.version }}
+          CARGO_PKG: ${{ steps.config.outputs.cargo_pkg }}
+          BINARIES: ${{ steps.config.outputs.binaries }}
+        run: |
+          import json, os, pathlib
+
+          crate = os.environ["CRATE"]
+          version = os.environ["VERSION"]
+          pkg = os.environ["CARGO_PKG"]
+          bins = os.environ["BINARIES"].split()
+
+          common = dict(crate=crate, version=version, cargo_pkg=pkg, binaries=bins)
+
+          ZIG_GLIBC = "2.17"
+
+          includes = [
+              {**common,
+               "runner": "macos-14",
+               "target": "aarch64-apple-darwin",
+               "variant": "standard",
+               "zig_target": ""},
+              {**common,
+               "runner": "ubuntu-latest",
+               "target": "x86_64-unknown-linux-gnu",
+               "variant": "linux-zigbuild",
+               "zig_target": f"x86_64-unknown-linux-gnu.{ZIG_GLIBC}"},
+              # Native arm64 runner — HOST == TARGET, so no cross-compilation
+              # pkg-config hazard (see trusty-tools' release.yml, issue #2533).
+              {**common,
+               "runner": "ubuntu-24.04-arm",
+               "target": "aarch64-unknown-linux-gnu",
+               "variant": "linux-zigbuild",
+               "zig_target": f"aarch64-unknown-linux-gnu.{ZIG_GLIBC}"},
+          ]
+
+          matrix = {"include": includes}
+          result = json.dumps(matrix)
+          print(f"matrix={result}")
+          with pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a") as f:
+              f.write(f"matrix={result}\n")
+
+  # ---------------------------------------------------------------------------
+  # preflight — the tagged commit must be reachable from origin/main. Same
+  # rationale as trusty-tools' release.yml `preflight` job (issue #3366):
+  # this is a tag-triggered pipeline that can fire from any branch a tag was
+  # pushed from, and this project publishes only from merged main.
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: Verify tag ancestry
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit is reachable from origin/main
+        shell: bash
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            echo "workflow_dispatch invocation — no tag/commit to check ancestry for; skipping (deliberate manual run, already gated by repo write access)."
+            exit 0
+          fi
+          git fetch origin main --quiet
+          TAGGED_SHA="$(git rev-parse 'HEAD^{commit}')"
+          MAIN_SHA="$(git rev-parse origin/main)"
+          echo "Tag: ${TAG}  Tagged commit: ${TAGGED_SHA}  origin/main: ${MAIN_SHA}"
+          if git merge-base --is-ancestor "${TAGGED_SHA}" "${MAIN_SHA}"; then
+            echo "OK — tagged commit is reachable from origin/main."
+          else
+            echo "::error::Tag '${TAG}' points at ${TAGGED_SHA}, not reachable from origin/main (${MAIN_SHA}). Publish only from merged main — see docs/PUBLISHING.md."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # build — fan out over the matrix. Produces one .tar.gz + one .tar.gz.sha256
+  # per platform.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.crate }} ${{ matrix.target }}
+    needs: [setup, preflight]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build prerequisites (Ubuntu)
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev binutils curl file
+
+      - name: Install zig
+        if: matrix.variant == 'linux-zigbuild'
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.13.0"
+
+      - name: Install cargo-zigbuild
+        if: matrix.variant == 'linux-zigbuild'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install Rust (MSRV 1.94)
+        uses: dtolnay/rust-toolchain@1.94
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ matrix.crate }}
+
+      - name: Build release binary
+        shell: bash
+        env:
+          # zig's cc driver ships LLVM libc++, not GNU libstdc++, and does not
+          # auto-link it for a transitively-linked C++ archive the way a real
+          # cc/g++ would. Neither crate here links a C++ archive (no bundled
+          # ORT), so this is a no-op today — kept for parity with
+          # trusty-tools' release.yml in case that ever changes.
+          RUSTFLAGS: ${{ matrix.variant == 'linux-zigbuild' && '-C link-arg=-lstdc++' || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.variant }}" == "linux-zigbuild" ]]; then
+            echo "Running: cargo zigbuild -p ${{ matrix.cargo_pkg }} --release --target ${{ matrix.zig_target }}"
+            cargo zigbuild -p "${{ matrix.cargo_pkg }}" --release --target "${{ matrix.zig_target }}"
+          else
+            echo "Running: cargo build -p ${{ matrix.cargo_pkg }} --release --target ${{ matrix.target }}"
+            cargo build -p "${{ matrix.cargo_pkg }}" --release --target "${{ matrix.target }}"
+          fi
+
+      # Asset naming / archive contents / .sha256 format: BYTE-FOR-BYTE the
+      # same convention as trusty-tools' release.yml "Strip, package, and
+      # checksum" step, which is what trusty-installer's download/release.rs
+      # (asset_url / asset_filename / sha256_url) parses. See docs/release-assets.md.
+      - name: Strip, package, and checksum
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          CRATE="${{ matrix.crate }}"
+          VERSION="${{ matrix.version }}"
+          TARGET="${{ matrix.target }}"
+          ASSET_NAME="${CRATE}-${VERSION}-${TARGET}"
+          STAGING_DIR="staging/${ASSET_NAME}"
+          mkdir -p "${STAGING_DIR}"
+
+          for BIN in ${{ join(matrix.binaries, ' ') }}; do
+            BIN_PATH="target/${TARGET}/release/${BIN}"
+            if [[ ! -f "${BIN_PATH}" ]]; then
+              echo "::error::expected binary not found: ${BIN_PATH}"
+              exit 1
+            fi
+            if command -v file >/dev/null 2>&1; then
+              case "${TARGET}" in
+                aarch64-*) EXPECT_ARCH='aarch64|arm64' ;;
+                x86_64-*)  EXPECT_ARCH='x86-64|x86_64' ;;
+                *)         EXPECT_ARCH='' ;;
+              esac
+              ARCH_DESC="$(file -b "${BIN_PATH}")"
+              if [[ -n "${EXPECT_ARCH}" ]] && ! grep -Eqi "${EXPECT_ARCH}" <<<"${ARCH_DESC}"; then
+                echo "::error::Architecture mismatch for ${BIN}: target is ${TARGET} but built binary reports '${ARCH_DESC}'."
+                exit 1
+              fi
+            fi
+            strip "${BIN_PATH}" || true
+            cp "${BIN_PATH}" "${STAGING_DIR}/"
+          done
+
+          [[ -f "LICENSE" ]] && cp "LICENSE" "${STAGING_DIR}/" || true
+          README_PATH="${{ needs.setup.outputs.readme_path }}"
+          [[ -n "${README_PATH}" && -f "${README_PATH}" ]] && cp "${README_PATH}" "${STAGING_DIR}/" || true
+
+          tar -czf "${ASSET_NAME}.tar.gz" -C staging "${ASSET_NAME}"
+
+          if command -v sha256sum &>/dev/null; then
+            sha256sum "${ASSET_NAME}.tar.gz" > "${ASSET_NAME}.tar.gz.sha256"
+          else
+            shasum -a 256 "${ASSET_NAME}.tar.gz" > "${ASSET_NAME}.tar.gz.sha256"
+          fi
+
+          {
+            echo "asset_archive=${ASSET_NAME}.tar.gz"
+            echo "asset_checksum=${ASSET_NAME}.tar.gz.sha256"
+            echo "asset_name=${ASSET_NAME}"
+          } >> "$GITHUB_OUTPUT"
+          ls -lh "${ASSET_NAME}.tar.gz" "${ASSET_NAME}.tar.gz.sha256"
+          cat "${ASSET_NAME}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.package.outputs.asset_name }}
+          path: |
+            ${{ steps.package.outputs.asset_archive }}
+            ${{ steps.package.outputs.asset_checksum }}
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # release — create/update the GitHub Release for this tag and attach every
+  # built asset. Prerelease when the version carries a `-` suffix (e.g.
+  # 1.0.0-rc.1), which is how the workflow_dispatch throwaway-prerelease test
+  # (deliverable #2) is meant to be exercised: dispatch with
+  # tag=trusty-git-analytics-v0.0.0-test1, dry_run=false, on a disposable tag.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create / update GitHub Release
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >-
+      !cancelled() &&
+      needs.setup.outputs.dry_run != 'true' &&
+      needs.build.result == 'success'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List assets to be uploaded
+        run: find release-assets -type f | sort
+
+      - name: Require the primary macOS artifact
+        run: |
+          if ! find release-assets -type f -name '*-aarch64-apple-darwin.tar.gz' | grep -q .; then
+            echo "::error::Primary macOS artifact not found — refusing to publish a partial release."
+            exit 1
+          fi
+
+      - name: Detect prerelease
+        id: prerelease
+        run: |
+          VERSION="${{ needs.setup.outputs.version }}"
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.setup.outputs.tag }}
+          name: "${{ needs.setup.outputs.crate }} v${{ needs.setup.outputs.version }}"
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/**/*.tar.gz
+            release-assets/**/*.tar.gz.sha256

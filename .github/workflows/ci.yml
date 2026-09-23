@@ -1,0 +1,172 @@
+# CI for the standalone trusty-git-analytics repo (split-plan step 6).
+#
+# Repo root = the `tga` crate (binary `tga`). `crates/trusty-audit` = the
+# `trusty-audit` crate (binaries `trusty-audit` + `taudit`). Root Cargo.toml
+# declares `[workspace] members = [".", "crates/trusty-audit"]`
+# (ripgrep-style — the workspace root is itself a member) and
+# `exclude = ["crates/trusty-audit/ui"]` for the Tauri GUI (package
+# `trusty-audit-ui`, manifest at `crates/trusty-audit/ui/src-tauri/Cargo.toml`),
+# which is therefore NOT a workspace member here at all — unlike the
+# trusty-tools monorepo, where it is a member excluded from `default-members`
+# and `--exclude`d by hand on every workspace-wide command. A bare
+# `cargo build/test/clippy --workspace` in this repo never touches it and no
+# `--exclude` flag is needed anywhere below (confirmed against the root
+# Cargo.toml; see docs/release-assets.md).
+#
+# Trimmed down from trusty-tools' ci.yml on purpose: that workflow's
+# complexity (docs-only diff classification, 8-way test sharding, fastembed
+# model caching, four dedicated Tauri-GUI jobs, a red-main tracking issue) all
+# exists to pay for a 20+ crate / multi-GUI monorepo. Two crates, no bundled
+# ONNX/UI-embedding, no Tauri member: none of that machinery earns its keep
+# here. Reintroduce a piece of it only when this repo's own CI time or false-
+# green history justifies it.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # PR: one run per PR ref, superseded by each new push (saves CI minutes).
+  # push to main: keyed to the commit, never cancelled — the commit is
+  # already on main, so there is nothing to save by killing its own check run.
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # fmt — cargo fmt --all --check (stable + rustfmt component).
+  # ---------------------------------------------------------------------------
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain with rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - run: cargo fmt --all --check
+
+  # ---------------------------------------------------------------------------
+  # clippy — deny warnings across the whole workspace (both crates, all
+  # targets). `--workspace` covers `.` (tga) and `crates/trusty-audit`
+  # automatically; no `--exclude` is needed because the Tauri UI crate is
+  # excluded from the workspace in Cargo.toml (see file-header comment).
+  # ---------------------------------------------------------------------------
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # test — cargo test --workspace for both crates.
+  #
+  # fetch-depth: 0 (full clone): tga's collect/ module extracts real commit
+  # history via git2, and several of its 37 unit tests + the gated integration
+  # test build small real repos or read this checkout's own git log. A shallow
+  # clone risks a test that assumes history depth it does not have. Drop this
+  # to the default shallow checkout if triage shows no test actually needs it.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test (tga + trusty-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - run: cargo test --workspace
+
+  # ---------------------------------------------------------------------------
+  # msrv — cargo check --workspace on the declared floor (1.94), matching
+  # tga's rust-toolchain.toml / clippy.toml. `cargo check`, not `test`: the
+  # MSRV guarantee is that the code compiles on the minimum toolchain, not
+  # that tests pass on it.
+  # ---------------------------------------------------------------------------
+  msrv:
+    name: MSRV check (1.94)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.94
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1-94
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - run: cargo check --workspace
+
+  # ---------------------------------------------------------------------------
+  # dependency-duplicates — plan risk item: tga and trusty-audit no longer
+  # share a `trusty-common` crate to unify their dependency graph on one
+  # ratatui major / one rusqlite+libsqlite3-sys pair (Cargo's `links = "sqlite3"`
+  # uniqueness rule forbids two copies of libsqlite3-sys in one build graph
+  # outright — a real build break, not a lint). Once trusty-audit and tga are
+  # each other's only workspace siblings, nothing but this check stops their
+  # ratatui/rusqlite version pins from drifting apart. `cargo tree -d` lists
+  # every package that resolves to more than one version in the graph.
+  # ---------------------------------------------------------------------------
+  dependency-duplicates:
+    name: Dependency graph — no duplicate ratatui / libsqlite3-sys
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dep-dupes
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: cargo tree -d
+        run: |
+          set -uo pipefail
+          OUT="$(cargo tree --workspace -d 2>&1)"
+          RC=$?
+          echo "$OUT"
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::cargo tree -d exited ${RC} — could not compute the dependency graph."
+            exit 1
+          fi
+          if echo "$OUT" | grep -E '^(ratatui|crossterm|libsqlite3-sys) v'; then
+            echo "::error::Duplicate ratatui, crossterm, or libsqlite3-sys versions in the dependency graph. tga and trusty-audit must agree on one ratatui/crossterm major and one rusqlite/libsqlite3-sys version — see this job's header comment and docs/release-assets.md."
+            exit 1
+          fi
+          echo "OK — no duplicate ratatui, crossterm, or libsqlite3-sys version in the graph."
