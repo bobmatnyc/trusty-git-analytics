@@ -1,0 +1,3 @@
+# Shadows the root rustfmt.toml (tga's edition-2021 style). trusty-audit was
+# formatted with rustfmt's defaults in trusty-tools, which had no root config.
+edition = "2024"

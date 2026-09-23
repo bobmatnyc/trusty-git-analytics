@@ -38,7 +38,7 @@ readme = "README.md"
 homepage = "https://trustytools.dev"
 keywords = ["audit", "due-diligence", "installer", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-edition.workspace = true
+edition = "2024"
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -87,7 +87,7 @@ clap = { workspace = true }
 # owns every echo-suppression call, so this crate spells no `termios` of its
 # own. Also `setsid(2)` in `tests/guided_launch.rs`, which needs a child with no
 # controlling terminal at all.
-libc = { workspace = true }
+libc = "0.2.186"
 # Reading the companion engagement config and tga's `manifest.toml`.
 serde = { workspace = true }
 toml = { workspace = true }
@@ -105,7 +105,7 @@ serde_yaml = { workspace = true }
 # for version comparison (`trusty-installer`, `trusty-mpm`, `trusty-review`
 # all reach for it), so this is the shared choice rather than a hand-rolled
 # major/minor/patch comparison.
-semver = { workspace = true }
+semver = { version = "1.0.28", features = ["serde"] }
 # Library error type.
 thiserror = { workspace = true }
 # #5868: first-run credential entry with echo disabled. Already the workspace's
@@ -115,13 +115,15 @@ thiserror = { workspace = true }
 # needs: it reads AND prompts on `/dev/tty` rather than stdin — which under
 # `curl … | sh` is the pipe carrying the script — and it restores the terminal's
 # previous state when it drops.
-rpassword = { workspace = true }
+rpassword = "7.5.4"
 # #5495: the pinned, fail-closed download entry point. Downloading, verifying
 # and placing binaries is this crate's domain, not ours — CLAUDE.md's
 # common-entry-point rule makes a second implementation here a defect. It also
 # supplies the HTTP client (`download::http_client`), which is why `reqwest` is
 # deliberately absent from this manifest.
-trusty-installer = { workspace = true }
+# Published release, never path or git (split plan). 0.13.7 is the newest
+# release on crates.io and the floor this crate is built and tested against.
+trusty-installer = "0.13.7"
 # #5487: the workspace's single `gh` entry point (#5475). Discovery shells out
 # to `gh repo list`, and CLAUDE.md's common-entry-point rule makes a second
 # `Command::new("gh")` here a defect — so this crate never spells one.
@@ -154,26 +156,26 @@ tokio = { workspace = true }
 trusty-progress = { workspace = true }
 # #5499: the return package is one zip file, because the return channel is
 # manual (#5642) and a directory cannot be attached to an email.
-zip = { workspace = true }
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 # #5980: a non-reversible, truncated fingerprint of the `gh`-derived
 # credential a sweep resolved, persisted in the checkpoint so packaging (which
 # can run as a separate process, possibly under a different `gh` account) can
 # prove it is scanning outbound files with the credential that produced them
 # rather than a freshly re-resolved one that never touched those files.
-sha2 = { workspace = true }
+sha2 = "0.10.9"
 # #5481: the detached ed25519 signature over the return package's content
 # manifest, and the check that reads it back. The workspace has no other
 # asymmetric-signing implementation to route through — `trusty-installer`'s
 # Developer-ID codesign answers a different question (who built the binary),
 # which #5481 and #5484 both warn against conflating. `rand_core` is only for
 # `OsRng` when a fresh engagement keypair is minted.
-ed25519-dalek = { workspace = true }
-rand_core = { workspace = true }
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 # #5499: walking each audited repository's output directory. Not followed
 # through symlinks — `package::collect_dir` refuses one rather than reading a
 # file from outside the working directory into a package that leaves the
 # recipient's network.
-walkdir = { workspace = true }
+walkdir = "2.5.0"
 # #6077: `gitleaks` writes its findings to a file, and that file holds the
 # matched credentials UNREDACTED. A hand-rolled path under `std::env::temp_dir()`
 # lands 0644 on a world-readable /tmp for as long as the scan runs, so the
@@ -199,4 +201,4 @@ wiremock = { workspace = true }
 # reads its generated members, because what the recipient receives is the zip
 # rather than the console output that produced it. Already a dependency above,
 # so this costs no extra compilation.
-zip = { workspace = true }
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }

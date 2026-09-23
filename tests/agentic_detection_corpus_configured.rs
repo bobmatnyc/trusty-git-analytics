@@ -9,20 +9,18 @@
 //! claims is one the shipped markers did not already account for. That is the
 //! "+N" half of #5414's acceptance: the share stays >= 91% and rises by a
 //! measurable, attributable N.
-//! Test: this file. Ignored by default — it walks the surrounding checkout.
+//! Test: this file. It reads the recorded trusty-tools history (see
+//! `corpus_fixture`) rather than a checkout, so it is not ignored.
 //!
 //! The probe is labelled `synthetic-probe` and keys on a human co-author
 //! trailer, which is NOT a claim that those commits are agentic. It is a
 //! measurable string in this corpus chosen so N is verifiable; a real operator
 //! would write their own house footer here.
 
-use tga::collect::ai_markers::{detect, detection_disclosure, CommitSignals};
+mod corpus_fixture;
 
-struct Commit {
-    message: String,
-    author_email: String,
-    committer_email: String,
-}
+use corpus_fixture::history;
+use tga::collect::ai_markers::{detect, detection_disclosure, CommitSignals};
 
 /// The two markers this corpus actually contains, counted independently of the
 /// detector — the same known-marker baseline `agentic_detection_corpus.rs`
@@ -36,26 +34,7 @@ fn matches_known_marker(message: &str) -> bool {
             .any(|l| l.starts_with("co-authored-by:") && l.contains("claude"))
 }
 
-fn history() -> Option<Vec<Commit>> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let repo = git2::Repository::open(root).ok()?;
-    let mut walk = repo.revwalk().ok()?;
-    walk.push_head().ok()?;
-    let mut out = Vec::new();
-    for oid in walk {
-        let oid = oid.ok()?;
-        let c = repo.find_commit(oid).ok()?;
-        out.push(Commit {
-            message: c.message().unwrap_or("").to_string(),
-            author_email: c.author().email().unwrap_or("").to_string(),
-            committer_email: c.committer().email().unwrap_or("").to_string(),
-        });
-    }
-    Some(out)
-}
-
 #[test]
-#[ignore = "walks the surrounding trusty-tools checkout; run with --include-ignored"]
 fn a_configured_marker_raises_the_catch_rate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("ai-markers.yaml");
@@ -73,9 +52,7 @@ fn a_configured_marker_raises_the_catch_rate() {
     // The lazily-cached marker load is what needs its own process.
     std::env::set_var("TGA_AI_MARKERS", &path);
 
-    let Some(commits) = history() else {
-        panic!("expected a git checkout at the workspace root");
-    };
+    let commits = history();
     assert!(
         commits.len() > 2000,
         "expected the full trusty-tools history, got {} commits",

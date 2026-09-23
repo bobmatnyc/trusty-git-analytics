@@ -1,0 +1,7 @@
+# trusty-audit's clippy configuration. It shadows the root clippy.toml (tga's),
+# so it restates the MSRV as well.
+msrv = "1.94.0"
+# Carried over from the trusty-tools root clippy.toml this crate was linted
+# under. clippy::result_large_err defaults to 128 bytes; trusty-audit was never
+# held to that bound.
+large-error-threshold = 256

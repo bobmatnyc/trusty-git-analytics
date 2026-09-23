@@ -1,3 +1,52 @@
+# Standalone repository (split from trusty-tools at 1c1ce516a). This root
+# manifest is both the `tga` package and the workspace, ripgrep-style.
+[workspace]
+members = [".", "crates/trusty-audit"]
+# A bare `cargo build` / `test` / `clippy` covers both crates, as it did in the
+# monorepo's `default-members`.
+default-members = [".", "crates/trusty-audit"]
+# The trusty-audit Tauri GUI needs the pnpm/Svelte toolchain (and WebKitGTK on
+# Linux), so it stays out of the workspace and out of every headless gate.
+exclude = ["crates/trusty-audit/ui"]
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/bobmatnyc/trusty-git-analytics"
+authors = ["Bob Matsuoka <bob@matsuoka.com>"]
+
+# Dependencies BOTH crates take, pinned once so tga and trusty-audit cannot
+# drift apart. Versions are the ones trusty-tools resolved at 1c1ce516a;
+# crate-specific dependencies are written out in each crate's own manifest.
+[workspace.dependencies]
+# Published crates.io releases, never path or git (split plan). Each crate adds
+# its own feature list.
+trusty-common = "0.52"
+trusty-progress = "0.3.2"
+anyhow = "1.0.102"
+chrono = { version = "0.4.44", features = ["serde"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
+dirs = "5.0.1"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+serde_yaml = "0.9.34"
+thiserror = "1.0.69"
+tokio = { version = "1.52.3", features = ["full"] }
+toml = "0.8.23"
+toml_edit = "0.22.27"
+# Test-only for tga, a normal dependency of trusty-audit.
+tempfile = "3.27.0"
+# `file_locks` supplies `#[file_serial]`, the cross-process lock trusty-audit's
+# tests need under nextest.
+serial_test = { version = "3.4.0", features = ["file_locks"] }
+wiremock = "0.6.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
 [package]
 name = "tga"
 # #5219: MINOR bump from the published 3.0.0, required in-PR by the #4421 gate
@@ -77,7 +126,7 @@ edition = "2021"
 rust-version = "1.94"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 license.workspace = true
-repository = "https://github.com/bobmatnyc/trusty-tools"
+repository.workspace = true
 description = "Developer productivity analytics — git commit collection, classification, and reporting"
 homepage = "https://trustytools.dev"
 keywords = ["git", "analytics", "productivity", "developer-metrics"]
@@ -89,6 +138,12 @@ exclude = [
     ".fastembed_cache/*",
     ".github/*",
     "configs/*",
+    # The 9 MB recorded-history corpus and the two tests that read it stay in
+    # the repository only; a crates.io tarball ships neither.
+    "tests/fixtures/*",
+    "tests/corpus_fixture/*",
+    "tests/agentic_detection_corpus.rs",
+    "tests/agentic_detection_corpus_configured.rs",
 ]
 
 [[bin]]
@@ -122,7 +177,7 @@ tokio = { workspace = true }
 # IANA timezone database: JQL date literals are evaluated in the JIRA
 # account's profile timezone, so the sync bound must be rendered in it
 # (issue #3966; see collect::jira::jql_time).
-chrono-tz = { workspace = true }
+chrono-tz = "0.9.0"
 # CLI
 clap = { workspace = true }
 # Serialization
@@ -138,21 +193,15 @@ toml = { workspace = true }
 # `toml::Value` round trip would rewrite every one of them.
 toml_edit = { workspace = true }
 # Database
-# Bumped from 0.31 to align with trusty-memory-core / trusty-cto-db
-# (rusqlite 0.39, libsqlite3-sys 0.37). Cargo's `links = "sqlite3"`
-# uniqueness rule forbids two copies of libsqlite3-sys in one build graph,
-# so every crate using rusqlite in this workspace must agree on a single
-# major version.
-#
-# Local pin retained: the workspace `rusqlite` entry enables only the
-# `bundled` feature; tga additionally needs the `chrono` feature for typed
-# `DateTime<Utc>` row binding. Adding a feature alongside `workspace = true`
-# is the documented way to extend a shared dep without cloning the version.
-rusqlite = { workspace = true, features = ["chrono"] }
+# MUST MATCH: rusqlite 0.39 (libsqlite3-sys 0.37) is the line the rest of the
+# trusty crates use. Cargo's `links = "sqlite3"` uniqueness rule forbids two
+# copies of libsqlite3-sys in one build graph, so a different major here fails
+# resolution the day any trusty dependency starts linking SQLite.
+# `bundled` means no system SQLite; `chrono` is for typed `DateTime<Utc>` row
+# binding.
+rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
 # Git
-# Local pin retained: the workspace `git2` entry turns on git2's defaults; tga
-# disables them and names exactly the transports it needs, so the feature set
-# is stated here rather than inherited.
+# git2's defaults are off; tga names exactly the transports it needs.
 # The `https` and `vendored-openssl` features are here (#337) so `tga collect`
 # can fetch from https:// remotes without an external system git:
 #   - macOS: uses the native Security framework (no openssl runtime dep)
@@ -164,14 +213,14 @@ rusqlite = { workspace = true, features = ["chrono"] }
 # then walks clone-time refs. libssh2-sys vendors libssh2 from its own bundled
 # source, and `vendored-openssl` already propagates to it, so this adds no
 # system library and no new runtime dependency.
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https", "ssh", "vendored-openssl"] }
-# HTTP client — workspace entry already declares
-# `default-features = false, features = ["json", "stream", "rustls-tls"]`
-# which is a superset of what tga needs. The `stream` extra is harmless
-# (compiled but unused), so the migration is safe.
+git2 = { version = "0.20.4", default-features = false, features = ["vendored-libgit2", "https", "ssh", "vendored-openssl"] }
+# HTTP client — the workspace entry declares
+# `default-features = false, features = ["json", "stream", "rustls-tls"]`,
+# a superset of what tga needs; `stream` is unused here but shared with
+# trusty-audit.
 reqwest = { workspace = true }
 # Parallelism
-rayon = "1"
+rayon = "1.12.0"
 # Date/time
 chrono = { workspace = true }
 # Per-user data directory. #5463: `profile::selector::resolve_db_path` falls
@@ -183,40 +232,41 @@ dirs = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 # Regex / pattern matching
-regex = { workspace = true }
-aho-corasick = "1"
+regex = "1.12.3"
+aho-corasick = "1.1.4"
 # String similarity (identity fuzzy matching)
-strsim = { workspace = true }
+strsim = "0.11.1"
 # Logging / tracing
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-# Progress bars — workspace entry already declares 0.17 (#5197 drive-by:
-# the local pin duplicated the workspace table).
-indicatif = { workspace = true }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "registry"] }
+# Progress bars. The 0.17 line is the one trusty-progress renders through.
+indicatif = "0.17.11"
 # #5823: the cross-process progress wire format `trusty-audit` parses back.
 # Both ends name `trusty_progress::relay` rather than each spelling the grammar,
 # so the format cannot drift between producer and consumer. It brings no new
 # transitive weight — its only dependencies are indicatif (already here) and
 # thiserror.
 trusty-progress = { workspace = true }
-# TUI (#5197): `tga tui`. Pinned to the workspace versions (ratatui 0.30 /
-# crossterm 0.29, bumped from 0.29/0.28 by #2872) that trusty-common's
-# `monitor-tui` feature also uses. Every TUI crate in the workspace now names
-# these same pins, so there is one ratatui major in the build graph.
-ratatui = { workspace = true }
-crossterm = { workspace = true }
+# TUI (#5197): `tga tui`.
+# MUST MATCH trusty-common: its `monitor-tui` feature (enabled above) pulls
+# ratatui 0.30 / crossterm 0.29, and `tga tui` hands its terminal to
+# `trusty_common::monitor::tui_common`. A different minor here puts two ratatui
+# or crossterm copies in the graph whose types do not unify. Move these only
+# together with the trusty-common requirement.
+ratatui = "0.30"
+crossterm = "0.29"
 # UUID
-uuid = { workspace = true }
+uuid = { version = "1.23.1", features = ["v4", "v5", "v7", "serde"] }
 # Hashing (config hash)
-blake3 = "1"
+blake3 = "1.8.5"
 # CSV generation
-csv = "1"
+csv = "1.4.0"
 # Template engine (for markdown reports)
-tera = "1"
+tera = "1.20.1"
 # Async trait
-async-trait = { workspace = true }
+async-trait = "0.1.89"
 # Async stream combinators (for bounded-concurrency LLM fallback)
-futures = { workspace = true }
+futures = "0.3.32"
 
 [features]
 default = []
@@ -236,9 +286,9 @@ bedrock = ["trusty-common/bedrock-client"]
 # HTTP mocking for async reqwest tests
 wiremock = { workspace = true }
 # Statistical benchmarking
-criterion = { workspace = true }
+criterion = { version = "0.5.1", features = ["html_reports"] }
 # Capture tracing events in tests (used by ticket_regex warn-log assertions)
-tracing-test = "0.2"
+tracing-test = "0.2.6"
 # Temporary files for rule-loader tests
 tempfile = { workspace = true }
 # #5463: the `TGA_DB` resolution tests in `profile::selector` mutate the

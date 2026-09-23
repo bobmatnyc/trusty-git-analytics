@@ -1576,6 +1576,49 @@ fn analyze_resolution_prefers_the_env_overrides() {
     assert_eq!(socket_from_override(Some("")).expect("fallback"), derived);
 }
 
+/// tga dials the trusty-analyze socket every other trusty crate resolves.
+///
+/// Why: before the split, consumer 3 of trusty-tools'
+/// `crates/trusty-crate-contracts/tests/analyze_uds_consumers.rs` proved this
+/// against a live daemon. That test cannot take a Cargo edge on tga from
+/// another repository, so the contract moves here. The daemon binds
+/// (`trusty_analyze::service::rpc::socket_path`), and trusty-common's own
+/// on-demand client dials (`uds::ANALYZE_SERVICE`, behind trusty-common's
+/// `uds-supervisor` feature, which tga does not enable),
+/// `trusty_common::daemon_socket_path("trusty-analyze")`. A tga path that
+/// differs reads a serving daemon as absent, and the audit guard then spawns a
+/// second one beside it (#6287, #4246).
+/// What: with no socket override, tga's derived socket equals that shared call,
+/// which is `<resolve_data_dir("trusty-analyze")>/trusty-analyze.sock`.
+/// Test: this is the test.
+#[test]
+fn the_analyze_socket_is_the_path_every_trusty_crate_resolves() {
+    use crate::audit::analyze::socket_from_override;
+    use crate::audit::default_analyze_socket;
+
+    /// The service name every trusty crate passes to `daemon_socket_path`.
+    const ANALYZE_SERVICE: &str = "trusty-analyze";
+
+    let shared = trusty_common::daemon_socket_path(ANALYZE_SERVICE)
+        .expect("resolve the shared trusty-analyze socket");
+    assert_eq!(
+        default_analyze_socket().expect("resolve tga's default socket"),
+        shared,
+        "tga must derive the socket trusty-analyze binds"
+    );
+    assert_eq!(
+        socket_from_override(None).expect("resolve the fallback socket"),
+        shared,
+        "`AnalyzeGuard::from_env` with no override must land on the shared path"
+    );
+
+    // The layout every consumer shares, stated outright so a trusty-common
+    // upgrade that moves it shows up here rather than as a false `down`.
+    let data_dir = trusty_common::resolve_data_dir(ANALYZE_SERVICE)
+        .expect("resolve the trusty-analyze data directory");
+    assert_eq!(shared, data_dir.join("trusty-analyze.sock"));
+}
+
 /// A daemon that is already up is left alone.
 ///
 /// The binary is a path that cannot exist, so any spawn attempt would fail the

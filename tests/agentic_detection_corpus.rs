@@ -14,22 +14,21 @@
 //! observed per-tool counts so that gap is visible in the output rather than
 //! implied by a passing test.
 //!
-//! Test: this file. Ignored by default because it depends on the surrounding
-//! checkout's history; run with
-//! `cargo test -p tga --test agentic_detection_corpus -- --include-ignored --nocapture`.
+//! The corpus is trusty-tools' history recorded at 1c1ce516a (see
+//! `corpus_fixture`), so the run no longer depends on any checkout and is not
+//! ignored.
+//!
+//! Test: this file; see the numbers with
+//! `cargo test -p tga --test agentic_detection_corpus -- --nocapture`.
+
+mod corpus_fixture;
 
 use std::collections::BTreeMap;
 
-use git2::Repository;
+use corpus_fixture::{history, Commit};
 use regex::Regex;
 use tga::collect::ai_attribution::AgenticMode;
 use tga::collect::ai_markers::{detect, detection_disclosure, CommitSignals};
-
-struct Commit {
-    message: String,
-    author_email: String,
-    committer_email: String,
-}
 
 /// The detector exactly as it stood before #5249, frozen.
 ///
@@ -84,32 +83,11 @@ fn matches_known_marker(c: &Commit) -> bool {
             .any(|l| l.starts_with("co-authored-by:") && l.contains("claude"))
 }
 
-fn history() -> Option<Vec<Commit>> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let repo = Repository::open(&root).ok()?;
-    let mut walk = repo.revwalk().ok()?;
-    walk.push_head().ok()?;
-    let mut out = Vec::new();
-    for oid in walk {
-        let oid = oid.ok()?;
-        let c = repo.find_commit(oid).ok()?;
-        out.push(Commit {
-            message: c.message().unwrap_or("").to_string(),
-            author_email: c.author().email().unwrap_or("").to_string(),
-            committer_email: c.committer().email().unwrap_or("").to_string(),
-        });
-    }
-    Some(out)
-}
-
 /// #5249 acceptance: detected agentic share must rise from ~48% toward the
 /// ~91% the two known markers account for.
 #[test]
-#[ignore = "walks the surrounding trusty-tools checkout; run with --include-ignored"]
 fn catch_rate_on_trusty_tools_history() {
-    let Some(commits) = history() else {
-        panic!("expected a git checkout at the workspace root");
-    };
+    let commits = history();
     assert!(
         commits.len() > 2000,
         "expected the full trusty-tools history, got {} commits",
