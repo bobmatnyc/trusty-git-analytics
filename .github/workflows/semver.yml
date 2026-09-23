@@ -1,0 +1,199 @@
+# Public-API / SemVer gate for the standalone trusty-git-analytics repo
+# (split-plan step 6). Carries over ONLY the check itself from trusty-tools'
+# semver-checks.yml / preflight-publish.sh CHECK 5 — none of that file's
+# accepted-breaks override system, its dynamic PR-check-name `verdict` job,
+# or its self-tests. Reintroduce a piece of that only once this repo has had
+# a real incident it would have caught (trusty-tools added each one in
+# response to a specific dated failure — see that workflow's comments).
+#
+# Runs cargo-semver-checks against the crate's PREVIOUS crates.io release
+# (the same "compare against the registry, not the workspace path override"
+# fix trusty-tools' file-header comment explains — a workspace `cargo check`
+# cannot see a breaking change because the local path override always pairs
+# local source with local dependency).
+#
+# WHERE THE BLOCKING GATE LIVES: `cargo publish` for tga/trusty-audit is run
+# LOCALLY by local-ops (see docs/PUBLISHING.md), not by any workflow here, so
+# this CI job cannot itself stop an upload. It is a second, independent
+# report — the actual stop is the equivalent local preflight check run
+# immediately before `cargo publish` (docs/PUBLISHING.md's CHECK 5).
+name: SemVer checks
+
+on:
+  push:
+    tags:
+      - "trusty-git-analytics-v*"
+      - "trusty-audit-v*"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: "Package name to check: tga or trusty-audit"
+        required: true
+        type: string
+
+concurrency:
+  group: semver-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semver:
+    name: Public API / SemVer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Refresh the base branch ref
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags --quiet origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+
+      # Three triggers, three ways to decide what to check:
+      #   tag push          — the tag names its crate directly (this repo
+      #                       tags trusty-git-analytics-v*/trusty-audit-v*,
+      #                       never the tga-v* alias — see NOTES.md).
+      #   workflow_dispatch — the package name the operator typed (tga or
+      #                       trusty-audit).
+      #   pull_request      — whichever crate(s) bumped their declared
+      #                       version against the base branch. None is the
+      #                       normal case and means no release is under test.
+      - name: Select package(s) to check
+        id: select
+        env:
+          TAG: ${{ github.ref_name }}
+          INPUT_CRATE: ${{ inputs.crate }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            PKGS="$INPUT_CRATE"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            case "$TAG" in
+              trusty-git-analytics-v*) PKGS="tga" ;;
+              trusty-audit-v*)         PKGS="trusty-audit" ;;
+              *)
+                echo "::error::Ref '${TAG}' is not a trusty-git-analytics-v<version> or trusty-audit-v<version> release tag."
+                exit 1
+                ;;
+            esac
+          else
+            PKGS=""
+            if git diff "origin/${BASE_REF}"...HEAD -- Cargo.toml | grep -q '^+version[[:space:]]*='; then
+              PKGS="tga"
+            fi
+            if git diff "origin/${BASE_REF}"...HEAD -- crates/trusty-audit/Cargo.toml \
+                 | grep -q '^+version[[:space:]]*='; then
+              PKGS="${PKGS:+$PKGS }trusty-audit"
+            fi
+          fi
+
+          if [[ -z "$PKGS" && "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "::error::Empty package selection — nothing to check."
+            exit 1
+          fi
+
+          echo "packages=${PKGS}" >> "$GITHUB_OUTPUT"
+          if [[ -n "$PKGS" ]]; then
+            echo "have_work=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_work=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install stable toolchain
+        if: steps.select.outputs.have_work == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      # Pinned prebuilt (as trusty-tools does): a `cargo install` compile of
+      # the tool would cost ~2 minutes before a single crate is checked, and
+      # pinning the version keeps a tool release from silently changing the
+      # lint set under a gate nobody re-reviewed.
+      - name: Install cargo-semver-checks (pinned)
+        if: steps.select.outputs.have_work == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@0.50.0
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.select.outputs.have_work == 'true'
+        with:
+          shared-key: semver-checks
+          cache-directories: target/semver-checks
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # For each selected package: resolve the greatest non-yanked crates.io
+      # release BELOW its own declared Cargo.toml version (never the crate's
+      # own just-published version — trusty-tools' check_semver.sh comments
+      # document the self-comparison trap this avoids), then compare against
+      # it. A 404 (never published) is a clean skip, not a failure — there is
+      # no baseline to compare against yet.
+      - name: cargo semver-checks against the previous crates.io release
+        id: enforce
+        if: steps.select.outputs.have_work == 'true'
+        run: |
+          set -euo pipefail
+          rc=0
+          for pkg in ${{ steps.select.outputs.packages }}; do
+            case "$pkg" in
+              tga)          manifest="Cargo.toml" ;;
+              trusty-audit) manifest="crates/trusty-audit/Cargo.toml" ;;
+              *)
+                echo "::error::Unknown package '$pkg'."
+                exit 1
+                ;;
+            esac
+            CURRENT="$(grep -m1 -E '^version[[:space:]]*=' "$manifest" | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
+            echo "== $pkg (current: $CURRENT) =="
+
+            HTTP_CODE="$(curl -fsS -o /tmp/versions.json -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/${pkg}/versions" || echo "000")"
+            if [[ "$HTTP_CODE" != "200" ]]; then
+              echo "SKIP ${pkg}: not found on crates.io (never published, HTTP ${HTTP_CODE}) — no baseline to compare."
+              continue
+            fi
+
+            # jq ships preinstalled on GitHub-hosted runners. Non-yanked,
+            # non-prerelease version numbers, sorted with `sort -V`; the
+            # greatest one strictly below CURRENT is the baseline (never the
+            # crate's own about-to-ship version).
+            BASELINE="$(jq -r '.versions[] | select(.yanked == false) | select(.num | test("-") | not) | .num' /tmp/versions.json \
+              | sort -V \
+              | awk -v cur="$CURRENT" '
+                  function verlt(a, b,   na, nb, i) {
+                    n1 = split(a, na, ".");
+                    n2 = split(b, nb, ".");
+                    for (i = 1; i <= (n1 > n2 ? n1 : n2); i++) {
+                      x = (i <= n1) ? na[i] + 0 : 0;
+                      y = (i <= n2) ? nb[i] + 0 : 0;
+                      if (x != y) return (x < y);
+                    }
+                    return 0;
+                  }
+                  verlt($0, cur) { best = $0 }
+                  END { if (best != "") print best }
+                ')"
+
+            if [[ -z "$BASELINE" ]]; then
+              echo "SKIP ${pkg}: no installable non-yanked release below ${CURRENT} — no baseline exists."
+              continue
+            fi
+
+            echo "Comparing ${pkg} ${BASELINE} -> ${CURRENT}"
+            if ! cargo semver-checks check-release \
+                   --package "$pkg" \
+                   --baseline-version "$BASELINE" \
+                   --only-explicit-features; then
+              echo "::error title=SemVer break::${pkg} has a breaking public-API change relative to ${BASELINE} without (or ahead of) a corresponding breaking version bump."
+              rc=1
+            fi
+          done
+          exit "$rc"
+
+      - name: No release under test
+        if: steps.select.outputs.have_work != 'true'
+        run: echo "No package's declared version changed against the base branch — nothing to compare."
