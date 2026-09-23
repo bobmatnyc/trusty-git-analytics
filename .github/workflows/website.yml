@@ -1,0 +1,106 @@
+# Ported from trusty-tools/website's website-tests.yml (#5200 there), scoped
+# to this repository's simpler layout: this repo has no ci.yml / docs-only
+# classifier yet, so relevance is a plain `paths:` filter on `website/**`
+# rather than a script-driven relevance check.
+name: Website
+
+on:
+  push:
+    branches: [main]
+    paths: ["website/**", ".github/workflows/website.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["website/**", ".github/workflows/website.yml"]
+
+concurrency:
+  group: website-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Check, build, and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read the pinned pnpm version from website/package.json
+        id: pin
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([0-9][0-9.]*\).*/\1/p' website/package.json)"
+          if [ -z "$version" ]; then
+            echo "::error::no pnpm@<version> found in website/package.json packageManager" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pin.outputs.version }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: website
+        run: pnpm install --frozen-lockfile
+
+      - name: svelte-check
+        working-directory: website
+        run: pnpm run check
+
+      - name: Install Chromium for the mobile-overflow smoke test
+        working-directory: website
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Build
+        working-directory: website
+        run: pnpm run build
+
+      - name: Test (unit + smoke)
+        working-directory: website
+        run: pnpm run test
+
+  lint:
+    name: Prettier + ESLint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read the pinned pnpm version from website/package.json
+        id: pin
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([0-9][0-9.]*\).*/\1/p' website/package.json)"
+          if [ -z "$version" ]; then
+            echo "::error::no pnpm@<version> found in website/package.json packageManager" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pin.outputs.version }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: website
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        working-directory: website
+        run: pnpm run lint
