@@ -36,6 +36,11 @@ pub enum EvalSubcommand {
     #[command(after_help = PRIVACY)]
     Sample(SampleArgs),
     /// Score rater labels against a sample: precision per rule, method and stratum.
+    ///
+    /// Valid labels are the categories recorded in strata.json, or the taxonomy
+    /// of the config when --config is passed explicitly, plus every predicted
+    /// category in the sample, `unclear` and `mixed`. `unclear` and `mixed` are
+    /// reported but left out of precision.
     #[command(after_help = PRIVACY)]
     Score(ScoreArgs),
 }
@@ -44,6 +49,7 @@ pub enum EvalSubcommand {
 #[derive(Args, Debug)]
 pub struct SampleArgs {
     /// A COPY of the tga database; opened read-only, refused if writable.
+    /// The global --database flag is not used by this command.
     #[arg(long)]
     pub db: PathBuf,
     /// Window length in weeks, ending at the newest commit in the database.
