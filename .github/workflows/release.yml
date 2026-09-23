@@ -140,6 +140,41 @@ jobs:
             echo "readme_path=$README_PATH"
           } >> "$GITHUB_OUTPUT"
 
+      # Guard against a tag that names a different version than the crate
+      # actually ships. Nothing above this compared the two: a mistyped or
+      # stale tag would otherwise build and release under the wrong version
+      # number. `cargo metadata` reads the real Cargo.toml version at the
+      # checked-out ref (the tag itself on a push trigger; the dispatch
+      # input's tag on workflow_dispatch), and a `-rc.N`/`-pre` prerelease
+      # suffix on the tag is stripped before comparing, so a prerelease tag
+      # for the version currently in Cargo.toml still passes. Runs on the
+      # runner's preinstalled Rust — `cargo metadata` needs no particular
+      # toolchain, and the pinned-MSRV install happens later, per matrix leg.
+      - name: Check out tagged ref
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+
+      - name: Verify tag version matches Cargo.toml
+        shell: bash
+        env:
+          CARGO_PKG: ${{ steps.config.outputs.cargo_pkg }}
+          TAG_VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          set -euo pipefail
+          MANIFEST_VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg pkg "$CARGO_PKG" '.packages[] | select(.name == $pkg) | .version')"
+          if [[ -z "$MANIFEST_VERSION" ]]; then
+            echo "::error::Could not resolve a Cargo.toml version for package '${CARGO_PKG}' via cargo metadata."
+            exit 1
+          fi
+          TAG_VERSION_BASE="${TAG_VERSION%%-*}"
+          echo "Tag version: ${TAG_VERSION}  (base: ${TAG_VERSION_BASE})  Cargo.toml version: ${MANIFEST_VERSION}"
+          if [[ "$TAG_VERSION_BASE" != "$MANIFEST_VERSION" ]]; then
+            echo "::error::Tag version '${TAG_VERSION}' (base '${TAG_VERSION_BASE}') does not match ${CARGO_PKG}'s Cargo.toml version '${MANIFEST_VERSION}'. Fix the tag or bump Cargo.toml before releasing."
+            exit 1
+          fi
+
       # Build matrix: one macOS arm64 leg (native) + two Linux legs (zigbuild,
       # glibc 2.17 baseline — see trusty-tools' release.yml file-header
       # comment, issue #2037, for why the baseline is pinned rather than left
