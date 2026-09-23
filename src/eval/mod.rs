@@ -23,6 +23,8 @@ pub mod score;
 pub mod stats;
 
 mod population;
+// #111: strip identity trailers and e-mails from the rater sheet.
+mod redact;
 mod report_md;
 
 use std::path::{Path, PathBuf};

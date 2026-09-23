@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use super::draw::{draw, Candidate, DrawParams};
 use super::population::{load_commits, load_issue_types, load_paths, load_pr_titles, CommitRow};
 use super::records::{Diffstat, SampleRecord, StrataSummary, Stratum, StratumCounts};
+use super::redact::{redact_emails, strip_trailers};
 use super::{io_err, open_eval_db, EvalError, Result};
 use crate::classify::{ClassificationPipeline, TraceTier};
 use crate::core::config::Config;
@@ -353,10 +354,11 @@ fn write_labels(path: &Path, records: &[SampleRecord], salt: &str) -> Result<Pat
         w.write_record([
             r.sha.as_str(),
             r.repo.as_str(),
-            r.subject.as_str(),
-            &excerpt(&r.body, BODY_EXCERPT),
-            &paths,
-            r.pr_title.as_deref().unwrap_or(""),
+            &redact_emails(&r.subject),
+            // #111: the sheet names nobody; sample.jsonl keeps the full body.
+            &excerpt(&redact_emails(&strip_trailers(&r.body)), BODY_EXCERPT),
+            &redact_emails(&paths),
+            &redact_emails(r.pr_title.as_deref().unwrap_or("")),
             r.issue_type.as_deref().unwrap_or(""),
             "",
             "",

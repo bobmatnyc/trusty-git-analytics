@@ -6,7 +6,10 @@
 > ticket ids. Store the output directory privately, outside any repository,
 > and delete it when the evaluation is done. The harness has no default
 > output location; `--out` is required on both steps, and it warns when the
-> directory sits inside a git work tree.
+> directory sits inside a git work tree. The rater sheet `labels.csv` drops
+> identity trailers (`Co-authored-by:`, `Signed-off-by:`, `Reviewed-by:` and
+> similar) and replaces e-mail addresses with `<email>`; `sample.jsonl` keeps
+> the full commit text.
 
 ## What it measures
 

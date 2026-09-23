@@ -353,3 +353,109 @@ fn score_computes_expected_metrics() {
     .expect_err("typo label accepted");
     assert!(err.to_string().contains("featur"));
 }
+
+/// Why: the rater sheet must name nobody, while the private sample keeps the
+/// full body for the scorer.
+/// What: commits whose bodies carry identity trailers and an address; the
+/// sheet has neither, sample.jsonl has both.
+/// Test: this function.
+#[test]
+fn label_sheet_hides_trailers_and_emails() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("tga.db");
+    {
+        let db = Database::open(&db).expect("open db");
+        for i in 0..12 {
+            db.connection()
+                .execute(
+                    "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                     repository) VALUES (?1, 'n', 'a@example.com', '2025-03-01T00:00:00Z', ?2, ?3)",
+                    params![
+                        format!("{i:040x}"),
+                        format!(
+                            "fix: bug {i} for ops@example.com\n\nBody text.\n\
+                             Co-Authored-By: Jane Doe <jane@example.com>\n\
+                             Signed-off-by: Joe <joe@example.org>"
+                        ),
+                        format!("org/r{i}"),
+                    ],
+                )
+                .expect("insert");
+        }
+    }
+    let out = dir.path().join("s");
+    eval::run_sample(&sample_params(&db, &out, 3)).expect("sample");
+    let sheet = fs::read_to_string(out.join("labels.csv")).expect("labels");
+    assert!(!sheet.contains('@'), "address on the sheet:\n{sheet}");
+    assert!(!sheet.to_lowercase().contains("co-authored-by"));
+    assert!(sheet.contains("<email>") && sheet.contains("Body text."));
+    let sample = fs::read_to_string(out.join("sample.jsonl")).expect("sample");
+    assert!(sample.contains("Co-Authored-By: Jane Doe <jane@example.com>"));
+}
+
+/// SHAs drawn by seed 11 on `seed_db` before the label-sheet redaction change.
+const GOLDEN_SEED_11: &[&str] = &[
+    "000000000000000000000000000000000102e1d3",
+    "0000000000000000000000000000000001194131",
+    "0000000000000000000000000000000000265a59",
+    "00000000000000000000000000000000014134a2",
+    "000000000000000000000000000000000067df5a",
+    "00000000000000000000000000000000004cb4b1",
+    "0000000000000000000000000000000000d157cc",
+    "00000000000000000000000000000000005b1692",
+    "0000000000000000000000000000000001379e0c",
+    "00000000000000000000000000000000011c7363",
+    "00000000000000000000000000000000009b027a",
+    "00000000000000000000000000000000015ac632",
+    "000000000000000000000000000000000074a822",
+    "000000000000000000000000000000000127a312",
+    "00000000000000000000000000000000007fd7d1",
+    "0000000000000000000000000000000000664641",
+    "000000000000000000000000000000000076413b",
+    "00000000000000000000000000000000012609f9",
+    "0000000000000000000000000000000000949e16",
+    "00000000000000000000000000000000012470e0",
+    "00000000000000000000000000000000011fa595",
+    "0000000000000000000000000000000000318a08",
+    "00000000000000000000000000000000009304fd",
+    "0000000000000000000000000000000000531915",
+    "00000000000000000000000000000000002cbebd",
+    "0000000000000000000000000000000000caf368",
+    "0000000000000000000000000000000000d2f0e5",
+    "00000000000000000000000000000000001ff5f5",
+    "00000000000000000000000000000000003b209e",
+    "0000000000000000000000000000000000be2aa0",
+    "00000000000000000000000000000000015461ce",
+    "00000000000000000000000000000000013ad03e",
+    "0000000000000000000000000000000001579400",
+    "0000000000000000000000000000000000863c35",
+    "000000000000000000000000000000000079736d",
+    "000000000000000000000000000000000046504d",
+    "0000000000000000000000000000000000896e67",
+    "000000000000000000000000000000000063140f",
+    "000000000000000000000000000000000096372f",
+    "00000000000000000000000000000000002ff0ef",
+    "00000000000000000000000000000000007ca59f",
+    "0000000000000000000000000000000001160eff",
+    "000000000000000000000000000000000049827f",
+    "00000000000000000000000000000000016f8c77",
+    "0000000000000000000000000000000000232827",
+];
+
+/// Why: redacting the label sheet must not change which commits are sampled.
+/// What: draws seed 11 on the fixture database and compares the SHAs, in
+/// sample.jsonl order, with the list recorded before the change.
+/// Test: this function.
+#[test]
+fn redaction_leaves_the_sample_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("tga.db");
+    seed_db(&db);
+    let out = dir.path().join("s");
+    eval::run_sample(&sample_params(&db, &out, 11)).expect("sample");
+    let shas: Vec<String> = read_sample(&out.join("sample.jsonl"))
+        .into_iter()
+        .map(|r| r.sha)
+        .collect();
+    assert_eq!(shas, GOLDEN_SEED_11);
+}

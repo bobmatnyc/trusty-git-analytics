@@ -9,4 +9,5 @@ Added
   per rule, method and stratum with Wilson 95% intervals, stratum-weighted
   accuracy, a coverage-at-precision curve, a confusion matrix, the
   abstention share and Cohen's kappa. The outputs contain commit text and
-  have no default location; see `docs/eval-harness.md`.
+  have no default location; see `docs/eval-harness.md`. The rater sheet
+  drops identity trailers and replaces e-mail addresses with `<email>`.
