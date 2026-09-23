@@ -67,7 +67,8 @@ list are printed and the run proceeds.
 Two ways to get the status card instead, prompting for nothing: run
 `trusty-audit guided`, which is the named verb for exactly that, or run the bare
 invocation with no controlling terminal — a script, a cron entry, a CI job.
-`TRUSTY_AUDIT_NO_LAUNCH=1` is not one of them: it is read by `install.sh`, where
+`TRUSTY_AUDIT_NO_LAUNCH=1` is not one of them: it is read by the repository-root
+`install.sh` (see the root README's "trusty-audit" install section), where
 it decides whether the installer starts the binary at all, and the binary itself
 never reads it.
 

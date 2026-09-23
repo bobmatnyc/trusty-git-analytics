@@ -1,0 +1,56 @@
+# Gate for the trusty-audit self-downloading installer at ./install.sh.
+#
+# Ported from trusty-tools .github/workflows/trusty-audit-install.yml
+# (603e60394d9394a570cad61b53d033f4b7bfd6fa) when the installer moved here.
+#
+# Why: `install.sh` is served over `curl … | sh`, so a defect in it runs
+# unreviewed on an operator's machine at a client site. No Rust gate looks at a
+# shell script, so without this workflow it would ship with no mechanical check.
+#
+# What: three gates, cheapest first. `sh -n` catches syntax, `shellcheck`
+# catches lint, and the selftest drives every failure arm against stubbed
+# `curl`/`uname` with no network and no real release.
+
+name: install.sh
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "scripts/install-sh-selftest.sh"
+      - ".github/workflows/install-sh.yml"
+  pull_request:
+    paths:
+      - "install.sh"
+      - "scripts/install-sh-selftest.sh"
+      - ".github/workflows/install-sh.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer-gates:
+    name: install.sh syntax, lint, selftest
+    # macOS runner: the script is macOS-only and the selftest's fixtures use
+    # `shasum`, the tool the script itself selects on a stock Mac.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: POSIX syntax check
+        run: sh -n install.sh
+
+      - name: ShellCheck
+        run: |
+          brew install shellcheck
+          shellcheck --shell=sh install.sh
+
+      # The selftest itself is bash (it needs arrays and `[[ ]]`); the script
+      # under test stays POSIX sh, which is what the `sh -n` gate above proves.
+      - name: ShellCheck the selftest
+        run: shellcheck --shell=bash scripts/install-sh-selftest.sh
+
+      - name: Installer selftest (every failure arm)
+        run: bash scripts/install-sh-selftest.sh

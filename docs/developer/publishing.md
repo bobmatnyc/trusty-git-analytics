@@ -110,6 +110,15 @@ steps below by hand. The same dependency order applies.
    ```
 4. The version in the root `Cargo.toml` is the version you intend to publish,
    and there is no existing tag with that number.
+5. Before publishing `trusty-audit`, every tool pin in its engagement template
+   names a version crates.io serves:
+   ```bash
+   scripts/check-engagement-pins.sh            # exit 1 names each unpublished pin
+   scripts/check-engagement-pins.sh --refresh  # rewrite stale pins, then rebuild
+   ```
+   The template is compiled into the binary, so a bad pin ships in every
+   package `taudit distribute` writes. After publishing a new `tga`, run the
+   `--refresh` form so the template tracks it.
 
 ### Publish Order
 
