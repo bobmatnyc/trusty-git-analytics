@@ -570,18 +570,15 @@ impl CollectionPipeline {
         let conn = db.connection();
         for repo_cfg in &self.config.repositories {
             let path = expand_path(&repo_cfg.path);
-            // #111: the name comes from the path as the config wrote it.
-            let name_path = expand_path(repo_cfg.name_path());
             let name = repo_cfg
                 .name
                 .clone()
                 .or_else(|| {
-                    name_path
-                        .file_name()
+                    path.file_name()
                         .and_then(|s| s.to_str())
                         .map(|s| s.to_string())
                 })
-                .unwrap_or_else(|| name_path.display().to_string());
+                .unwrap_or_else(|| path.display().to_string());
 
             info!(repo = %name, "running reachability scan");
             match scan_and_persist(&path, conn, cfg, Some(&name)) {

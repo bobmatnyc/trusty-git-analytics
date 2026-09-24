@@ -426,20 +426,6 @@ pub struct RepositoryConfig {
     /// Test: exercised indirectly by end-to-end tests that pass `no_fetch=true`.
     #[serde(default)]
     pub fetch_timeout_secs: Option<u64>,
-
-    /// #111: `path` as the config file wrote it, kept when loading anchored a
-    /// relative `path` to the config's directory. Never read from YAML.
-    #[serde(skip)]
-    pub configured_path: Option<PathBuf>,
-}
-
-impl RepositoryConfig {
-    /// Path a derived repository name comes from: `path` as written in the
-    /// config. #111: anchoring `path: .` must not rename the repository or
-    /// change how its GitHub slug is found; files are still read at `path`.
-    pub fn name_path(&self) -> &Path {
-        self.configured_path.as_deref().unwrap_or(&self.path)
-    }
 }
 
 /// Team roster and identity aliases.

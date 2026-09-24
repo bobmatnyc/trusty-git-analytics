@@ -305,7 +305,7 @@ pub fn dd_repository_entries(cfg: &Config, base_dir: &Path) -> Vec<DdRepositoryE
     cfg.repositories
         .iter()
         .map(|repo| DdRepositoryEntry {
-            name: scrub_secrets(&repo_name(repo.name.as_deref(), repo.name_path()), &secrets),
+            name: scrub_secrets(&repo_name(repo.name.as_deref(), &repo.path), &secrets),
             path: anchor(base_dir, &repo.path),
             authorship: None,
         })

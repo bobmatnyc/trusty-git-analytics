@@ -137,14 +137,12 @@ pub fn resolve_github_repos(
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
 
     for repo_cfg in repositories {
-        // #111: derive from the path as written, so an anchored `path: .`
-        // still has no name and falls through to the origin remote.
         let repo_name = repo_cfg
             .name
             .clone()
             .or_else(|| {
                 repo_cfg
-                    .name_path()
+                    .path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .map(str::to_string)

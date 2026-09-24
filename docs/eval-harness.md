@@ -237,10 +237,10 @@ tga eval score --config ~/private/eval/config-v2.yaml \
 
 A relative `rules_file` in the config is resolved against the config
 file's directory, as `database:` is, so `--config /abs/path/config.yaml`
-works from any directory. Repository paths, `output.directory`,
-`cache.directory` and `dora.datadog_dir` follow the same rule; use an
-absolute path to keep a working-directory-relative one. A name derived from
-a repository path still comes from the path as written.
+works from any directory. `output.directory`, `cache.directory` and
+`dora.datadog_dir` follow the same rule; use an absolute path to keep a
+working-directory-relative one. Repository paths still resolve from the
+working directory.
 
 With `extend_defaults: false` the fuzzy tier is off, but the weighted-sum
 tier still names its own categories (`feature`, `bugfix`, `chore`,
