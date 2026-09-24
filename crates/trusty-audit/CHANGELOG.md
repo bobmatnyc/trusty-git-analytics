@@ -10,6 +10,307 @@ edit this file by hand (see
 
 ---
 
+## [0.15.0] — 2026-09-23
+
+### Added
+
+- `engagement::create` mints a whole engagement in one call, replacing the
+  hand-edited template: it writes `engagement.toml` at mode 0600 carrying the
+  operator's OpenRouter key, the audit window and a freshly generated ed25519
+  signing seed, plus the retained public half beside it in `retained.pub` — the
+  file `trusty-audit verify --public-key` reads and the one that never travels
+  with the package. Nothing about it reaches the network: the key is the
+  operator's, conveyed out of band, the keypair comes from the operating
+  system's randomness, and the tool pins come from the template rather than
+  from a release lookup. It reuses `config::generate_for_new_engagement` and
+  the new `config::with_engagement_identity` rather than adding a third writer
+  of a plaintext credential, so the previous engagement's board credentials,
+  signing key and client labels are dropped and reported by name. A directory
+  that already holds an engagement is refused rather than overwritten —
+  replacing the signing key would orphan the public half the auditor
+  retained — and `force` is how an operator says they meant it.
+- The two halves of an engagement's keypair are published as one unit. The
+  config carrying the private seed and the `retained.pub` holding its public
+  half are written to temporaries first and then renamed into place, public half
+  first, so a mint that fails leaves the directory exactly as it found it — a
+  `--force` remint that cannot write one half leaves the previous engagement
+  whole rather than destroying it, and a config on disk is always accompanied by
+  the public half of the seed it carries. The check for an existing engagement
+  and the writes now run under that config's exclusive lock, so two mints aimed
+  at one directory cannot both pass the check.
+- The engagement config accepts an `[audit] window_weeks` key, defaulting to 52
+  so a config written before it existed still loads and still means one year.
+  A declared `0` is refused at parse time rather than accepted: a zero-week
+  engagement sweeps no history and would still exit 0. trusty-tools#5482 is the separate
+  work of making `tga` honour the value; until that lands it is inert.
+- The return package now carries `manifest.sha256.toml` — one row per delivered
+  file with its SHA-256 and size — and, when the engagement config sets
+  `[signing] private_key`, a detached ed25519 signature over that manifest in
+  `manifest.sha256.sig`. Both are written last, so the manifest covers every
+  other member; each digest is taken from the bytes as they reach the archive,
+  in the same pass that scans them for credentials. `package::signing::verify`
+  checks a received package against the retained public key and tells its
+  failures apart rather than reporting one "verification failed": a member
+  altered after signing, a removed signature, a signature made by another key, a
+  manifest-listed member that is gone, and a member the manifest never listed.
+  Before any of those it establishes the member set from the RAW central
+  directory — the `zip` crate keys its entry table by name, so an archive
+  repeating a name would present one member here and another to `zipfile` or
+  Info-ZIP — refusing a repeated name and any disagreement with the parser. That
+  walk identifies the end-of-central-directory record by its own framing rather
+  than by being last, so an archive comment carrying a planted `PK\x05\x06` does
+  not move it, and it compares raw name bytes rather than decoded names, so a
+  legitimate CP437-flagged member is not refused.
+  Member bytes are streamed through a fixed buffer, never into an allocation
+  sized from the archive's own declared size. An engagement with no key still
+  packages —
+  the manifest ships without a `[signature]` table, `verify` answers `Unsigned`,
+  and the CLI and the package README both say so. The signature is
+  tamper-evidence in transit only: the key is on hardware the recipient
+  controls, so it proves nothing about what happened there. The signing key
+  joins the outbound credential scan, and `config::generate_for_new_engagement`
+  drops a `[signing]` table so one engagement's key cannot reach another's
+  package.
+- `trusty-audit verify <package.zip> --public-key <file>` checks a received
+  handoff package against the retained ed25519 public key. It exits 0 for a
+  package whose signature verifies and whose every member still hashes to the
+  signed manifest, 3 for one that carries no signature at all, and non-zero
+  naming the specific failure for anything else. The verb writes nothing, and
+  the key comes only from a file the operator names — never from the engagement
+  config, whose private half travelled inside the package it would be checking.
+- The return package now carries `errors/digest.json`, a machine-readable record
+  of everything a run recorded as gone wrong: a repository whose `tga audit`
+  child failed, a dimension a repository could not assess, a board the sweep
+  could not collect, a target that never cloned, and a config key this version
+  does not act on. Each entry names the stage, whether the run stopped or carried
+  on, the repository it concerns, when it was recorded, and the message. It is
+  written on every run, empty `entries` array and all, so an empty digest states
+  that the collector ran rather than leaving the recipient to guess. Every
+  message is scrubbed of the engagement's configured secrets and the `gh`-derived
+  token before it is written, and the rendered document then goes through the
+  same credential refusal every other generated member does. New public items
+  `package::DIGEST_ENTRY` and `run::RepoRun::finished_at`; no existing member,
+  signature or struct shape changed (issue trusty-tools#6032).
+- An operator can now point the audit chain at a locally built binary for any of
+  the four pinned tools, with one documented variable each:
+  `TRUSTY_AUDIT_TGA_BIN`, `TRUSTY_AUDIT_SEARCH_BIN`, `TRUSTY_AUDIT_ANALYZE_BIN`
+  and `TRUSTY_AUDIT_REVIEW_BIN`. Each takes an absolute path to an executable
+  file; precedence is the override, then the pin, with no third branch. A
+  variable naming a path that does not exist, is relative, or is not executable
+  refuses the run naming the variable, rather than falling back to the pinned
+  copy. An overridden tool is also excused from install, which is the case this
+  exists for: a version that is merged but not yet published cannot be downloaded
+  at all, so a merged fix previously could not be exercised through the chain
+  without publishing it. The override is recorded in
+  `state/tool-overrides.toml` and stamped into that tool's row of the `index.md`
+  Versions table — led by `OVERRIDDEN`, naming the variable and the path, and
+  claiming no version — in both the sweep's index and the return package's, so a
+  run driven by a local build cannot be mistaken for a pinned one. New public
+  module `tool_overrides`, new `tools::RequiredTool::override_env` and
+  `tools::unsatisfied_with`, new `AuditError::ToolOverride` variant; the existing
+  `TRUSTY_REVIEW_BIN` / `TRUSTY_SEARCH_BIN` / `TRUSTY_ANALYZE_BIN` plumbing onto
+  sweep children is unchanged (issue trusty-tools#6132).
+- The run index's Inference section and every per-repository `manifest.toml`
+  now state the endpoint class (`api` or `local`) beside the provider and model
+  ids, and the known API host for a provider that has one fixed host
+  (`openrouter.ai`, `api.fireworks.ai`) — derived from the resolved provider
+  name, never a live lookup and never a credential. `trusty-audit` also bakes
+  its build-time git revision into the binary via a new `build.rs`; the run
+  index's Versions section states it when the build captured one, replacing
+  the previous unconditional "not recorded".
+- The grounding pass now checks every finding's cited path, line and traced
+  symbol against the checkout while that checkout is still on disk, and records
+  `confirmed` / `stale` / `unreachable` per citation on the manifest's
+  repository entry as `citation_verdicts`. Trace verdicts were produced only at
+  synthesis, which for a delivered bundle runs against manifests that ship with
+  no git checkouts — the 0.13.2 bundle reported 661 of 661 findings
+  unverifiable for that reason alone. A render now consumes the verdicts
+  collection recorded instead of producing verdicts it has no repository to
+  produce. A checkout that is absent yields `unreachable`, never `stale`, so
+  "nothing was checked" stays distinguishable from "the citation no longer
+  resolves"; a repository whose report has not been rendered yet writes nothing
+  and says nothing (issue trusty-tools#6791).
+- Opt-in `evidence/excerpts.json` in the return package: for every RED finding a repository declares, the lines around the location it cites, read from that repository's own checkout and scrubbed of every configured secret. Turned on with `[excerpts] enabled = true` in the engagement config, off by default. Bounded three ways — at most `2 × context_lines + 1` lines (default 5 either side, capped at 25), each line cut at 400 characters, and no path that resolves outside the citing checkout. A finding whose file cannot be read gets a stated reason rather than being left out, and the `secrets` category is declined outright so a redacted match is not restored by its neighbours. The README now names the member when excerpts are on and says they were off when they were.
+- Each collected repository now records the `trusty-audit` version that
+  collected it (`run::RepoRun::collected_by_version`), carried over unchanged
+  when a resumed sweep skips re-collection. `trusty-audit package` compares
+  that recorded version against the version assembling the package and, for
+  every audited repository whose artifact is older or does not name a
+  version at all (a legacy artifact predating this field), reports it by
+  repository name, collected version and running version — in
+  `package.toml`'s new `stale_artifacts` array and on the console — rather
+  than packaging it silently. The repository is still packaged: this is a
+  warning, not a refusal. New public items `run::RepoRun::collected_by_version`
+  and `package::ReturnPackage::stale_artifacts`; no existing member, signature
+  or struct shape changed (issue trusty-tools#7133).
+- `taudit audit` now checks, before anything is cloned, whether the OPTIONAL
+  collector binaries (`gitleaks`, `cargo-audit`, `cargo-deny`) are on this
+  machine — reusing the exact `trusty_common::bin_resolve::resolve_binary`
+  lookup each collector already calls at collection time. Each missing one is
+  narrated on stderr through the existing progress sink, as `Operation::Preflight`,
+  before Phase 2 clones anything — not only in the final report. By default a
+  missing collector only warns: the sweep still runs, `ChainReport::collector_gaps`
+  carries one row per gap naming the collector, the evidence dimension that
+  goes dark, and the install hint, and the same rows land in the assembled
+  package's `package.toml` (`collector_gaps`), so the recipient who only opens
+  the zip sees them too. `--strict-collectors` turns the warning into a
+  refusal — `AuditError::MissingOptionalCollectors`, carrying the same
+  collector/dimension/install-hint detail as the warning rows, attributed to
+  the new `chain::Phase::Preflight` — before the first repository is cloned.
+  Neither mode changes each repository's own `[report].gaps` line for the same
+  collector, which is unaffected either way.
+- `reports/index.md` (and the sweep's own `out/index.md`) now carries a `##
+  Gaps` section listing, per repository, every gap its `package.toml`/manifest
+  recorded — a skipped secrets scan, a JIRA sync that never ran, a lost
+  search-evidence tier — rendered verbatim and silent when a run recorded none.
+  Previously that data existed only inside a 59-entry TOML array with no
+  heading, table, or grep match anywhere in the file the package's own README
+  calls "start here".
+
+### Fixed
+
+- `--budget-gb` is now a cap on what the clones occupy, not only a gate on what
+  they start. It used to be checked between repositories, so 19 GiB spent
+  against a 20 GiB ceiling still admitted a 100 GB monorepo and finished at
+  119 GiB — on a client's own machine, during an unattended engagement, with
+  nobody watching to intervene. While a clone runs, its staged tree is now
+  measured every 500ms and the clone is signalled once `spent + staged` crosses
+  the ceiling: `SIGTERM` first, so `git` and `gh` remove their own temporary
+  pack files, then `SIGKILL` after a five-second grace, and the child is reaped
+  either way. The signal goes to the clone's whole process group, because a
+  clone is a tree of processes — `gh` forks `git`, `git` forks `ssh`,
+  `git-index-pack` and `git-unpack-objects`, and those grandchildren are what
+  hold the sockets and write the bytes. Signalling only the process this crate
+  spawned left them fetching into, and recreating, the staged directory the
+  cleanup had just removed. The partial tree is removed by the same path a
+  failed clone takes, so nothing survives under staging or is promoted into
+  `repos/` — and when that removal itself fails, the surviving bytes are
+  measured, counted against the budget, and named in a gap line of their own
+  rather than silently ignored. The overshoot is bounded by the sampling
+  interval rather than being zero: a clone can exceed the ceiling by what it
+  writes in one sample period.
+- The outcome lands on its own `CloneState::BudgetExceeded` rather than on
+  `Failed` or on the existing start-gate `Skipped`, and renders as
+  `OVER BUDGET — stopped mid-clone at <size> against a <size> ceiling`. A
+  recipient reading `FAILED` would go looking for a wrong repository name or a
+  revoked credential; there is no fault here, and the gap line says to raise
+  `--budget-gb` or drop the repository instead.
+- A sample the watchdog cannot take now fails the clone CLOSED — the child is
+  killed and the attempt reported — rather than letting the clone run on
+  unmeasured. That includes a staged tree whose own root cannot be opened, which
+  previously counted as zero bytes and so could never trip the ceiling. A
+  partial walk below the root stays a floor and is not a failure, because `git`
+  creating and removing pack files mid-fetch makes one ordinary.
+- Every disk figure now comes from one measuring function that tells those two
+  cases apart, and all three of its call sites — the watchdog's sample, the
+  freshly promoted checkout, and a checkout reused from an earlier run — get the
+  same answer. The last two used to collapse an unopenable root to zero bytes
+  and feed that straight into the budget ledger, so a reused checkout of any
+  size could be spent invisibly. Both are now named gaps instead. A checkout
+  that was already on disk when the run started is never removed.
+- Ctrl-C during a clone now stops the clone. Putting each clone in a process
+  group of its own is what lets one signal reach the whole tree, and it is also
+  what takes that tree out of the terminal's foreground group — so a raw Ctrl-C
+  used to kill `taudit` outright, running no destructors, and leave `ssh` and
+  `git-index-pack` fetching into the client's disk with the watchdog dead. The
+  interrupt is now forwarded to every clone group the terminal can no longer
+  reach, anything still running 250ms later is killed, and `trusty-audit` then
+  dies by `SIGINT` under its default disposition, so a shell script or CI runner
+  still sees the run as interrupted rather than as finished.
+- A partial checkout that can be neither removed nor measured is now reported as
+  an unknown size naming the measurement failure, instead of as "at least 0
+  bytes are still on disk" — a figure that reads as measured for a tree that may
+  hold gigabytes. Its bytes are excluded from the budget ledger and every later
+  budget decision in the run is marked a floor.
+- `CloneOptions::budget_bytes`, `DEFAULT_BUDGET_BYTES`, and the `--budget-gb`
+  help text no longer say the budget stops clones from starting without capping
+  one in flight.
+- The pinned-tool preflight now refuses a binary it cannot execute. Its three
+  conditions — the file is there, this client verified a version for it, and
+  that version is the engagement's pin — answered which binary would run, never
+  whether it could. A pinned copy whose execute bit was lost to a `cp`, an
+  archive extraction or a hand edit satisfied all three, so the run started and
+  then failed once per repository at spawn with `Permission denied (os error
+  13)`, a message naming neither the tool nor the file. The refusal is a new
+  `AuditError::PinnedToolNotExecutable` naming the tool and the path and saying
+  the mode is the problem, raised before the first repository is touched, so
+  nothing is written when it fires. An operator's `TRUSTY_AUDIT_*_BIN` override
+  already refused on the same condition; this is that check on the pinned path.
+  Unix only — Windows has no execute bit, and spawn stays the arbiter there.
+- The bundle-level `reports/report.json` now carries `trusty_audit_version`, the
+  version of the binary that wrote it. It was the one generated artifact with no
+  version stamp — the index's "Produced by" line and Versions table, the excerpt
+  header and the error digest all already had one — so a recipient reading
+  `report.json` alone could not say which build's counting rules produced the
+  numbers. Additive: `generated_at` and `debt_rollup` are unchanged, and a
+  reader that does not model the new field ignores it (issue trusty-tools#6139).
+- The engagement template (and so `instructions::ENGAGEMENT_TEMPLATE` and every
+  package `taudit distribute` writes) pinned `tga = "7.1.1"` and
+  `trusty-search = "0.54.0"`, neither of which crates.io has ever served, so a
+  fresh engagement could not install its pinned tools. The pins are now
+  `tga = "7.1.0"` and `trusty-search = "0.54.2"`, the newest published release
+  of each line. `scripts/check-engagement-pins.sh` now fails any pin that names
+  an unpublished or yanked version, and `--refresh` rewrites stale pins.
+- The secrets collector now names each raw-report directory under a prefix
+  scoped to the scanning process AND thread — `trusty-audit-secrets-<pid>-<thread>-`
+  rather than one stem shared by every scanner. The private-directory test proves
+  nothing survives a scan by differencing the shared `std::env::temp_dir()`
+  listing around its own, and with one prefix for everybody that difference
+  picked up directories written by sibling tests whose sweeps scan for real, so
+  it failed intermittently under the parallel test harness. The `#[file_serial]`
+  lock added earlier could not close it: it excludes only a second copy of that
+  same test, and the collisions observed were sibling threads inside one test
+  binary, which also share a pid. Filtering the listing on the scanner's own
+  prefix makes the difference exact against any other scanner, in this process or
+  another (issue trusty-tools#6789).
+- The OSV scan no longer sends an unresolved locked cell to OSV.dev as if it
+  were a version. `trusty-review` writes `0.13.1, 0.22.1 (none satisfies ^0.30)`
+  into `locked` when no locked version satisfies the declared requirement, and
+  that string was queried verbatim, asking about a package that does not exist.
+  The row is now named in the scan's unpinned gap line instead, using the
+  `resolved` flag the producer records (issue trusty-tools#6794). A snapshot written before
+  that flag existed carries no such key and behaves exactly as before.
+- The operator's home-directory path no longer reaches a client-facing member
+  of an engagement package. `package.toml`'s per-repository `gaps`, the same
+  gaps in `reports/index.md`, and each packaged `manifest.toml`'s
+  `[[repositories]] path` now render `~` where the absolute
+  `/Users/<operator>/...` prefix used to appear, so the recipient no longer
+  learns the auditing operator's local account name once per repository. The
+  substitution lives in one new module, `redact`, whose `home_paths`,
+  `home_paths_under`, `home_paths_in` and `packaged_manifest` are the crate's
+  only home-path redaction; nothing else about a gap's text changed
+  (issue trusty-tools#7137).
+- Resolved the two remaining broken rustdoc intra-doc links in `collectors` — `crate::run::pins` and `crate::chain::audit_with_preflight` are private items, so both mentions are now plain backticks instead of link syntax (trusty-tools#7188).
+
+### Changed
+
+- trusty-audit now lives in `bobmatnyc/trusty-git-analytics`, split out of
+  `bobmatnyc/trusty-tools`, alongside `tga`; it takes `trusty-common`,
+  `trusty-progress`, and `trusty-installer` as ordinary published crates.io
+  dependencies rather than in-workspace paths. This is trusty-audit's first
+  release from this repository.
+- The one-line macOS installer moved from `crates/trusty-audit/install.sh` in
+  bobmatnyc/trusty-tools to `install.sh` at the root of
+  bobmatnyc/trusty-git-analytics, and now resolves `trusty-audit-v*` releases
+  from this repository:
+  `curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-git-analytics/main/install.sh | sh`.
+  Tags and asset names are unchanged. It installs nothing until this repository
+  publishes its first `trusty-audit-v*` release.
+- The run index's investigation-coverage section now says when its figure is a
+  sample rather than the whole estate: a partial pass renders a
+  `**Sampled, not exhaustive.**` line naming the sample size, the population and
+  the unread remainder. A run that read every tracked file renders exactly what
+  it did before. New public items `grounding::coverage_rollup::Sampling`,
+  `RepoCoverage::sampling` and `Rollup::sampling` carry the fact; no existing
+  signature or struct shape changed (issue trusty-tools#6138).
+
+### Documentation
+
+- `stop_clones_on_interrupt`'s doc comment now states who installs the
+  `SIGINT` handler and what happens when a host binary also awaits its own
+  `tokio::signal::ctrl_c()` — both listeners are notified, since tokio fans
+  the signal out rather than claiming it exclusively.
+
 ## [0.14.2] — 2026-09-06
 
 ### Fixed

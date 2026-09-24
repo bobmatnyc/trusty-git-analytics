@@ -50,16 +50,23 @@ Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 Requires Rust 1.94 or later ([install Rust](https://rustup.rs/)).
 
 ```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools tga --locked
+cargo install tga --locked
 ```
 
-This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
+This installs the newest release published to crates.io.
+
+To build from the latest commit on `main` instead:
+```bash
+cargo install --git https://github.com/bobmatnyc/trusty-git-analytics tga --locked
+```
+
+This installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
 
 To install a specific version, substitute the tag you want (see the
 [filtered releases view](https://github.com/bobmatnyc/trusty-tools/releases?q=tga-v)
 above for the full list):
 ```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools --tag tga-vX.Y.Z tga --locked
+cargo install --git https://github.com/bobmatnyc/trusty-git-analytics --tag trusty-git-analytics-vX.Y.Z tga --locked
 ```
 
 ### With Homebrew (recommended)

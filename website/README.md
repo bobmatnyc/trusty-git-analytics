@@ -80,16 +80,15 @@ page.
 ### Ignored Build Step
 
 ```
-git diff --quiet HEAD^ HEAD -- website/
+git diff --quiet HEAD^ HEAD -- "$(git rev-parse --show-toplevel)/website"
 ```
 
-Vercel runs the Ignored Build Step from the repository root regardless of the
-project's Root Directory setting, so the path is repo-relative (`website/`,
-not `./`) — the same convention
-[trusty-tools/website's README](https://github.com/bobmatnyc/trusty-tools/tree/main/website#ignored-build-step)
-documents. Vercel skips the build when the command exits 0. Verified against
-this repository's own history: a commit touching `website/` exits 1 (build
-runs); a commit that does not exits 0 (build skipped).
+The pathspec is absolute, resolved from the repository toplevel rather than
+the process's working directory, so the command gives the same answer
+regardless of which directory it runs from. Vercel skips the build when the
+command exits 0. Verified against this repository's own history: a commit
+touching `website/` exits 1 (build runs); a commit that does not exits 0
+(build skipped).
 
 This workflow adds no Vercel deployment configuration beyond what the build
 itself needs (no `vercel.json`, no deploy step in CI) — deploying is a

@@ -1,0 +1,54 @@
+# Gate for scripts/check-engagement-pins.sh, the check that holds
+# trusty-audit's engagement template's [tools] pins to versions crates.io
+# actually serves (see the script's own header and docs/PUBLISHING.md's
+# "Publishing trusty-audit" step).
+#
+# Why: the script ships nothing itself — it is run by hand before publishing
+# trusty-audit — so without this workflow a regression in its own logic (a
+# broken awk pattern, a curl/jq assumption that stops holding) would surface
+# only at release time, against the live crates.io API, with nobody watching.
+# scripts/check-engagement-pins-selftest.sh drives every arm against a stub
+# `curl` with no network; this workflow is what actually runs it.
+#
+# What: shellcheck on both scripts, then the selftest. NOT a required check
+# (branch protection) — the pin check itself already gates a trusty-audit
+# release in docs/PUBLISHING.md; this workflow only catches a regression in
+# the check's own logic before that.
+name: engagement-pins
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/check-engagement-pins.sh"
+      - "scripts/check-engagement-pins-selftest.sh"
+      - "crates/trusty-audit/templates/engagement.template.toml"
+      - ".github/workflows/engagement-pins.yml"
+  pull_request:
+    paths:
+      - "scripts/check-engagement-pins.sh"
+      - "scripts/check-engagement-pins-selftest.sh"
+      - "crates/trusty-audit/templates/engagement.template.toml"
+      - ".github/workflows/engagement-pins.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pin-check-selftest:
+    name: check-engagement-pins.sh selftest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: ShellCheck the pin-check script
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck scripts/check-engagement-pins.sh
+          shellcheck scripts/check-engagement-pins-selftest.sh
+
+      - name: Selftest (every arm, stubbed curl, no network)
+        run: bash scripts/check-engagement-pins-selftest.sh

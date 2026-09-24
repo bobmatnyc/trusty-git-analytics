@@ -122,10 +122,18 @@ the gate by hand.
 engagement.template.toml`) pins the versions of its own sibling tools in a
 `[tools]` table. Before bumping trusty-audit's version, confirm those pins
 are current — a stale pin naming a version that is not what this release
-actually ships is a real defect, not cosmetic. trusty-tools carries a
-dedicated `scripts/refresh-engagement-pins.sh` for this (CHECK 10 in
-`preflight-publish.sh`); this repo has not ported that script — check the
-`[tools]` table by hand until it does (see docs/release-assets.md, open question).
+actually ships is a real defect, not cosmetic. Run this before publishing
+trusty-audit:
+
+```bash
+scripts/check-engagement-pins.sh            # exit 1 names each unpublished pin
+scripts/check-engagement-pins.sh --refresh  # rewrite stale pins, then rebuild
+```
+
+Ported from trusty-tools' `scripts/refresh-engagement-pins.sh` and
+`preflight-publish.sh` CHECK 10. The template is compiled into the binary, so
+a bad pin ships in every package `taudit distribute` writes. After publishing
+a new `tga`, run the `--refresh` form so the template tracks it.
 
 ## Worktree cleanup
 
