@@ -226,13 +226,14 @@ impl Serialize for ClassificationConfig {
             custom_categories,
             min_coverage_pct,
             llm_fallback_threshold,
+            llm_fallback_scope,
             weighted_sum,
             llm_fallback_concurrency,
             no_external,
             checkpoint_every,
             sources,
         } = self;
-        let mut s = serializer.serialize_struct("ClassificationConfig", 15)?;
+        let mut s = serializer.serialize_struct("ClassificationConfig", 16)?;
         s.serialize_field("rules_files", rules_files)?;
         s.serialize_field("repo_categories", repo_categories)?;
         s.serialize_field("use_llm", use_llm)?;
@@ -243,6 +244,7 @@ impl Serialize for ClassificationConfig {
         s.serialize_field("custom_categories", custom_categories)?;
         s.serialize_field("min_coverage_pct", min_coverage_pct)?;
         s.serialize_field("llm_fallback_threshold", llm_fallback_threshold)?;
+        s.serialize_field("llm_fallback_scope", llm_fallback_scope)?;
         s.serialize_field("weighted_sum", weighted_sum)?;
         s.serialize_field("llm_fallback_concurrency", llm_fallback_concurrency)?;
         s.serialize_field("no_external", no_external)?;

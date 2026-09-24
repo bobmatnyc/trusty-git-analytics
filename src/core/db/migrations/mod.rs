@@ -199,6 +199,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "linear_ingestion",
         sql: include_str!("../sql/0030_linear_ingestion.sql"),
     },
+    // #111: one row per LLM-tier call (tokens, outcome, model) so a cost
+    // report can price a classification run.
+    Migration {
+        version: 31,
+        name: "llm_usage",
+        sql: include_str!("../sql/0031_llm_usage.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

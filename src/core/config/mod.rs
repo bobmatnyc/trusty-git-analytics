@@ -37,115 +37,16 @@ mod credential_debug;
 // the same credentials to disk rather than to a log.
 mod credential_serialize;
 pub mod database_path;
+// #131: the `llm:` section and the LLM-tier routing enums.
+mod llm;
 // #111: anchor a config's relative paths to its own directory.
 mod relative_paths;
 pub mod validator;
 
 pub use aliases::{AliasFile, DeveloperAliasEntry};
 pub use azdo::AzureDevOpsConfig;
+pub use llm::{LlmConfig, LlmEffort, LlmFallbackScope, LlmSource};
 pub use validator::{ConfigError, ConfigValidator};
-
-/// LLM provider selection for the classification LLM tier.
-///
-/// Why: operators need to switch between OpenRouter, AWS Bedrock, and the
-/// direct Anthropic API without changing binary flags. An enum keeps the set
-/// of valid values closed and type-safe.
-/// What: three variants — `Openrouter`, `Bedrock`, and `AnthropicApi`.
-/// Serde renames map to lowercase kebab-case strings matching the YAML schema.
-/// Test: deserialization is covered by `llm_config_*` unit tests in this
-/// module. Provider-specific behaviour is covered by `classify::tiers::llm`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LlmSource {
-    /// Route through the OpenRouter API (OpenAI-compatible schema).
-    ///
-    /// Requires a key stored in the environment variable named by
-    /// [`LlmConfig::api_key_env`] (default: `OPENROUTER_API_KEY`).
-    #[default]
-    Openrouter,
-    /// Route through AWS Bedrock (IAM credential-chain auth, no API key).
-    ///
-    /// Only available when the binary is compiled with `--features bedrock`.
-    /// Requires valid AWS credentials in the default chain (env vars, profile,
-    /// SSO, IMDS, etc.). No secret is stored in the config; region and model
-    /// are the only Bedrock-specific fields.
-    Bedrock,
-    /// Route through the Anthropic Messages API directly (scaffold only).
-    ///
-    /// Recognized enum value; returns a clear "not yet implemented" error at
-    /// construction time.
-    #[serde(rename = "anthropic-api")]
-    AnthropicApi,
-}
-
-/// Top-level LLM configuration section (`llm:` in YAML).
-///
-/// Why: the previous design placed LLM credentials inside
-/// `classification.openrouter_api_key` and `classification.llm_provider`,
-/// mixing transport concerns with classification tuning. The `llm:` section
-/// separates *how to reach an LLM* from *when to use it*, and enables
-/// first-class AWS Bedrock support (region + model, no stored secret).
-/// What: groups provider selection, the environment-variable name holding
-/// any required API key (never the key itself), an optional AWS region
-/// override (Bedrock only), and the model id. The section is optional;
-/// when absent the pipeline falls back to legacy `classification.*` fields.
-/// Test: `llm_config_parses_from_yaml` and `llm_source_defaults_to_openrouter`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmConfig {
-    /// LLM provider to use.
-    ///
-    /// Valid values (YAML): `openrouter`, `bedrock`, `anthropic-api`.
-    /// Defaults to `openrouter`.
-    #[serde(default)]
-    pub source: LlmSource,
-
-    /// Name of the environment variable holding the API key.
-    ///
-    /// For `openrouter` and `anthropic-api` this is required. The value
-    /// stored here is the **variable name** (e.g. `OPENROUTER_API_KEY`),
-    /// never the secret itself. At use time the pipeline reads the env var.
-    /// If the variable is unset or empty when a key-based source is in use,
-    /// the LLM tier fails loudly with an actionable error — no silent no-ops.
-    ///
-    /// For `bedrock` this field is ignored; AWS credentials are resolved via
-    /// the SDK's default credential chain.
-    #[serde(default = "default_api_key_env")]
-    pub api_key_env: String,
-
-    /// AWS region for Bedrock invocations (Bedrock only).
-    ///
-    /// Ignored for `openrouter` and `anthropic-api`. When absent, the AWS SDK
-    /// reads the region from the environment (`AWS_DEFAULT_REGION`,
-    /// `AWS_REGION`, or the active profile) as usual.
-    #[serde(default)]
-    pub region: Option<String>,
-
-    /// Model identifier (provider-specific).
-    ///
-    /// Examples:
-    /// - OpenRouter: `"gpt-4o-mini"`, `"anthropic/claude-3-5-sonnet"`
-    /// - Bedrock: `"anthropic.claude-3-5-sonnet-20241022-v2:0"`
-    /// - Anthropic API: `"claude-3-5-sonnet-20241022"`
-    ///
-    /// When absent, a provider-appropriate default is used.
-    #[serde(default)]
-    pub model: Option<String>,
-}
-
-fn default_api_key_env() -> String {
-    "OPENROUTER_API_KEY".to_string()
-}
-
-impl Default for LlmConfig {
-    fn default() -> Self {
-        Self {
-            source: LlmSource::default(),
-            api_key_env: default_api_key_env(),
-            region: None,
-            model: None,
-        }
-    }
-}
 
 /// Top-level configuration root.
 ///
@@ -679,6 +580,13 @@ pub struct ClassificationConfig {
     #[serde(default = "default_llm_fallback_threshold")]
     pub llm_fallback_threshold: f64,
 
+    /// Which verdicts the LLM fallback may revisit (#111): `low_confidence`
+    /// (default, uses [`Self::llm_fallback_threshold`]) or `unanswered`
+    /// (only commits the rules left uncategorized; the threshold is ignored).
+    /// See [`LlmFallbackScope`].
+    #[serde(default)]
+    pub llm_fallback_scope: LlmFallbackScope,
+
     /// Configuration for the weighted-sum tier (Tier 2.5).
     ///
     /// Tier 2.5 sits between the regex tier (Tier 2) and the fuzzy tier (Tier
@@ -820,6 +728,7 @@ impl Default for ClassificationConfig {
             custom_categories: Vec::new(),
             min_coverage_pct: default_min_coverage_pct(),
             llm_fallback_threshold: default_llm_fallback_threshold(),
+            llm_fallback_scope: LlmFallbackScope::default(),
             llm_fallback_concurrency: default_llm_fallback_concurrency(),
             no_external: false,
             sources: Vec::new(),

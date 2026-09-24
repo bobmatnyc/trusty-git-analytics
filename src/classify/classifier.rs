@@ -14,6 +14,7 @@ use crate::classify::tiers::fuzzy::FuzzyClassifier;
 use crate::classify::tiers::issue_type_tier::IssueTypeTier;
 use crate::classify::tiers::jira_project_tier::JiraProjectTier;
 use crate::classify::tiers::llm::LlmClassifier;
+use crate::classify::tiers::llm_prompt::LlmCall;
 use crate::classify::tiers::override_tier::OverrideTier;
 use crate::classify::tiers::regex_tier::RegexMatcher;
 use crate::classify::tiers::weighted_sum::WeightedSumClassifier;
@@ -591,13 +592,28 @@ impl ClassificationEngine {
     /// overwrite-guard would otherwise drop a ticket reference carried by
     /// the original tier-1-3 verdict when the LLM result wins.
     pub async fn llm_classify_only(&self, message: &str) -> Option<ClassificationResult> {
+        self.llm_classify_detailed(message).await?.verdict
+    }
+
+    /// [`Self::llm_classify_only`] plus the call's outcome and token usage
+    /// (#111); `None` when the LLM tier is not configured.
+    pub async fn llm_classify_detailed(&self, message: &str) -> Option<LlmCall> {
         let llm = self.llm.as_ref()?;
-        let mut r = llm.classify(message).await?;
-        r.top_level = self.taxonomy.resolve(&r.category);
-        if r.ticket_id.is_none() {
-            r.ticket_id = RegexMatcher::extract_ticket_id(message);
+        let mut call = llm.classify_detailed(message).await;
+        if let Some(r) = call.verdict.as_mut() {
+            r.top_level = self.taxonomy.resolve(&r.category);
+            if r.ticket_id.is_none() {
+                r.ticket_id = RegexMatcher::extract_ticket_id(message);
+            }
         }
-        Some(r)
+        Some(call)
+    }
+
+    /// `(provider label, model id)` of the attached LLM tier, if any (#111).
+    pub fn llm_identity(&self) -> Option<(&'static str, String)> {
+        self.llm
+            .as_ref()
+            .map(|l| (l.provider_label(), l.model().to_string()))
     }
 
     /// `Some(true)` when the LLM tier is enabled and has a reachable API
@@ -730,6 +746,7 @@ mod tests {
                 priority: 110,
                 confidence: 0.9,
             }],
+            categories: Vec::new(),
         };
         let engine = ClassificationEngine::new(ruleset, ClassificationEngineConfig::default())
             .expect("engine builds");

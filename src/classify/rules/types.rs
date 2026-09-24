@@ -171,6 +171,33 @@ pub struct RuleSet {
 
     /// All rules in this set. Order is not significant; see [`Rule::priority`].
     pub rules: Vec<Rule>,
+
+    /// Optional category definitions (#131): a `description` per category,
+    /// which the LLM tier's prompt shows when `extend_defaults: false`.
+    ///
+    /// ```yaml
+    /// categories:
+    ///   - name: bug_fix
+    ///     description: Corrects behaviour that was wrong in production.
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<CategoryDef>,
+}
+
+/// One entry of a rules file's `categories:` list (#131).
+///
+/// Why: a category name alone ("platform", "enablement") is often ambiguous
+/// to the LLM tier; the rules file is where its meaning is defined.
+/// What: a category `name` plus optional free-text `description`.
+/// Test: `classify::rules::types::tests::categories_section_merges_by_name`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CategoryDef {
+    /// Category name, as a rule's `category` would spell it.
+    pub name: String,
+    /// What the category means; shown to the LLM when present.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl RuleSet {
@@ -221,10 +248,20 @@ impl RuleSet {
             .filter_map(|id| by_id.remove(&id))
             .collect();
 
+        // #131: category definitions merge by name; a later file's entry wins.
+        let mut categories = self.categories;
+        for def in other.categories {
+            match categories.iter_mut().find(|c| c.name == def.name) {
+                Some(existing) => *existing = def,
+                None => categories.push(def),
+            }
+        }
+
         RuleSet {
             version: other.version.or(self.version),
             extend_defaults: other.extend_defaults,
             rules,
+            categories,
         }
     }
 }
@@ -368,5 +405,30 @@ rules:
             result.is_err(),
             "RuleSet with unknown `extends_defaults:` (typo) must be rejected"
         );
+    }
+
+    /// Why (#131): a later rules file's category description must replace an
+    /// earlier one, and a misspelled key inside an entry must fail the load.
+    /// What: merges two sets that both describe `bug_fix`, then parses an
+    /// entry with an unknown key.
+    /// Test: this test.
+    #[test]
+    fn categories_section_merges_by_name() {
+        let base: RuleSet = serde_yaml::from_str(
+            "rules: []\ncategories:\n  - name: bug_fix\n    description: old\n  - name: feature\n",
+        )
+        .expect("base");
+        let overlay: RuleSet = serde_yaml::from_str(
+            "rules: []\ncategories:\n  - name: bug_fix\n    description: new\n",
+        )
+        .expect("overlay");
+        let merged = base.merge(overlay);
+        let names: Vec<&str> = merged.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["bug_fix", "feature"]);
+        assert_eq!(merged.categories[0].description.as_deref(), Some("new"));
+        assert!(serde_yaml::from_str::<RuleSet>(
+            "rules: []\ncategories:\n  - name: x\n    desc: typo\n"
+        )
+        .is_err());
     }
 }

@@ -21,11 +21,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use crate::classify::rules::CategoryDef;
 use crate::classify::tiers::bedrock::BedrockClassifier;
+use crate::classify::tiers::llm_prompt::{self, LlmCall, LlmUsage};
 use crate::classify::tiers::ClassificationResult;
-use crate::core::config::{LlmConfig, LlmSource};
+use crate::core::config::{LlmConfig, LlmEffort, LlmSource};
 use crate::core::creds::CredentialSource;
-use crate::core::models::ClassificationMethod;
 
 /// OpenAI-compatible chat completion endpoint.
 const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
@@ -58,14 +59,13 @@ pub(crate) const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
 /// Default model used when `llm.model` is absent for the `anthropic-api` source.
 ///
-/// Why: claude-3-5-haiku-latest is the most cost-efficient Anthropic model
-/// for short classification tasks (single commit message → JSON verdict). It
-/// delivers quality equivalent to older Sonnet versions for classification at
-/// a fraction of the cost.
+/// Why: Haiku is the cheapest current Anthropic model for a short
+/// classification (one commit message → JSON verdict). #131: the previous
+/// default, Claude Haiku 3.5, was retired on 2026-02-19.
 /// What: the model ID sent in the `model` field of the Anthropic Messages API
 /// request body when no explicit `llm.model` is configured.
 /// Test: `anthropic_default_model_used_when_none_configured` in this module.
-pub const ANTHROPIC_DEFAULT_MODEL: &str = "claude-3-5-haiku-latest";
+pub const ANTHROPIC_DEFAULT_MODEL: &str = "claude-haiku-4-5";
 
 /// System prompt instructing the model to return strict JSON.
 ///
@@ -110,6 +110,12 @@ pub struct LlmClassifier {
     /// (`POST /v1/messages` with `x-api-key` + `anthropic-version` headers)
     /// and parses `response.content[0].text`.
     pub(crate) use_anthropic_format: bool,
+    /// #131: the configured category set; `None` keeps the fixed built-in list.
+    allowed_categories: Option<Vec<CategoryDef>>,
+    /// System prompt sent on every call; see [`Self::with_allowed_categories`].
+    system_prompt: String,
+    /// #131: Anthropic `output_config.effort`; `None` sends no parameter.
+    effort: Option<LlmEffort>,
 }
 
 impl LlmClassifier {
@@ -127,6 +133,9 @@ impl LlmClassifier {
             extra_headers: HeaderMap::new(),
             bedrock: None,
             use_anthropic_format: false,
+            allowed_categories: None,
+            system_prompt: SYSTEM_PROMPT.to_string(),
+            effort: None,
         }
     }
 
@@ -160,6 +169,9 @@ impl LlmClassifier {
             extra_headers: headers,
             bedrock: None,
             use_anthropic_format: true,
+            allowed_categories: None,
+            system_prompt: SYSTEM_PROMPT.to_string(),
+            effort: None,
         }
     }
 
@@ -283,6 +295,9 @@ impl LlmClassifier {
                 extra_headers: HeaderMap::new(),
                 bedrock: Some(bedrock),
                 use_anthropic_format: false,
+                allowed_categories: None,
+                system_prompt: SYSTEM_PROMPT.to_string(),
+                effort: None,
             });
         }
         Self::from_provider(provider, model, openrouter_api_key)
@@ -366,6 +381,9 @@ impl LlmClassifier {
                     extra_headers: HeaderMap::new(),
                     bedrock: Some(bedrock),
                     use_anthropic_format: false,
+                    allowed_categories: None,
+                    system_prompt: SYSTEM_PROMPT.to_string(),
+                    effort: None,
                 })
             }
             LlmSource::AnthropicApi => {
@@ -395,7 +413,7 @@ impl LlmClassifier {
                     api_key_env = %cfg.api_key_env,
                     "LLM provider: anthropic-api (direct Anthropic Messages API)"
                 );
-                Ok(Self::build_anthropic(effective_model, key))
+                Ok(Self::build_anthropic(effective_model, key).with_effort(cfg.effort))
             }
         }
     }
@@ -419,6 +437,9 @@ impl LlmClassifier {
             extra_headers: headers,
             bedrock: None,
             use_anthropic_format: false,
+            allowed_categories: None,
+            system_prompt: SYSTEM_PROMPT.to_string(),
+            effort: None,
         }
     }
 
@@ -439,53 +460,109 @@ impl LlmClassifier {
         self.bedrock.is_some() || self.api_key.is_some()
     }
 
-    /// Classify `message` by calling the LLM.
+    /// Restrict the LLM to the configured category set (#131).
     ///
-    /// Routes through Bedrock, Anthropic Messages API, or OpenAI-compatible
-    /// endpoint depending on how the classifier was constructed.
-    ///
-    /// Returns `None` if the LLM is disabled (no API key), the request
-    /// fails, or the response cannot be parsed. The pipeline-level guard
-    /// converts a missing key into a hard error before reaching this path.
-    pub async fn classify(&self, message: &str) -> Option<ClassificationResult> {
-        if let Some(bedrock) = &self.bedrock {
-            return bedrock
-                .classify_batch_bedrock(&[message])
-                .await
-                .into_iter()
-                .next()
-                .flatten();
-        }
-
-        if self.use_anthropic_format {
-            return self.classify_anthropic(message).await;
-        }
-
-        self.classify_openai_compat(message).await
+    /// Why: with `extend_defaults: false` the rules file defines the whole
+    /// category set; offering the built-in list lets the LLM answer with a
+    /// label no rule, report or eval knows.
+    /// What: swaps the system prompt for
+    /// [`llm_prompt::restricted_system_prompt`] and makes every reply pass
+    /// [`llm_prompt::resolve`]'s set check (out-of-set → abstention).
+    /// Test: `llm_prompt_tests::classifier_sends_restricted_prompt_and_drops_out_of_set`.
+    pub fn with_allowed_categories(mut self, categories: Vec<CategoryDef>) -> Self {
+        self.system_prompt = llm_prompt::restricted_system_prompt(&categories);
+        self.allowed_categories = Some(categories);
+        self
     }
 
-    /// Classify via the Anthropic Messages API (`POST /v1/messages`).
+    /// Set the Anthropic `output_config.effort` level (#131); `None` omits it.
+    pub fn with_effort(mut self, effort: Option<LlmEffort>) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    /// The system prompt this classifier sends.
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    /// The model id sent to the provider.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Provider label recorded with each call's token usage (#111).
+    pub fn provider_label(&self) -> &'static str {
+        if self.bedrock.is_some() {
+            "bedrock"
+        } else if self.use_anthropic_format {
+            "anthropic-api"
+        } else if self.endpoint == OPENROUTER_ENDPOINT {
+            "openrouter"
+        } else {
+            "openai-compatible"
+        }
+    }
+
+    /// Classify `message` by calling the LLM.
     ///
-    /// Why: extracted from `classify` to keep the routing logic readable and
-    /// allow the Anthropic path to be tested independently with a mock server.
-    /// What: builds an `AnthropicRequest` with the shared `SYSTEM_PROMPT`,
-    /// POSTs to `self.endpoint` with `x-api-key` + `anthropic-version`
-    /// headers, and parses `response.content[].text` → `LlmVerdict`.
-    /// Test: `anthropic_response_parsing` and
-    /// `anthropic_api_request_sets_correct_headers` in this module.
-    async fn classify_anthropic(&self, message: &str) -> Option<ClassificationResult> {
-        let api_key = self.api_key.as_deref()?;
+    /// Returns `None` if the LLM is disabled (no API key), the request
+    /// fails, the reply cannot be parsed, or the model abstains or answers
+    /// outside the configured set. See [`Self::classify_detailed`].
+    pub async fn classify(&self, message: &str) -> Option<ClassificationResult> {
+        self.classify_detailed(message).await.verdict
+    }
+
+    /// Classify `message` and report the call's outcome and token usage.
+    ///
+    /// Why (#111): pricing a full run needs every call's tokens, including
+    /// calls whose verdict is dropped.
+    /// What: routes through Bedrock, the Anthropic Messages API, or the
+    /// OpenAI-compatible endpoint, then validates the reply with
+    /// [`llm_prompt::resolve`]. No API key → `Failed` with no usage.
+    /// Test: `llm_prompt_tests::anthropic_usage_is_recorded`,
+    /// `llm_prompt_tests::openai_usage_is_recorded`.
+    pub async fn classify_detailed(&self, message: &str) -> LlmCall {
+        let (text, usage) = if let Some(bedrock) = &self.bedrock {
+            bedrock.complete(&self.system_prompt, message).await
+        } else if self.use_anthropic_format {
+            self.complete_anthropic(message).await
+        } else {
+            self.complete_openai_compat(message).await
+        };
+        llm_prompt::resolve(text.as_deref(), self.allowed_categories.as_deref(), usage)
+    }
+
+    /// One Anthropic Messages API call (`POST /v1/messages`).
+    ///
+    /// Why: the Anthropic request/response shape differs from OpenAI's.
+    /// What: sends the system prompt, the commit message, and
+    /// `output_config.effort` when set, with `x-api-key` + `anthropic-version`
+    /// headers; returns the first `text` block and `usage.input_tokens` /
+    /// `usage.output_tokens`. A non-2xx reply or transport error yields
+    /// `(None, None)`.
+    /// Test: `anthropic_response_parsing`,
+    /// `anthropic_api_request_sets_correct_headers`,
+    /// `llm_prompt_tests::anthropic_usage_is_recorded`.
+    async fn complete_anthropic(&self, message: &str) -> (Option<String>, Option<LlmUsage>) {
+        let Some(api_key) = self.api_key.as_deref() else {
+            return (None, None);
+        };
 
         let body = AnthropicRequest {
             model: &self.model,
-            // 512 tokens is more than enough for a JSON verdict; keeping it
-            // low reduces latency and cost on the cheap Haiku model.
-            max_tokens: 512,
-            system: SYSTEM_PROMPT,
+            // #131: room for adaptive thinking (on by default on Claude
+            // Sonnet 5) ahead of the short JSON verdict; only tokens actually
+            // generated are billed.
+            max_tokens: 2048,
+            system: &self.system_prompt,
             messages: vec![AnthropicMessage {
                 role: "user",
                 content: format!("Classify this commit message:\n\n{message}"),
             }],
+            output_config: self
+                .effort
+                .map(|e| AnthropicOutputConfig { effort: e.as_str() }),
         };
 
         let response = match self
@@ -500,63 +577,64 @@ impl LlmClassifier {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "Anthropic API request failed");
-                return None;
+                return (None, None);
             }
         };
 
         if !response.status().is_success() {
-            warn!(status = %response.status(), "Anthropic API returned non-success status");
-            return None;
+            let status = response.status();
+            let body = error_body(response).await;
+            warn!(%status, %body, "Anthropic API returned non-success status");
+            return (None, None);
         }
 
         let parsed: AnthropicResponse = match response.json().await {
             Ok(j) => j,
             Err(e) => {
                 warn!(error = %e, "Anthropic API response JSON decode failed");
-                return None;
+                return (None, None);
             }
         };
 
-        // Extract the first text content block.
-        let content = parsed
+        let usage = parsed.usage.map(|u| LlmUsage {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+        });
+        if let Some(reason @ ("refusal" | "max_tokens")) = parsed.stop_reason.as_deref() {
+            warn!(
+                stop_reason = reason,
+                "Anthropic API reply has no complete verdict"
+            );
+        }
+        let text = parsed
             .content
             .into_iter()
             .find(|c| c.kind == "text")
-            .and_then(|c| c.text)?;
-
-        debug!(content = %content, "Anthropic API raw response");
-
-        let verdict: LlmVerdict = serde_json::from_str(content.trim())
-            .map_err(|e| warn!(error = %e, "Anthropic API JSON parse failed"))
-            .ok()?;
-
-        Some(ClassificationResult {
-            category: verdict.category,
-            subcategory: verdict.subcategory,
-            top_level: None, // resolved by ClassificationEngine via the taxonomy registry
-            confidence: verdict.confidence.clamp(0.0, 1.0),
-            method: ClassificationMethod::LlmFallback,
-            ticket_id: None,
-            complexity: verdict.complexity.map(|v| v.clamp(1, 5)),
-        })
+            .and_then(|c| c.text);
+        debug!(content = ?text, "Anthropic API raw response");
+        (text, usage)
     }
 
-    /// Classify via an OpenAI-compatible chat-completions endpoint.
+    /// One OpenAI-compatible chat-completions call.
     ///
-    /// Why: extracted from `classify` to isolate the OpenAI/OpenRouter path
-    /// and allow it to be tested independently.
-    /// What: sends a `ChatRequest` with `system` + `user` messages, parses
-    /// `choices[0].message.content` → `LlmVerdict`.
-    /// Test: `classify_dispatches_to_endpoint_when_keyed` in this module.
-    async fn classify_openai_compat(&self, message: &str) -> Option<ClassificationResult> {
-        let api_key = self.api_key.as_deref()?;
+    /// Why: OpenRouter and OpenAI share this request/response shape.
+    /// What: sends `system` + `user` messages in JSON mode; returns
+    /// `choices[0].message.content` and `usage.prompt_tokens` /
+    /// `usage.completion_tokens`. A non-2xx reply or transport error yields
+    /// `(None, None)`.
+    /// Test: `classify_dispatches_to_endpoint_when_keyed`,
+    /// `llm_prompt_tests::openai_usage_is_recorded`.
+    async fn complete_openai_compat(&self, message: &str) -> (Option<String>, Option<LlmUsage>) {
+        let Some(api_key) = self.api_key.as_deref() else {
+            return (None, None);
+        };
 
         let body = ChatRequest {
             model: &self.model,
             messages: vec![
                 ChatMessage {
                     role: "system",
-                    content: SYSTEM_PROMPT.to_string(),
+                    content: self.system_prompt.clone(),
                 },
                 ChatMessage {
                     role: "user",
@@ -581,40 +659,50 @@ impl LlmClassifier {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "LLM request failed");
-                return None;
+                return (None, None);
             }
         };
 
         if !response.status().is_success() {
-            warn!(status = %response.status(), "LLM returned non-success status");
-            return None;
+            let status = response.status();
+            let body = error_body(response).await;
+            warn!(%status, %body, "LLM returned non-success status");
+            return (None, None);
         }
 
         let parsed: ChatResponse = match response.json().await {
             Ok(j) => j,
             Err(e) => {
                 warn!(error = %e, "LLM response JSON decode failed");
-                return None;
+                return (None, None);
             }
         };
 
-        let content = parsed.choices.first()?.message.content.clone();
-        debug!(content = %content, "LLM raw response");
+        let usage = parsed.usage.map(|u| LlmUsage {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+        });
+        let text = parsed.choices.into_iter().next().map(|c| c.message.content);
+        debug!(content = ?text, "LLM raw response");
+        (text, usage)
+    }
+}
 
-        let verdict: LlmVerdict = serde_json::from_str(&content)
-            .map_err(|e| warn!(error = %e, "LLM JSON parse failed"))
-            .ok()?;
+/// The provider's error body, cut to 500 characters, for a non-2xx log line.
+///
+/// Why (#131): a status alone hides the reason, e.g. a model rejecting
+/// `effort` with a 400. What: reads the body text only — never the request
+/// headers or the API key. Test: `llm_prompt_tests::error_body_is_truncated`.
+pub(crate) async fn error_body(response: reqwest::Response) -> String {
+    let text = response.text().await.unwrap_or_default();
+    truncate_chars(&text, 500)
+}
 
-        Some(ClassificationResult {
-            category: verdict.category,
-            subcategory: verdict.subcategory,
-            top_level: None, // resolved by ClassificationEngine via the taxonomy registry
-            confidence: verdict.confidence.clamp(0.0, 1.0),
-            method: ClassificationMethod::LlmFallback,
-            ticket_id: None,
-            // Clamp out-of-range LLM scores into the documented 1–5 band.
-            complexity: verdict.complexity.map(|v| v.clamp(1, 5)),
-        })
+/// `text` cut to at most `max` characters, marked with `…` when cut.
+pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
     }
 }
 
@@ -650,6 +738,17 @@ struct ResponseFormat {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    #[serde(default)]
+    usage: Option<ChatUsage>,
+}
+
+/// #111: OpenAI-compatible token usage.
+#[derive(Deserialize)]
+struct ChatUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -678,6 +777,14 @@ struct AnthropicRequest<'a> {
     max_tokens: u32,
     system: &'a str,
     messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<AnthropicOutputConfig>,
+}
+
+/// #131: `output_config` carrying only `effort`.
+#[derive(Serialize)]
+struct AnthropicOutputConfig {
+    effort: &'static str,
 }
 
 #[derive(Serialize)]
@@ -697,6 +804,19 @@ struct AnthropicMessage {
 #[derive(Deserialize)]
 struct AnthropicResponse {
     content: Vec<AnthropicContent>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+/// #111: Anthropic token usage (`usage.input_tokens` / `usage.output_tokens`).
+#[derive(Deserialize)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
 }
 
 #[derive(Deserialize)]

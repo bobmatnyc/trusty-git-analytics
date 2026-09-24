@@ -1259,8 +1259,9 @@ fn repredict_refuses_a_sha_missing_from_the_db() {
 /// 0.65 fallback threshold. `u1` (`b`, stored LLM) abstains without the LLM
 /// tier and keeps its LLM verdict with it. `m1`'s manual override is always
 /// carried. `r1`'s stored repo fallback is never carried, since `tga classify`
-/// never applies one: it abstains. Provenance counts carried rows by method
-/// and superseded ones.
+/// never applies one: it abstains. #131: `u2`'s stored LLM `feature` is
+/// outside the v2 category set, so it is superseded even with the LLM tier.
+/// Provenance counts carried rows by method and superseded ones.
 /// Fails on 7abf001, which carried both LLM rows unconditionally.
 /// Test: this function.
 #[test]
@@ -1269,9 +1270,12 @@ fn repredict_carries_a_stored_verdict_only_when_its_tier_is_reached() {
     let d = dir.path();
     let rows = [
         ("l1", "fix: x", "feature", 0.9, "llm_fallback"),
-        ("u1", "b", "feature", 0.8, "llm_fallback"),
+        ("u1", "b", "defect", 0.8, "llm_fallback"),
         ("m1", "fix: y", "chore", 1.0, "manual"),
         ("r1", "c", "platform", 0.7, "repo_category_fallback"),
+        // #131: an old built-in label outside the v2 set, which `tga
+        // classify` would now drop.
+        ("u2", "d", "feature", 0.8, "llm_fallback"),
     ];
     let lines: Vec<String> = rows
         .iter()
@@ -1328,18 +1332,20 @@ fn repredict_carries_a_stored_verdict_only_when_its_tier_is_reached() {
             pair("uncategorized", "unclassified"),
             pair("chore", "manual"),
             pair("uncategorized", "unclassified"),
+            pair("uncategorized", "unclassified"),
         ]
     );
     assert_eq!(p.carried, [("manual".to_string(), 1)].into());
-    assert_eq!(p.superseded, 3);
+    assert_eq!(p.superseded, 4);
 
     let (got, p) = run(&d.join("llm"), true);
     assert_eq!(
         got,
         vec![
             pair("defect", "exact"),
-            pair("feature", "llm"),
+            pair("defect", "llm"),
             pair("chore", "manual"),
+            pair("uncategorized", "unclassified"),
             pair("uncategorized", "unclassified"),
         ]
     );
@@ -1347,7 +1353,7 @@ fn repredict_carries_a_stored_verdict_only_when_its_tier_is_reached() {
         p.carried,
         [("llm".to_string(), 1), ("manual".to_string(), 1)].into()
     );
-    assert_eq!(p.superseded, 2);
+    assert_eq!(p.superseded, 3, "l1, r1 and the out-of-set u2");
 }
 
 /// Why: #111 review — `tga eval sample` now carries a stored LLM verdict

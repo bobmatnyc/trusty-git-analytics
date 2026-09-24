@@ -170,7 +170,7 @@ pub fn run_repredict(params: &RepredictParams) -> Result<RepredictSummary> {
     let commits: Vec<&CommitRow> = found.into_iter().flatten().collect();
 
     let engine = ClassificationPipeline::new(params.config.clone()).build_rule_engine()?;
-    let policy = CarryPolicy::from_config(&params.config);
+    let policy = CarryPolicy::from_config(&params.config)?;
     let (resolved, _drifted) = resolve_verdicts(&engine, &policy, &commits);
 
     let (mut changed, mut abstentions, mut superseded) = (0u64, 0u64, 0u64);

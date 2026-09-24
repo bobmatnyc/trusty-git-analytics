@@ -420,6 +420,8 @@ attribution after the walk, so there is no branch filter here.",
   tga classify --force --since 2026-01-01\n\n\
   # Re-classify only the last 4 weeks for one repo\n\
   tga classify --force --repos my-service --weeks 4\n\n\
+  # Re-classify an eval sample only (on a scratch DB copy)\n\
+  tga classify --force --shas sample-shas.txt\n\n\
 TIPS:\n\
   - After updating your rules file, run `tga classify --force` to reprocess.\n\
   - Use `--no-external` in CI to skip network calls to JIRA/GitHub Issues."
@@ -491,6 +493,15 @@ pub struct ClassifyArgs {
     /// cascade falls through to commit-message rules and LLM as normal.
     #[arg(long, default_value_t = false)]
     pub no_external: bool,
+    /// Classify only the commits whose SHAs are listed in FILE (#111).
+    ///
+    /// One full SHA per line; blank lines and `#` comments are ignored. The
+    /// run fails before any write if the list is empty or names a SHA that is
+    /// not in the database. Combine with --force to re-classify listed
+    /// commits that already have a verdict. This writes classifications, so
+    /// point it at a scratch copy of the database when evaluating.
+    #[arg(long, value_name = "FILE")]
+    pub shas: Option<PathBuf>,
 }
 
 /// Arguments for `tga report`.

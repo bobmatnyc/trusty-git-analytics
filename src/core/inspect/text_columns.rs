@@ -188,6 +188,12 @@ pub const CONSTRAINED: &[&str] = &[
     "linear_sync_cursor.team_key",
     "linear_sync_cursor.last_synced_at",
     "linear_sync_cursor.last_run_at",
+    // #111: LLM-tier token accounting; every value is written by tga.
+    "llm_usage.commit_sha",
+    "llm_usage.provider",
+    "llm_usage.model",
+    "llm_usage.outcome",
+    "llm_usage.run_started_at",
     "pr_reviewers.provider",
     "pr_reviewers.reviewer_id",
     "pr_reviewers.display_name",

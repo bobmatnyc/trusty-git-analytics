@@ -118,5 +118,6 @@ pub fn default_rules() -> RuleSet {
         version: Some("1.0".into()),
         extend_defaults: true,
         rules,
+        categories: Vec::new(),
     }
 }

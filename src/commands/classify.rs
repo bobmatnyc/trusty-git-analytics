@@ -66,7 +66,20 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
         );
     }
 
+    // #111: `--shas` subset. The pipeline rejects an empty list and unknown
+    // SHAs before writing anything.
+    let shas = match &args.shas {
+        Some(path) => Some(read_sha_list(path)?),
+        None => None,
+    };
+    if shas.is_some() && !args.force {
+        tracing::warn!(
+            "--shas without --force classifies only listed commits that have no verdict yet"
+        );
+    }
+
     let pipeline = ClassificationPipeline::new(cfg)
+        .with_shas(shas)
         .with_force(args.force)
         .with_since(effective_since.clone())
         .with_until(effective_until.clone())
@@ -111,5 +124,47 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
             println!("  {category}: {count}");
         }
     }
+    print_llm_usage(&stats.llm_usage);
     Ok(())
+}
+
+/// Print the run's LLM call count and token totals (#111).
+///
+/// Why: the owner prices a full run from these numbers before approving it.
+/// What: prints nothing when no LLM call was made; otherwise the outcome
+/// counts, token totals, and the average tokens per call. Per-call rows are
+/// in the `llm_usage` table.
+fn print_llm_usage(u: &tga::classify::LlmUsageTotals) {
+    if u.calls == 0 {
+        return;
+    }
+    println!(
+        "LLM calls: {} (adopted {}, not adopted {}, abstained {}, out-of-set {}, failed {})",
+        u.calls, u.adopted, u.not_adopted, u.abstained, u.out_of_set, u.failed
+    );
+    println!(
+        "LLM tokens: input {}, output {} ({} of {} calls reported usage)",
+        u.input_tokens, u.output_tokens, u.calls_with_usage, u.calls
+    );
+    if u.calls_with_usage > 0 {
+        let n = u.calls_with_usage as f64;
+        println!(
+            "LLM tokens per call: input {:.1}, output {:.1}",
+            u.input_tokens as f64 / n,
+            u.output_tokens as f64 / n
+        );
+    }
+}
+
+/// Read a `--shas` file: one SHA per line, blank lines and `#` comments
+/// skipped, surrounding whitespace trimmed (#111).
+fn read_sha_list(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read --shas file {}: {e}", path.display()))?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect())
 }

@@ -239,6 +239,7 @@ pub(super) fn is_revert_verdict(category: &str, subcategory: Option<&str>) -> bo
 ///   * `since`                → `timestamp >= ?`
 ///   * `until`                → `timestamp <= ?`
 ///   * `repos` non-empty      → `repository IN (?,?,…)`
+///   * `shas` is `Some`        → `sha IN (?,?,…)` (#111)
 ///
 /// Filters compose: all supplied predicates are AND-ed together.
 /// Test: covered by `read_candidate_commits_*` unit tests and the
@@ -249,6 +250,7 @@ pub(super) fn read_candidate_commits(
     since: Option<&str>,
     until: Option<&str>,
     repos: &[String],
+    shas: Option<&[String]>,
 ) -> Result<Vec<CommitRow>> {
     use rusqlite::types::Value;
 
@@ -276,6 +278,15 @@ pub(super) fn read_candidate_commits(
         let end = params.len();
         let placeholders: Vec<String> = (start..=end).map(|i| format!("?{i}")).collect();
         predicates.push(format!("repository IN ({})", placeholders.join(", ")));
+    }
+
+    // #111: `--shas` subset; `check_shas_exist` has already rejected an
+    // empty list, so this never widens to every commit.
+    if let Some(shas) = shas {
+        let start = params.len() + 1;
+        params.extend(shas.iter().map(|s| Value::Text(s.clone())));
+        let placeholders: Vec<String> = (start..=params.len()).map(|i| format!("?{i}")).collect();
+        predicates.push(format!("sha IN ({})", placeholders.join(", ")));
     }
 
     let where_clause = if predicates.is_empty() {
@@ -308,6 +319,41 @@ pub(super) fn read_candidate_commits(
         out.push(r.map_err(crate::core::TgaError::from)?);
     }
     Ok(out)
+}
+
+/// Fail unless every SHA in `shas` names a commit in the database (#111).
+///
+/// Why: a `--shas` list with a typo or a SHA from another database must stop
+/// the run, not classify a smaller set than the caller asked for.
+/// What: errors on an empty list, and on any SHA with no `commits` row,
+/// naming up to five of them. Reads only.
+/// Test: `pipeline_llm_tests::unknown_sha_fails_before_any_write`.
+pub(super) fn check_shas_exist(db: &Database, shas: &[String]) -> Result<()> {
+    use crate::classify::errors::ClassifyError;
+    if shas.is_empty() {
+        return Err(ClassifyError::Config(
+            "--shas list is empty; refusing to classify".to_string(),
+        ));
+    }
+    let mut stmt = db
+        .connection()
+        .prepare("SELECT 1 FROM commits WHERE sha = ?1 LIMIT 1")
+        .map_err(crate::core::TgaError::from)?;
+    let mut missing = Vec::new();
+    for sha in shas {
+        if !stmt.exists([sha]).map_err(crate::core::TgaError::from)? {
+            missing.push(sha.as_str());
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let shown: Vec<&str> = missing.iter().take(5).copied().collect();
+    Err(ClassifyError::Config(format!(
+        "{} SHA(s) from --shas are not in the database (e.g. {}); nothing was written",
+        missing.len(),
+        shown.join(", ")
+    )))
 }
 
 /// Write classification results to the database with optional periodic WAL
