@@ -1,15 +1,13 @@
 <script lang="ts">
 	import CommandBlock from '$lib/components/CommandBlock.svelte';
+	import PageMeta from '$lib/components/PageMeta.svelte';
 	import { GITHUB_URL } from '$lib/site';
 </script>
 
-<svelte:head>
-	<title>Install — tga</title>
-	<meta
-		name="description"
-		content="Install tga from crates.io with cargo, or download a prebuilt binary from the GitHub Releases page."
-	/>
-</svelte:head>
+<PageMeta
+	title="Install — tga"
+	description="Install tga from crates.io with cargo, or download a prebuilt binary from the GitHub Releases page."
+/>
 
 <section class="border-b border-foundry-border">
 	<div class="mx-auto max-w-content px-4 py-14 sm:px-6 sm:py-20">

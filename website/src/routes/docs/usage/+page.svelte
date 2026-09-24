@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { SUBCOMMANDS, type Subcommand } from '$lib/site';
+	import PageMeta from '$lib/components/PageMeta.svelte';
 
 	const GROUPS = ['Pipeline', 'Reporting', 'External sync', 'Setup', 'Other'] as const;
 
@@ -8,13 +9,10 @@
 	}
 </script>
 
-<svelte:head>
-	<title>Usage — tga</title>
-	<meta
-		name="description"
-		content="Every tga subcommand, grouped by what it does: the collect/classify/report pipeline, reporting, external sync, and setup."
-	/>
-</svelte:head>
+<PageMeta
+	title="Usage — tga"
+	description="Every tga subcommand, grouped by what it does: the collect/classify/report pipeline, reporting, external sync, and setup."
+/>
 
 <section class="border-b border-foundry-border">
 	<div class="mx-auto max-w-content px-4 py-14 sm:px-6 sm:py-20">
