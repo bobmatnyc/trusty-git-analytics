@@ -21,6 +21,8 @@ use tga::report::drilldown::{
 
 /// Output format for `tga author`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+// #111: non_exhaustive so a new format is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum AuthorFormat {
     /// Human-readable Markdown tables (default).
     #[default]

@@ -85,6 +85,8 @@ pub struct ListArgs {
 /// `Json` prints the subcategory→top-level taxonomy rollup as JSON.
 /// Test: `list_json_format_emits_taxonomy_rollup`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+// #111: non_exhaustive so a new format is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum ListFormat {
     /// Human-readable fixed-width rule table (default).
     #[default]

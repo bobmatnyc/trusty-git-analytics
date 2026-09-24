@@ -4,7 +4,9 @@ Changed
   `#[non_exhaustive]` (#111): `EvalSubcommand`, `RulesSubcommand`,
   `OverrideSubcommand`, `InspectSubcommand`, `BackfillSubcommand`,
   `AliasesSubcommand`, `DeploymentsSubcommand`, `IncidentsSubcommand`,
-  `JiraSubcommand` and `LinearSubcommand`. A downstream `match` on one of
-  them needs a wildcard (`_ =>`) arm. In return, a future subcommand is an
-  additive change and no longer forces a major release. The CLI itself is
-  unchanged.
+  `JiraSubcommand` and `LinearSubcommand`. The same applies to the public
+  clap value enums `ListFormat`, `AuthorFormat`, `InstallHost` and
+  `InstallPm`. A downstream `match` on any of them needs a wildcard (`_ =>`)
+  arm; constructing a variant still works. In return, a future subcommand or
+  flag value is an additive change and no longer forces a major release. The
+  CLI itself is unchanged.
