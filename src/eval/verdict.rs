@@ -39,7 +39,8 @@ pub(crate) struct Resolved {
 /// `classification.use_llm` is set, on verdicts at or below
 /// `llm_fallback_threshold`; external sources run when any is configured and
 /// `no_external` is off. The stored verdict does not say which source produced
-/// it, so any configured source keeps it.
+/// it, so any configured source keeps it. A stored repo fallback is never
+/// carried: `tga classify` never applies one.
 /// Test: `tests/eval_harness.rs::repredict_carries_a_stored_verdict_only_when_its_tier_is_reached`.
 pub(crate) struct CarryPolicy {
     use_llm: bool,
@@ -63,7 +64,10 @@ impl CarryPolicy {
         match stored {
             TraceTier::Manual => true,
             TraceTier::Llm => self.use_llm && t.verdict.confidence <= self.llm_threshold,
-            TraceTier::RepoCategory => t.trace.tier == TraceTier::Unclassified,
+            // #111 review: `tga classify` never applies a repo fallback
+            // (`apply_repo_category_fallback` has no production caller), so a
+            // stored one is never reproduced.
+            TraceTier::RepoCategory => false,
             TraceTier::ExternalSource => self.external,
             _ => false,
         }

@@ -1258,7 +1258,9 @@ fn repredict_refuses_a_sha_missing_from_the_db() {
 /// with or without the LLM tier, since the exact rule's 0.85 is above the
 /// 0.65 fallback threshold. `u1` (`b`, stored LLM) abstains without the LLM
 /// tier and keeps its LLM verdict with it. `m1`'s manual override is always
-/// carried. Provenance counts carried rows by method and superseded ones.
+/// carried. `r1`'s stored repo fallback is never carried, since `tga classify`
+/// never applies one: it abstains. Provenance counts carried rows by method
+/// and superseded ones.
 /// Fails on 7abf001, which carried both LLM rows unconditionally.
 /// Test: this function.
 #[test]
@@ -1269,6 +1271,7 @@ fn repredict_carries_a_stored_verdict_only_when_its_tier_is_reached() {
         ("l1", "fix: x", "feature", 0.9, "llm_fallback"),
         ("u1", "b", "feature", 0.8, "llm_fallback"),
         ("m1", "fix: y", "chore", 1.0, "manual"),
+        ("r1", "c", "platform", 0.7, "repo_category_fallback"),
     ];
     let lines: Vec<String> = rows
         .iter()
@@ -1324,10 +1327,11 @@ fn repredict_carries_a_stored_verdict_only_when_its_tier_is_reached() {
             pair("defect", "exact"),
             pair("uncategorized", "unclassified"),
             pair("chore", "manual"),
+            pair("uncategorized", "unclassified"),
         ]
     );
     assert_eq!(p.carried, [("manual".to_string(), 1)].into());
-    assert_eq!(p.superseded, 2);
+    assert_eq!(p.superseded, 3);
 
     let (got, p) = run(&d.join("llm"), true);
     assert_eq!(
@@ -1336,13 +1340,84 @@ fn repredict_carries_a_stored_verdict_only_when_its_tier_is_reached() {
             pair("defect", "exact"),
             pair("feature", "llm"),
             pair("chore", "manual"),
+            pair("uncategorized", "unclassified"),
         ]
     );
     assert_eq!(
         p.carried,
         [("llm".to_string(), 1), ("manual".to_string(), 1)].into()
     );
-    assert_eq!(p.superseded, 1);
+    assert_eq!(p.superseded, 2);
+}
+
+/// Why: #111 review — `tga eval sample` now carries a stored LLM verdict
+/// only when the sampling config enables the LLM tier, so the same database
+/// and seed can stratify differently than before.
+/// What: six commits the built-in catch-all (confidence 0.3) matches, each
+/// stored as `llm_fallback` `feature`. Under a config without `llm:` every
+/// sampled row is re-derived into `catch_all`; with an `llm:` section every
+/// row keeps its LLM verdict in stratum `other`.
+/// Test: this function.
+#[test]
+fn sample_carries_stored_llm_verdicts_only_with_an_llm_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let db = Database::open(&d.join("tga.db")).expect("open db");
+    for i in 0..6 {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO classifications (category, confidence, method) \
+             VALUES ('feature', 0.9, 'llm_fallback')",
+            [],
+        )
+        .expect("classification");
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+             repository, is_merge, classification_id) VALUES (?1, 'n', ?2, \
+             '2025-03-01T00:00:00Z', ?3, 'r', 0, ?4)",
+            params![
+                format!("s{i}"),
+                format!("dev{i}@example.com"),
+                format!("zzqx {i}"),
+                conn.last_insert_rowid()
+            ],
+        )
+        .expect("commit");
+    }
+    drop(db);
+
+    let draw = |config: Config, out: &str| {
+        eval::run_sample(&SampleParams {
+            config,
+            cap: 10,
+            ..sample_params(&d.join("tga.db"), &d.join(out), 3)
+        })
+        .expect("sample");
+        read_sample(&d.join(out).join("sample.jsonl"))
+            .into_iter()
+            .map(|r| (r.stratum, r.method, r.predicted_category))
+            .collect::<Vec<_>>()
+    };
+
+    let rows = draw(Config::default(), "no-llm");
+    assert_eq!(rows.len(), 6);
+    for (stratum, method, _) in &rows {
+        assert_eq!(
+            (*stratum, method.as_str()),
+            (eval::Stratum::CatchAll, "catch_all")
+        );
+    }
+
+    let with_llm: Config =
+        serde_yaml::from_str("llm:\n  api_key_env: TGA_TEST_UNSET_KEY\n").expect("llm config");
+    let rows = draw(with_llm, "llm");
+    assert_eq!(rows.len(), 6);
+    for (stratum, method, category) in &rows {
+        assert_eq!(
+            (*stratum, method.as_str(), category.as_str()),
+            (eval::Stratum::Other, "llm", "feature")
+        );
+    }
 }
 
 /// Insert commits `(sha, message)` into a fresh database in repo `r`.

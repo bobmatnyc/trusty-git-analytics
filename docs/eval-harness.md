@@ -76,8 +76,11 @@ should use the vocabulary `tga eval sample` prints.
    same copy sees the same window.
 2. **Re-classification.** The window is re-classified in memory with the
    config's rules (`build_rule_engine`, no LLM) and rule tracing on. Verdicts
-   made outside the rule engine — manual overrides, external ticket sources,
-   LLM fallbacks, repo fallbacks — are taken from the stored `method`. The
+   made outside the rule engine are taken from the stored `method` only when
+   the config still reaches that tier: manual overrides always; LLM fallbacks
+   when the config enables the LLM tier and the re-derived confidence is at
+   or below `llm_fallback_threshold`; external-source verdicts when an
+   external source is configured; repo fallbacks never (#111). The
    database is opened read-only; the harness refuses a writable handle.
 3. **Strata.** `exact`; `regex_high` (regex, confidence ≥ 0.9); `regex_mid`
    (regex, 0.55–0.7); `regex_other` (other regex bands); `weighted_sum`;
@@ -217,8 +220,8 @@ tga eval score --config ~/private/eval/config-v2.yaml \
   an LLM verdict only when the config enables the LLM tier and the
   re-derived confidence is at or below `llm_fallback_threshold`; an
   external-source verdict only when the config still enables an external
-  source; a repo fallback only when no tier matches. Otherwise the
-  re-derived verdict replaces it.
+  source. A stored repo fallback is never carried, because `tga classify`
+  never applies one. Otherwise the re-derived verdict replaces it.
 - **What stays.** The row set, the row order, each row's `stratum` and
   `weight`, and every commit field. Strata and weights describe the original
   draw, so `strata.json` still applies: write the output next to the source
