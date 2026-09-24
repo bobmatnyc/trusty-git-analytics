@@ -255,20 +255,22 @@ fn read_candidate_commits_branches_select_correctly() {
         .expect("insert unclassified");
 
     // Default flow: only the unclassified row.
-    let v =
-        super::pipeline_db::read_candidate_commits(&db, false, None, None, &[]).expect("default");
+    let v = super::pipeline_db::read_candidate_commits(&db, false, None, None, &[], None)
+        .expect("default");
     let shas: Vec<&str> = v.iter().map(|c| c.sha.as_str()).collect();
     assert_eq!(shas, vec!["null"]);
 
     // --force: every row.
-    let v = super::pipeline_db::read_candidate_commits(&db, true, None, None, &[]).expect("force");
+    let v = super::pipeline_db::read_candidate_commits(&db, true, None, None, &[], None)
+        .expect("force");
     let mut shas: Vec<&str> = v.iter().map(|c| c.sha.as_str()).collect();
     shas.sort();
     assert_eq!(shas, vec!["new", "null", "old"]);
 
     // --force --since 2025-01-01: only "new" (timestamp >= bound).
-    let v = super::pipeline_db::read_candidate_commits(&db, true, Some("2025-01-01"), None, &[])
-        .expect("force+since");
+    let v =
+        super::pipeline_db::read_candidate_commits(&db, true, Some("2025-01-01"), None, &[], None)
+            .expect("force+since");
     let shas: Vec<&str> = v.iter().map(|c| c.sha.as_str()).collect();
     assert_eq!(shas, vec!["new"]);
 }

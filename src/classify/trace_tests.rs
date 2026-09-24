@@ -28,6 +28,7 @@ fn custom_engine(extend_defaults: bool, weighted_sum: bool) -> ClassificationEng
         version: None,
         extend_defaults,
         rules: vec![deploy_rule()],
+        categories: Vec::new(),
     };
     let cfg = ClassificationEngineConfig {
         weighted_sum: WeightedSumConfig {

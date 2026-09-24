@@ -18,14 +18,10 @@
 //! payload) and the shared `SYSTEM_PROMPT`/[`LlmVerdict`] parsing contract
 //! from `llm.rs`.
 
-use crate::classify::tiers::ClassificationResult;
-// Shared prompt and verdict types live in `llm.rs` so both the HTTP and
-// Bedrock paths send identical instructions and parse identical JSON shapes.
-// Only referenced under the `bedrock` feature gate (classify_one), but the
-// test module also uses SYSTEM_PROMPT so we import unconditionally and allow
-// dead_code for the non-bedrock stub path.
-#[allow(unused_imports)]
-use crate::classify::tiers::llm::{LlmVerdict, SYSTEM_PROMPT};
+// #131: the reply is parsed by `llm_prompt::resolve`, shared with the HTTP path.
+#[cfg(all(test, not(feature = "bedrock")))]
+use crate::classify::tiers::llm::SYSTEM_PROMPT;
+use crate::classify::tiers::llm_prompt::LlmUsage;
 
 /// AWS Bedrock-backed LLM classifier targeting Anthropic Claude on Bedrock.
 ///
@@ -107,103 +103,58 @@ impl BedrockClassifier {
         Err("bedrock feature not compiled in — rebuild with --features bedrock".to_string())
     }
 
-    /// Classify a batch of commit messages via Bedrock, returning one
-    /// [`ClassificationResult`] per input message.
+    /// Send one commit message to Bedrock and return the raw reply text and
+    /// token usage.
     ///
-    /// Matches the OpenRouter path's contract: failures yield `None` in
-    /// place of a verdict so the pipeline can fall back to uncategorized
-    /// without crashing.
-    ///
-    /// Why: the LLM tier is best-effort; a single bad payload must not
-    /// poison an entire batch.
-    /// What: sequentially invokes the shared Converse adapter for each
-    /// message via [`Self::classify_one`].
-    /// Test: integration-tested when AWS credentials are present; stubbed
-    /// path tested in `bedrock_stub_returns_error_without_feature`.
-    #[cfg(feature = "bedrock")]
-    pub async fn classify_batch_bedrock(
-        &self,
-        messages: &[&str],
-    ) -> Vec<Option<ClassificationResult>> {
-        let mut out = Vec::with_capacity(messages.len());
-        for msg in messages {
-            out.push(self.classify_one(msg).await);
-        }
-        out
-    }
-
-    /// Stub batch classifier when the feature is disabled. Always returns
-    /// `None`s — the pipeline treats this as "uncategorized".
-    #[cfg(not(feature = "bedrock"))]
-    pub async fn classify_batch_bedrock(
-        &self,
-        messages: &[&str],
-    ) -> Vec<Option<ClassificationResult>> {
-        vec![None; messages.len()]
-    }
-
-    /// Classify a single commit message via the shared Bedrock Converse
-    /// adapter.
-    ///
-    /// Why: encapsulates the shared-adapter call and JSON parsing so
-    /// `classify_batch_bedrock` stays readable.
-    /// What: builds a shared [`trusty_common::inference::ChatRequest`] with
-    /// the same `SYSTEM_PROMPT`/user-message/temperature(0.0)/max_tokens(256)
-    /// the pre-#2411 `InvokeModel` port sent, delegates to
-    /// [`trusty_common::inference::BedrockAdapter::chat`] (Converse API —
-    /// AWS documents the same on-demand model ids as `InvokeModel` for
-    /// Converse, so [`DEFAULT_BEDROCK_MODEL`] and any bare foundation-model id
-    /// resolve identically), and parses the response text into the shared
-    /// [`LlmVerdict`].
+    /// Why (#131): verdict parsing, category validation and token accounting
+    /// live in `llm_prompt` so the HTTP and Bedrock paths cannot drift.
+    /// What: Converse call with `system`, the shared user message,
+    /// temperature 0.0 and max_tokens 256; a transport error yields
+    /// `(None, None)` (best-effort, never crashes the batch).
     /// Test: integration path requires live AWS credentials; the stub path
-    /// falls through to the `#[cfg(not(feature = "bedrock"))]` branch above.
+    /// is `bedrock_stub_returns_error_without_feature`.
     #[cfg(feature = "bedrock")]
-    async fn classify_one(&self, message: &str) -> Option<ClassificationResult> {
-        use crate::core::models::ClassificationMethod;
+    pub async fn complete(
+        &self,
+        system: &str,
+        message: &str,
+    ) -> (Option<String>, Option<LlmUsage>) {
         use tracing::warn;
         use trusty_common::inference::{ChatMessage, ChatRequest, InferenceAdapter};
 
         let mut req = ChatRequest::new(
             self.model.clone(),
             vec![
-                ChatMessage::system(SYSTEM_PROMPT),
+                ChatMessage::system(system),
                 ChatMessage::user(format!("Classify this commit message:\n\n{message}")),
             ],
         );
         req.temperature = Some(0.0);
         req.max_tokens = Some(256);
 
-        let resp = match self.inner.chat(&req).await {
-            Ok(r) => r,
+        match self.inner.chat(&req).await {
+            Ok(resp) => {
+                let usage = LlmUsage {
+                    input_tokens: u64::from(resp.usage.prompt_tokens),
+                    output_tokens: u64::from(resp.usage.completion_tokens),
+                };
+                (resp.first_text(), Some(usage))
+            }
             Err(e) => {
                 warn!(error = %e, "bedrock converse call failed");
-                return None;
+                (None, None)
             }
-        };
+        }
+    }
 
-        let text = resp.first_text().unwrap_or_default();
-
-        // Parse using the shared LlmVerdict from llm.rs so the Bedrock
-        // path produces the same category/subcategory/confidence/complexity
-        // shape as the OpenRouter path (P0 complexity gap fix).
-        let verdict: LlmVerdict = match serde_json::from_str(text.trim()) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, raw = %text, "bedrock verdict parse failed");
-                return None;
-            }
-        };
-
-        Some(ClassificationResult {
-            category: verdict.category,
-            subcategory: verdict.subcategory,
-            top_level: None,
-            confidence: verdict.confidence.clamp(0.0, 1.0),
-            method: ClassificationMethod::LlmFallback,
-            ticket_id: None,
-            // Clamp out-of-range LLM scores (same as HTTP path).
-            complexity: verdict.complexity.map(|v| v.clamp(1, 5)),
-        })
+    /// Stub when the feature is disabled: no reply, no usage.
+    #[cfg(not(feature = "bedrock"))]
+    pub async fn complete(
+        &self,
+        _system: &str,
+        _message: &str,
+    ) -> (Option<String>, Option<LlmUsage>) {
+        (None, None)
     }
 }
 

@@ -36,8 +36,9 @@ pub(crate) struct Resolved {
 /// Why: #111 review — a stored LLM or external verdict must not survive a
 /// config that no longer runs that tier. What: mirrors
 /// `ClassificationPipeline`: the LLM tier runs when an `llm:` section exists or
-/// `classification.use_llm` is set, on verdicts at or below
-/// `llm_fallback_threshold`; external sources run when any is configured and
+/// `classification.use_llm` is set, on the verdicts `llm_fallback_scope`
+/// selects (#111: at or below `llm_fallback_threshold`, or only unanswered
+/// ones); external sources run when any is configured and
 /// `no_external` is off. The stored verdict does not say which source produced
 /// it, so any configured source keeps it. A stored repo fallback is never
 /// carried: `tga classify` never applies one.
@@ -45,6 +46,7 @@ pub(crate) struct Resolved {
 pub(crate) struct CarryPolicy {
     use_llm: bool,
     llm_threshold: f64,
+    llm_scope: crate::core::config::LlmFallbackScope,
     external: bool,
 }
 
@@ -55,6 +57,7 @@ impl CarryPolicy {
         Self {
             use_llm: config.llm.is_some() || c.is_some_and(|c| c.use_llm),
             llm_threshold: c.map_or(0.65, |c| c.llm_fallback_threshold),
+            llm_scope: c.map(|c| c.llm_fallback_scope).unwrap_or_default(),
             external: c.is_some_and(|c| !c.no_external && !c.sources.is_empty()),
         }
     }
@@ -63,7 +66,15 @@ impl CarryPolicy {
     fn reaches(&self, stored: TraceTier, t: &TracedVerdict) -> bool {
         match stored {
             TraceTier::Manual => true,
-            TraceTier::Llm => self.use_llm && t.verdict.confidence <= self.llm_threshold,
+            // #111: the same predicate `tga classify` routes with.
+            TraceTier::Llm => {
+                self.use_llm
+                    && crate::classify::pipeline_llm::llm_eligible(
+                        self.llm_scope,
+                        &t.verdict,
+                        self.llm_threshold,
+                    )
+            }
             // #111 review: `tga classify` never applies a repo fallback
             // (`apply_repo_category_fallback` has no production caller), so a
             // stored one is never reproduced.

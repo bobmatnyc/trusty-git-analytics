@@ -254,6 +254,9 @@ that repo. For per-run date windowing, use the CLI flags `--weeks`, `--from`, `-
 | `min_coverage_pct` | f64 | no | `20.0` | Emit a warning in the report when fewer than this percentage of commits are classified [0, 100]. |
 | `llm_fallback_threshold` | f64 | no | `0.0` | Commits with a rule-based confidence above this value skip the LLM tier entirely. Set to e.g. `0.5` to avoid sending already-confident results to the LLM. |
 | `llm_fallback_concurrency` | usize | no | `8` | Maximum concurrent LLM requests during the fallback pass. |
+| `llm_fallback_scope` | enum | no | `low_confidence` | Which verdicts reach the LLM: `low_confidence` (confidence at or below `llm_fallback_threshold`) or `unanswered` (only commits the rules left uncategorized; the threshold is ignored). #111 |
+
+With `extend_defaults: false` in the last rules file, the LLM prompt offers only the rules' categories (plus any listed under a top-level `categories:` key with an optional `description`) and an `unclear` abstain option; a reply outside that set is dropped, never stored (#131). The `llm:` section also takes `effort: low|medium|high|xhigh|max` (Anthropic `output_config.effort`, `anthropic-api` only; leave unset for Haiku). Every LLM call is recorded in the `llm_usage` table with its input/output tokens, and `tga classify` prints the totals.
 
 ### github
 

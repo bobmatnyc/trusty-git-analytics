@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use futures::stream::StreamExt;
 use rusqlite::params;
 use tracing::{info, warn};
 
@@ -22,6 +21,30 @@ use crate::core::models::ClassificationMethod;
 /// emits a warning. Used when no config-level override is supplied.
 #[allow(dead_code)]
 const DEFAULT_MIN_COVERAGE_PCT: f64 = 20.0;
+
+/// Rule categories (deduplicated, rule order) followed by any `categories:`
+/// entry no rule names, with the entries' descriptions attached (#131).
+fn configured_categories(
+    ruleset: crate::classify::rules::RuleSet,
+) -> Vec<crate::classify::rules::CategoryDef> {
+    use crate::classify::rules::CategoryDef;
+    let mut out: Vec<CategoryDef> = Vec::new();
+    for rule in ruleset.rules {
+        if !out.iter().any(|c| c.name == rule.category) {
+            out.push(CategoryDef {
+                name: rule.category,
+                description: None,
+            });
+        }
+    }
+    for def in ruleset.categories {
+        match out.iter_mut().find(|c| c.name == def.name) {
+            Some(existing) => existing.description = def.description,
+            None => out.push(def),
+        }
+    }
+    out
+}
 
 /// Aggregate statistics from a single pipeline run.
 ///
@@ -49,6 +72,8 @@ pub struct ClassificationStats {
     pub coverage_pct: f64,
     /// Per-repository coverage (repo_name → coverage percentage).
     pub coverage_by_repo: HashMap<String, RepoCoverage>,
+    /// #111: LLM calls made this run and the tokens they used.
+    pub llm_usage: super::pipeline_llm::LlmUsageTotals,
 }
 
 /// Per-repository coverage breakdown.
@@ -99,6 +124,9 @@ pub struct ClassificationPipeline {
     /// When non-empty, only commits whose `repository` column matches one of
     /// the listed names are considered. See [`Self::with_repos`].
     repos: Vec<String>,
+    /// #111: when `Some`, only these commit SHAs are candidates; see
+    /// [`Self::with_shas`].
+    shas: Option<Vec<String>>,
 }
 
 impl ClassificationPipeline {
@@ -117,6 +145,7 @@ impl ClassificationPipeline {
             since: None,
             until: None,
             repos: Vec::new(),
+            shas: None,
         }
     }
 
@@ -170,6 +199,21 @@ impl ClassificationPipeline {
     /// Test: see `tests::classify_repos_filter_*` in this module.
     pub fn with_repos(mut self, repos: Vec<String>) -> Self {
         self.repos = repos;
+        self
+    }
+
+    /// Restrict classification to an explicit list of commit SHAs (#111).
+    ///
+    /// Why: the eval runs the LLM on its sample only, without touching any
+    /// other commit. `tga classify` writes, so this is meant for a scratch
+    /// copy of the database.
+    /// What: adds `sha IN (…)` to the candidate query. Fail-closed: the run
+    /// errors before any write when the list is empty or names a SHA that is
+    /// not in `commits` (exact, full-SHA match).
+    /// Test: `pipeline_llm_tests::shas_subset_classifies_only_listed_commits`,
+    /// `pipeline_llm_tests::unknown_sha_fails_before_any_write`.
+    pub fn with_shas(mut self, shas: Option<Vec<String>>) -> Self {
+        self.shas = shas;
         self
     }
 
@@ -316,6 +360,12 @@ impl ClassificationPipeline {
                 )));
             }
 
+            // #131: a rules file that defines the whole category set
+            // (`extend_defaults: false`) is the LLM's category set too.
+            let llm_classifier = match self.llm_categories()? {
+                Some(categories) => llm_classifier.with_allowed_categories(categories),
+                None => llm_classifier,
+            };
             engine.attach_llm(llm_classifier);
         }
 
@@ -377,13 +427,35 @@ impl ClassificationPipeline {
     /// Returns an error if a rules file fails to load.
     pub fn rule_categories(&self) -> Result<Vec<String>> {
         let (ruleset, _) = self.load_ruleset()?;
-        let mut seen = std::collections::HashSet::new();
-        Ok(ruleset
-            .rules
+        Ok(configured_categories(ruleset)
             .into_iter()
-            .map(|r| r.category)
-            .filter(|c| seen.insert(c.clone()))
+            .map(|c| c.name)
             .collect())
+    }
+
+    /// The category set the LLM tier may answer with, or `None` for the
+    /// built-in list (#131).
+    ///
+    /// Why: with `extend_defaults: false` the rules files define the whole
+    /// category set; see [`crate::classify::tiers::llm::LlmClassifier::with_allowed_categories`].
+    /// What: `None` when no rules file is configured or the last one sets
+    /// `extend_defaults: true`; otherwise every rule category (rule order)
+    /// then every `categories:` entry not already named, each carrying its
+    /// `description` when the rules files give one.
+    /// Test: `pipeline_llm_tests::llm_categories_follow_extend_defaults`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a rules file fails to load.
+    pub fn llm_categories(&self) -> Result<Option<Vec<crate::classify::rules::CategoryDef>>> {
+        let (ruleset, _) = self.load_ruleset()?;
+        let custom_only = !ruleset.extend_defaults
+            && self
+                .config
+                .classification
+                .as_ref()
+                .is_some_and(|c| !c.rules_files.is_empty());
+        Ok(custom_only.then(|| configured_categories(ruleset)))
     }
 
     /// Build the synchronous rule engine (tiers 1–3.5) with rule provenance,
@@ -540,12 +612,16 @@ impl ClassificationPipeline {
         // 2. Read candidate commits. The default flow returns only the
         //    rows that lack a verdict; `--force` widens this to every row
         //    (optionally bounded by `--since`/`--until`/`--repos`).
+        if let Some(shas) = &self.shas {
+            super::pipeline_db::check_shas_exist(db, shas)?;
+        }
         let commits = super::pipeline_db::read_candidate_commits(
             db,
             self.force,
             self.since.as_deref(),
             self.until.as_deref(),
             &self.repos,
+            self.shas.as_deref(),
         )?;
         let total = commits.len();
         info!(
@@ -622,23 +698,17 @@ impl ClassificationPipeline {
             }
         }
 
-        // 4. LLM fallback (async, bounded-concurrency) for entries whose
-        //    verdict confidence is at or below `llm_fallback_threshold`. The
-        //    default threshold is `0.65` (1.3.0+), which routes low-confidence
-        //    deterministic verdicts (fuzzy 0.40/0.60, weighted-sum below 0.65)
-        //    through the LLM when `use_llm: true`.
-        //
-        //    Fan-out is bounded by `llm_fallback_concurrency` via
-        //    `buffer_unordered`, which yields ~order-of-magnitude wall-clock
-        //    savings on large corpora compared to a serial `for ... .await`.
-        //    We collect (commit_idx, new_result) pairs first, then write them
-        //    back, so the borrow checker doesn't see mutable refs into
-        //    `results` while futures are in flight.
+        // 4. LLM fallback (async, bounded-concurrency) for the verdicts
+        //    `llm_fallback_scope` selects: `low_confidence` (default) sends
+        //    every verdict at or below `llm_fallback_threshold` (0.65);
+        //    `unanswered` (#111) sends only verdicts the rules left
+        //    uncategorized.
+        let run_started_at = chrono::Utc::now().to_rfc3339();
+        let mut llm_totals = super::pipeline_llm::LlmUsageTotals::default();
+        let mut usage_rows = Vec::new();
         if engine.config().use_llm {
             // Single startup-time diagnostic when the LLM tier is on but no
-            // credential is reachable. Without this, the fallback would emit
-            // a warn-per-commit ("did not improve confidence") that obscures
-            // the real misconfiguration.
+            // credential is reachable.
             if matches!(engine.llm_has_api_key(), Some(false)) {
                 warn!(
                     "LLM tier enabled but no API key resolved \
@@ -646,82 +716,16 @@ impl ClassificationPipeline {
                      fallback will short-circuit silently"
                 );
             }
-
-            let fallback_threshold = self
-                .config
-                .classification
-                .as_ref()
-                .map(|c| c.llm_fallback_threshold)
-                .unwrap_or(0.65);
-            let concurrency = self
-                .config
-                .classification
-                .as_ref()
-                .map(|c| c.llm_fallback_concurrency.max(1))
-                .unwrap_or(8);
-
-            // Pre-collect (idx, message, is_merge, original_confidence) for
-            // every commit that needs an LLM call. The original verdict is
-            // kept by index in `results` and consulted again at write-back.
-            let pending: Vec<(usize, String, bool, f64)> = commits
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, commit)| {
-                    if results[idx].confidence <= fallback_threshold {
-                        Some((
-                            idx,
-                            commit.message.clone(),
-                            commit.is_merge,
-                            results[idx].confidence,
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            let pb = super::pipeline_db::make_progress(pending.len() as u64, "LLM fallback");
-            let engine_ref = &engine;
-            let pb_ref = &pb;
-            let new_results: Vec<(usize, ClassificationResult, f64)> =
-                futures::stream::iter(pending.into_iter().map(
-                    |(idx, message, _is_merge, original_conf)| async move {
-                        // Direct LLM dispatch — calling `engine_ref.classify`
-                        // here would re-run `classify_sync` first and short-
-                        // circuit on the same low-confidence tier-1-3 verdict
-                        // that triggered the fallback, so the LLM tier would
-                        // never be reached (issue #99).
-                        let r = engine_ref
-                            .llm_classify_only(&message)
-                            .await
-                            .unwrap_or_else(ClassificationResult::unclassified);
-                        pb_ref.inc(1);
-                        (idx, r, original_conf)
-                    },
-                ))
-                .buffer_unordered(concurrency)
-                .collect()
-                .await;
-            pb.finish_and_clear();
-
-            // Overwrite-guard: only adopt the LLM verdict if it strictly
-            // improves confidence over the original. Otherwise keep the
-            // tier-1..3 verdict so a failed/empty LLM call doesn't regress
-            // confidence to 0.0. Errors inside `classify` are already
-            // logged at lower layers and surfaced as low-confidence
-            // verdicts; we treat them uniformly via this guard.
-            for (idx, r, original_conf) in new_results {
-                if r.confidence > original_conf {
-                    results[idx] = r;
-                } else {
-                    warn!(
-                        commit_idx = idx,
-                        original_conf,
-                        new_conf = r.confidence,
-                        "LLM fallback did not improve confidence; keeping original verdict"
-                    );
-                }
-            }
+            let cls = self.config.classification.as_ref();
+            (llm_totals, usage_rows) = super::pipeline_llm::run_llm_fallback(
+                &engine,
+                &commits,
+                &mut results,
+                cls.map(|c| c.llm_fallback_scope).unwrap_or_default(),
+                cls.map(|c| c.llm_fallback_threshold).unwrap_or(0.65),
+                cls.map(|c| c.llm_fallback_concurrency).unwrap_or(8),
+            )
+            .await;
         }
 
         // 5. Write back + coverage bookkeeping.
@@ -734,6 +738,24 @@ impl ClassificationPipeline {
         let mut stats =
             super::pipeline_db::write_results(db, &commits, &results, checkpoint_every)?;
         super::pipeline_db::compute_coverage(&mut stats);
+        if let Some((provider, model)) = engine.llm_identity() {
+            super::pipeline_llm::record_usage(
+                db,
+                &commits,
+                &usage_rows,
+                (provider, &model),
+                &run_started_at,
+            )?;
+        }
+        if llm_totals.calls > 0 {
+            info!(
+                calls = llm_totals.calls,
+                input_tokens = llm_totals.input_tokens,
+                output_tokens = llm_totals.output_tokens,
+                "LLM fallback token usage"
+            );
+        }
+        stats.llm_usage = llm_totals;
         super::pipeline_db::persist_repository_status(db, &stats)?;
         super::pipeline_db::report_coverage(&stats, self.min_coverage_pct());
         info!(

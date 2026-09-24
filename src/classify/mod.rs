@@ -16,6 +16,8 @@ pub mod errors;
 pub mod pipeline;
 pub(super) mod pipeline_db;
 pub(super) mod pipeline_external;
+// #111: the LLM fallback step and its token accounting.
+pub(crate) mod pipeline_llm;
 pub mod rules;
 pub mod sources;
 pub mod taxonomy;
@@ -26,6 +28,7 @@ pub mod trace;
 pub use classifier::{ClassificationEngine, ClassificationEngineConfig};
 pub use errors::{ClassifyError, Result};
 pub use pipeline::{ClassificationPipeline, ClassificationStats};
+pub use pipeline_llm::LlmUsageTotals;
 pub use rules::{Rule, RuleSet};
 pub use taxonomy::{SubcategoryDef, TaxonomyRegistry, TopLevelCategory};
 pub use tiers::ClassificationResult;
@@ -36,6 +39,9 @@ mod tests;
 
 #[cfg(test)]
 mod pipeline_tests;
+
+#[cfg(test)]
+mod pipeline_llm_tests;
 
 #[cfg(test)]
 mod trace_tests;

@@ -12,6 +12,8 @@ pub mod fuzzy;
 pub mod issue_type_tier;
 pub mod jira_project_tier;
 pub mod llm;
+// #131: LLM prompt, reply validation and token accounting.
+pub mod llm_prompt;
 pub mod override_tier;
 pub mod regex_tier;
 pub mod weighted_sum;
@@ -92,6 +94,9 @@ impl ClassificationResult {
 
 #[cfg(test)]
 mod llm_tests;
+
+#[cfg(test)]
+mod llm_prompt_tests;
 
 #[cfg(test)]
 mod weighted_sum_tests;

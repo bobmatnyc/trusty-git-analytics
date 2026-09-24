@@ -232,6 +232,7 @@ impl fmt::Debug for ClassificationConfig {
             custom_categories,
             min_coverage_pct,
             llm_fallback_threshold,
+            llm_fallback_scope,
             weighted_sum,
             llm_fallback_concurrency,
             no_external,
@@ -249,6 +250,7 @@ impl fmt::Debug for ClassificationConfig {
             .field("custom_categories", custom_categories)
             .field("min_coverage_pct", min_coverage_pct)
             .field("llm_fallback_threshold", llm_fallback_threshold)
+            .field("llm_fallback_scope", llm_fallback_scope)
             .field("weighted_sum", weighted_sum)
             .field("llm_fallback_concurrency", llm_fallback_concurrency)
             .field("no_external", no_external)

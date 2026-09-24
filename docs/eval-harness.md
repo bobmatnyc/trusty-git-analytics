@@ -222,6 +222,13 @@ tga eval score --config ~/private/eval/config-v2.yaml \
   external-source verdict only when the config still enables an external
   source. A stored repo fallback is never carried, because `tga classify`
   never applies one. Otherwise the re-derived verdict replaces it.
+- **Running the LLM on the sample only.** `repredict` never calls an LLM.
+  To score the LLM tier, copy the database, list the sample SHAs one per
+  line, and run `tga classify --force --shas <file>` against the copy with
+  `llm_fallback_scope: unanswered`, then `tga eval sample`/`repredict` from
+  that copy. `--shas` refuses an empty list or a SHA the database lacks.
+  The run prints LLM call and token totals; per-call rows are in
+  `llm_usage` (#111).
 - **What stays.** The row set, the row order, each row's `stratum` and
   `weight`, and every commit field. Strata and weights describe the original
   draw, so `strata.json` still applies: write the output next to the source
