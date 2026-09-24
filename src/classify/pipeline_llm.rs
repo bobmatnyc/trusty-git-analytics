@@ -53,8 +53,11 @@ pub(crate) fn llm_eligible(
 pub struct LlmUsageTotals {
     /// LLM calls made.
     pub calls: usize,
-    /// Calls whose verdict could be adopted.
-    pub answered: usize,
+    /// Answers that replaced the rule verdict.
+    pub adopted: usize,
+    /// Answers at or below the rule verdict's confidence, so kept out by the
+    /// overwrite guard (#111 review).
+    pub not_adopted: usize,
     /// Calls where the model chose the abstain label.
     pub abstained: usize,
     /// Calls answered outside the configured category set (dropped).
@@ -70,13 +73,14 @@ pub struct LlmUsageTotals {
 }
 
 impl LlmUsageTotals {
-    fn add(&mut self, outcome: LlmOutcome, usage: Option<LlmUsage>) {
+    fn add(&mut self, outcome: &str, usage: Option<LlmUsage>) {
         self.calls += 1;
         match outcome {
-            LlmOutcome::Answered => self.answered += 1,
-            LlmOutcome::Abstained => self.abstained += 1,
-            LlmOutcome::OutOfSet => self.out_of_set += 1,
-            LlmOutcome::Failed => self.failed += 1,
+            ADOPTED => self.adopted += 1,
+            NOT_ADOPTED => self.not_adopted += 1,
+            o if o == LlmOutcome::Abstained.as_str() => self.abstained += 1,
+            o if o == LlmOutcome::OutOfSet.as_str() => self.out_of_set += 1,
+            _ => self.failed += 1,
         }
         if let Some(u) = usage {
             self.calls_with_usage += 1;
@@ -86,10 +90,16 @@ impl LlmUsageTotals {
     }
 }
 
+/// `llm_usage.outcome` for an answer that replaced the rule verdict.
+const ADOPTED: &str = "adopted";
+/// `llm_usage.outcome` for an answer the overwrite guard kept out.
+const NOT_ADOPTED: &str = "not_adopted";
+
 /// One call's accounting record, written to `llm_usage`.
 pub(super) struct UsageRow {
     idx: usize,
-    outcome: LlmOutcome,
+    /// `adopted`, `not_adopted`, `abstained`, `out_of_set` or `failed`.
+    outcome: &'static str,
     usage: Option<LlmUsage>,
 }
 
@@ -137,23 +147,29 @@ pub(super) async fn run_llm_fallback(
     let mut rows = Vec::with_capacity(calls.len());
     for (idx, call) in calls {
         let Some(call) = call else { continue };
-        totals.add(call.outcome, call.usage);
+        // Overwrite-guard: adopt only an answer that beats the rule verdict.
+        let outcome = match call.verdict {
+            Some(r) if r.confidence > results[idx].confidence => {
+                results[idx] = r;
+                ADOPTED
+            }
+            Some(r) => {
+                warn!(
+                    commit_idx = idx,
+                    original_conf = results[idx].confidence,
+                    new_conf = r.confidence,
+                    "LLM fallback did not improve confidence; keeping original verdict"
+                );
+                NOT_ADOPTED
+            }
+            None => call.outcome.as_str(),
+        };
+        totals.add(outcome, call.usage);
         rows.push(UsageRow {
             idx,
-            outcome: call.outcome,
+            outcome,
             usage: call.usage,
         });
-        // Overwrite-guard: adopt only an answer that beats the rule verdict.
-        match call.verdict {
-            Some(r) if r.confidence > results[idx].confidence => results[idx] = r,
-            Some(r) => warn!(
-                commit_idx = idx,
-                original_conf = results[idx].confidence,
-                new_conf = r.confidence,
-                "LLM fallback did not improve confidence; keeping original verdict"
-            ),
-            None => {}
-        }
     }
     (totals, rows)
 }
@@ -194,7 +210,7 @@ pub(super) fn record_usage(
                 commit.sha,
                 identity.0,
                 identity.1,
-                row.outcome.as_str(),
+                row.outcome,
                 row.usage.map(|u| u.input_tokens as i64),
                 row.usage.map(|u| u.output_tokens as i64),
                 run_started_at,

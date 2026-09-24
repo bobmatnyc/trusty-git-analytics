@@ -38,7 +38,8 @@ pub(crate) struct Resolved {
 /// `ClassificationPipeline`: the LLM tier runs when an `llm:` section exists or
 /// `classification.use_llm` is set, on the verdicts `llm_fallback_scope`
 /// selects (#111: at or below `llm_fallback_threshold`, or only unanswered
-/// ones); external sources run when any is configured and
+/// ones), and only for a stored category inside a custom-only rules set
+/// (#131); external sources run when any is configured and
 /// `no_external` is off. The stored verdict does not say which source produced
 /// it, so any configured source keeps it. A stored repo fallback is never
 /// carried: `tga classify` never applies one.
@@ -47,28 +48,45 @@ pub(crate) struct CarryPolicy {
     use_llm: bool,
     llm_threshold: f64,
     llm_scope: crate::core::config::LlmFallbackScope,
+    /// #131: the LLM's category set when the rules restrict it.
+    llm_categories: Option<Vec<String>>,
     external: bool,
 }
 
 impl CarryPolicy {
     /// Read the policy from `config`.
-    pub(crate) fn from_config(config: &Config) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a configured rules file fails to load.
+    pub(crate) fn from_config(config: &Config) -> crate::classify::Result<Self> {
         let c = config.classification.as_ref();
-        Self {
+        let llm_categories = crate::classify::ClassificationPipeline::new(config.clone())
+            .llm_categories()?
+            .map(|cats| cats.into_iter().map(|c| c.name).collect());
+        Ok(Self {
+            llm_categories,
             use_llm: config.llm.is_some() || c.is_some_and(|c| c.use_llm),
             llm_threshold: c.map_or(0.65, |c| c.llm_fallback_threshold),
             llm_scope: c.map(|c| c.llm_fallback_scope).unwrap_or_default(),
             external: c.is_some_and(|c| !c.no_external && !c.sources.is_empty()),
-        }
+        })
     }
 
     /// Whether the cascade reaches `stored` given the re-derived verdict `t`.
-    fn reaches(&self, stored: TraceTier, t: &TracedVerdict) -> bool {
+    fn reaches(&self, stored: TraceTier, stored_category: &str, t: &TracedVerdict) -> bool {
         match stored {
             TraceTier::Manual => true,
             // #111: the same predicate `tga classify` routes with.
             TraceTier::Llm => {
+                // #131: `tga classify` now drops an LLM answer outside the
+                // configured set, so a stored one is superseded.
+                let in_set = self
+                    .llm_categories
+                    .as_ref()
+                    .is_none_or(|cats| cats.iter().any(|n| n == stored_category));
                 self.use_llm
+                    && in_set
                     && crate::classify::pipeline_llm::llm_eligible(
                         self.llm_scope,
                         &t.verdict,
@@ -128,7 +146,7 @@ pub(crate) fn resolve_verdicts(
             if let Some((cat, conf, method)) = &c.stored {
                 match stored_override(method, t.trace.tier) {
                     // #111: carry only a tier the config's cascade reaches.
-                    Some((tier, rule)) if policy.reaches(tier, &t) => {
+                    Some((tier, rule)) if policy.reaches(tier, cat, &t) => {
                         return Resolved {
                             tier,
                             rule_id: rule.to_string(),

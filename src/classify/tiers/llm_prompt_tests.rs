@@ -85,17 +85,28 @@ fn abstain_label_is_an_abstention() {
 }
 
 /// Why: configs without `extend_defaults: false` keep the pre-#131
-/// behaviour, and a fenced reply still parses.
-/// What: resolves an unrestricted fenced reply and an unparseable one.
+/// behaviour exactly — a bare object parses, a fenced one does not; only
+/// restricted mode extracts the object from a fence.
+/// What: resolves plain, fenced and unparseable replies in both modes.
 /// Test: this test.
 #[test]
 fn unrestricted_reply_is_kept() {
-    let fenced = format!("```json\n{}\n```", verdict_json("chore"));
-    let call = resolve(Some(&fenced), None, None);
+    let call = resolve(Some(&format!(" {} ", verdict_json("chore"))), None, None);
     assert_eq!(call.outcome, LlmOutcome::Answered);
     let v = call.verdict.expect("verdict");
     assert_eq!(v.category, "chore");
     assert_eq!(v.subcategory.as_deref(), Some("x"));
+
+    let fenced = format!("```json\n{}\n```", verdict_json("bug_fix"));
+    assert_eq!(
+        resolve(Some(&fenced), None, None).outcome,
+        LlmOutcome::Failed
+    );
+    let cats = allowed();
+    assert_eq!(
+        resolve(Some(&fenced), Some(&cats), None).outcome,
+        LlmOutcome::Answered
+    );
 
     let call = resolve(Some("not json"), None, Some(USAGE));
     assert_eq!(call.outcome, LlmOutcome::Failed);
@@ -187,4 +198,18 @@ async fn openai_usage_is_recorded() {
     let call = llm.classify_detailed("feat: add login").await;
     assert_eq!(call.outcome, LlmOutcome::Answered);
     assert_eq!(call.usage, Some(USAGE));
+}
+
+/// Why (#131): the non-2xx log line carries the provider's reason, bounded,
+/// without splitting a multi-byte character.
+/// What: truncates a long body and leaves a short one alone.
+/// Test: this test.
+#[test]
+fn error_body_is_truncated() {
+    use crate::classify::tiers::llm::truncate_chars;
+    assert_eq!(truncate_chars("short", 500), "short");
+    let long = "é".repeat(600);
+    let cut = truncate_chars(&long, 500);
+    assert_eq!(cut.chars().count(), 501);
+    assert!(cut.ends_with('…'));
 }

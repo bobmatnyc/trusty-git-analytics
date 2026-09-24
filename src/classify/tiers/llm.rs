@@ -582,7 +582,9 @@ impl LlmClassifier {
         };
 
         if !response.status().is_success() {
-            warn!(status = %response.status(), "Anthropic API returned non-success status");
+            let status = response.status();
+            let body = error_body(response).await;
+            warn!(%status, %body, "Anthropic API returned non-success status");
             return (None, None);
         }
 
@@ -662,7 +664,9 @@ impl LlmClassifier {
         };
 
         if !response.status().is_success() {
-            warn!(status = %response.status(), "LLM returned non-success status");
+            let status = response.status();
+            let body = error_body(response).await;
+            warn!(%status, %body, "LLM returned non-success status");
             return (None, None);
         }
 
@@ -681,6 +685,24 @@ impl LlmClassifier {
         let text = parsed.choices.into_iter().next().map(|c| c.message.content);
         debug!(content = ?text, "LLM raw response");
         (text, usage)
+    }
+}
+
+/// The provider's error body, cut to 500 characters, for a non-2xx log line.
+///
+/// Why (#131): a status alone hides the reason, e.g. a model rejecting
+/// `effort` with a 400. What: reads the body text only — never the request
+/// headers or the API key. Test: `llm_prompt_tests::error_body_is_truncated`.
+pub(crate) async fn error_body(response: reqwest::Response) -> String {
+    let text = response.text().await.unwrap_or_default();
+    truncate_chars(&text, 500)
+}
+
+/// `text` cut to at most `max` characters, marked with `…` when cut.
+pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
     }
 }
 

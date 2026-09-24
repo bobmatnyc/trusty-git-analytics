@@ -126,12 +126,13 @@ pub fn restricted_system_prompt(categories: &[CategoryDef]) -> String {
 
 /// Parse the JSON verdict out of a model reply.
 ///
-/// Tolerates a markdown fence or a sentence around the object by taking the
-/// span from the first `{` to the last `}`.
-fn parse_verdict(text: &str) -> Option<LlmVerdict> {
+/// With `lenient` (#131: restricted mode only) a markdown fence or a sentence
+/// around the object is tolerated by taking the span from the first `{` to
+/// the last `}`; otherwise the trimmed reply must be the object, as before.
+fn parse_verdict(text: &str, lenient: bool) -> Option<LlmVerdict> {
     let t = text.trim();
     let span = match (t.find('{'), t.rfind('}')) {
-        (Some(a), Some(b)) if a < b => &t[a..=b],
+        (Some(a), Some(b)) if lenient && a < b => &t[a..=b],
         _ => t,
     };
     serde_json::from_str(span)
@@ -142,7 +143,8 @@ fn parse_verdict(text: &str) -> Option<LlmVerdict> {
 /// Turn a provider reply into an [`LlmCall`].
 ///
 /// Why: fail-closed validation in one place for every provider (#131).
-/// What: no text or unparseable text → `Failed`. With `allowed` set, the
+/// What: no text or unparseable text → `Failed` (a fenced reply parses only
+/// in restricted mode). With `allowed` set, the
 /// abstain label → `Abstained`; a category matching a configured name
 /// (case-insensitive) → `Answered` under the configured spelling with no
 /// subcategory; anything else → `OutOfSet`, never stored. With `allowed`
@@ -155,7 +157,7 @@ pub fn resolve(
     allowed: Option<&[CategoryDef]>,
     usage: Option<LlmUsage>,
 ) -> LlmCall {
-    let Some(verdict) = text.and_then(parse_verdict) else {
+    let Some(verdict) = text.and_then(|t| parse_verdict(t, allowed.is_some())) else {
         return LlmCall::failed(usage);
     };
     let mut category = verdict.category.trim().to_string();

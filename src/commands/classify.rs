@@ -139,8 +139,8 @@ fn print_llm_usage(u: &tga::classify::LlmUsageTotals) {
         return;
     }
     println!(
-        "LLM calls: {} (answered {}, abstained {}, out-of-set {}, failed {})",
-        u.calls, u.answered, u.abstained, u.out_of_set, u.failed
+        "LLM calls: {} (adopted {}, not adopted {}, abstained {}, out-of-set {}, failed {})",
+        u.calls, u.adopted, u.not_adopted, u.abstained, u.out_of_set, u.failed
     );
     println!(
         "LLM tokens: input {}, output {} ({} of {} calls reported usage)",

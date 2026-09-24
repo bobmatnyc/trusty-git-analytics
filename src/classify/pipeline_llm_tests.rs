@@ -72,20 +72,38 @@ fn category_of(db: &Database, sha: &str) -> Option<String> {
         .expect("query category")
 }
 
-/// Mock OpenAI-compatible endpoint answering `enablement` with usage.
-async fn mock_llm() -> MockServer {
-    let server = MockServer::start().await;
-    let body = serde_json::json!({
-        "choices": [{"message": {"content":
-            "{\"category\":\"enablement\",\"subcategory\":null,\"confidence\":0.9,\"complexity\":2}"}}],
+/// A 200 chat-completions reply naming `category` at `confidence`, with usage.
+fn reply(category: &str, confidence: f64) -> ResponseTemplate {
+    let content = format!(
+        "{{\"category\":\"{category}\",\"subcategory\":null,\"confidence\":{confidence},\"complexity\":2}}"
+    );
+    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "choices": [{"message": {"content": content}}],
         "usage": {"prompt_tokens": 120, "completion_tokens": 9}
-    });
+    }))
+}
+
+/// Mock OpenAI-compatible endpoint answering every call with `template`.
+async fn mock_llm(template: ResponseTemplate) -> MockServer {
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .respond_with(template)
         .mount(&server)
         .await;
     server
+}
+
+/// `(commit_sha, outcome, input_tokens)` of every `llm_usage` row, by sha.
+fn usage_rows(db: &Database) -> Vec<(String, String, Option<i64>)> {
+    let conn = db.connection();
+    let mut stmt = conn
+        .prepare("SELECT commit_sha, outcome, input_tokens FROM llm_usage ORDER BY commit_sha")
+        .expect("prepare");
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query")
+        .collect::<std::result::Result<_, _>>()
+        .expect("rows")
 }
 
 /// Engine exactly as `build_engine` wires it, with the LLM at `server`.
@@ -103,19 +121,34 @@ fn engine(pipeline: &ClassificationPipeline, server: &MockServer) -> Classificat
     engine
 }
 
-/// Seed one weak rule hit and one commit no rule answers; run the pipeline.
-async fn run_scope(scope: LlmFallbackScope) -> (Database, MockServer, ClassificationStats) {
+/// Seed one weak rule hit and one commit no rule answers; run the pipeline
+/// against a mock LLM answering with `template`. `break_writes` drops the
+/// `classifications` table first so the write-back fails.
+async fn run_with(
+    scope: LlmFallbackScope,
+    template: ResponseTemplate,
+    break_writes: bool,
+) -> (Database, MockServer, Result<ClassificationStats>) {
     let rules = rules_file(RULES);
     let pipeline = ClassificationPipeline::new(config(rules.path(), scope));
-    let server = mock_llm().await;
+    let server = mock_llm(template).await;
     let mut db = Database::open_in_memory().expect("db");
     insert_commit(&db, "sha-weak", "infra: bump the cluster size");
     insert_commit(&db, "sha-none", "zzz qqq vvv www yyy uuu");
+    if break_writes {
+        db.connection()
+            .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE classifications;")
+            .expect("drop");
+    }
     let stats = pipeline
         .run_with_engine(&mut db, engine(&pipeline, &server))
-        .await
-        .expect("run");
+        .await;
     (db, server, stats)
+}
+
+async fn run_scope(scope: LlmFallbackScope) -> (Database, MockServer, ClassificationStats) {
+    let (db, server, stats) = run_with(scope, reply("enablement", 0.9), false).await;
+    (db, server, stats.expect("run"))
 }
 
 /// Why (#111): with `llm_fallback_scope: unanswered` only the commits the
@@ -132,7 +165,7 @@ async fn unanswered_scope_sends_only_abstentions() {
     assert_eq!(category_of(&db, "sha-none").as_deref(), Some("enablement"));
 
     assert_eq!(stats.llm_usage.calls, 1);
-    assert_eq!(stats.llm_usage.answered, 1);
+    assert_eq!(stats.llm_usage.adopted, 1);
     assert_eq!(stats.llm_usage.input_tokens, 120);
     assert_eq!(stats.llm_usage.output_tokens, 9);
     let row: (String, String, String, i64, i64) = db
@@ -148,7 +181,7 @@ async fn unanswered_scope_sends_only_abstentions() {
         (
             "sha-none".into(),
             "openai-compatible".into(),
-            "answered".into(),
+            "adopted".into(),
             120,
             9
         )
@@ -250,4 +283,110 @@ async fn unknown_sha_fails_before_any_write() {
         .query_row("SELECT COUNT(*) FROM classifications", [], |r| r.get(0))
         .expect("count");
     assert_eq!(written, 0);
+}
+
+/// Why (#111 review): a failed call (HTTP 500) keeps the rule verdict and is
+/// still counted, with no tokens since none were reported.
+/// What: unanswered scope, mock answers 500.
+/// Test: this test.
+#[tokio::test]
+async fn failed_call_keeps_the_rule_verdict() {
+    let template = ResponseTemplate::new(500).set_body_string("upstream exploded");
+    let (db, _server, stats) = run_with(LlmFallbackScope::Unanswered, template, false).await;
+    let stats = stats.expect("run");
+    assert_eq!(
+        category_of(&db, "sha-none").as_deref(),
+        Some("uncategorized")
+    );
+    assert_eq!((stats.llm_usage.calls, stats.llm_usage.failed), (1, 1));
+    assert_eq!(stats.llm_usage.calls_with_usage, 0);
+    assert_eq!(
+        usage_rows(&db),
+        [("sha-none".into(), "failed".into(), None)]
+    );
+}
+
+/// Why (#131 review): an out-of-set answer is dropped end to end — the rule
+/// verdict is stored, and the call is recorded as `out_of_set` with tokens.
+/// What: unanswered scope, mock answers the built-in `chore`.
+/// Test: this test.
+#[tokio::test]
+async fn out_of_set_answer_keeps_the_rule_verdict() {
+    let (db, _server, stats) =
+        run_with(LlmFallbackScope::Unanswered, reply("chore", 0.95), false).await;
+    let stats = stats.expect("run");
+    assert_eq!(
+        category_of(&db, "sha-none").as_deref(),
+        Some("uncategorized")
+    );
+    assert_eq!((stats.llm_usage.calls, stats.llm_usage.out_of_set), (1, 1));
+    assert_eq!(stats.llm_usage.input_tokens, 120);
+    assert_eq!(
+        usage_rows(&db),
+        [("sha-none".into(), "out_of_set".into(), Some(120))]
+    );
+}
+
+/// Why (#111 review): an in-set answer at or below the rule verdict's
+/// confidence loses the overwrite guard and is counted as `not_adopted`.
+/// What: default scope; the weak hit (0.5) gets a 0.4 answer, the miss (0.0)
+/// adopts it.
+/// Test: this test.
+#[tokio::test]
+async fn answer_below_rule_confidence_is_not_adopted() {
+    let (db, _server, stats) = run_with(
+        LlmFallbackScope::LowConfidence,
+        reply("enablement", 0.4),
+        false,
+    )
+    .await;
+    let stats = stats.expect("run");
+    assert_eq!(category_of(&db, "sha-weak").as_deref(), Some("platform"));
+    assert_eq!(category_of(&db, "sha-none").as_deref(), Some("enablement"));
+    assert_eq!(
+        (stats.llm_usage.adopted, stats.llm_usage.not_adopted),
+        (1, 1)
+    );
+    assert_eq!(
+        usage_rows(&db),
+        [
+            ("sha-none".into(), "adopted".into(), Some(120)),
+            ("sha-weak".into(), "not_adopted".into(), Some(120)),
+        ]
+    );
+}
+
+/// Why (#111 review): billed calls are recorded before the classification
+/// write-back, so a failed write never loses them.
+/// What: the `classifications` table is dropped; the run fails, and the
+/// call's `llm_usage` row is still there.
+/// Test: this test.
+#[tokio::test]
+async fn usage_survives_a_failed_write_back() {
+    let (db, _server, stats) =
+        run_with(LlmFallbackScope::Unanswered, reply("enablement", 0.9), true).await;
+    assert!(stats.is_err(), "write-back must fail without the table");
+    assert_eq!(
+        usage_rows(&db),
+        [("sha-none".into(), "adopted".into(), Some(120))]
+    );
+}
+
+/// Why (#111 review): with `--force --shas` a `--repos` filter that
+/// excludes a listed SHA must fail, not classify fewer commits.
+/// What: the listed SHA lives in `acme/widgets`; the filter names another
+/// repository.
+/// Test: this test.
+#[tokio::test]
+async fn shas_outside_the_filter_fail_before_any_write() {
+    let rules = rules_file(RULES);
+    let mut db = Database::open_in_memory().expect("db");
+    insert_commit(&db, "sha-a", "infra: bump the cluster size");
+    let p = subset_pipeline(rules.path(), &["sha-a"]).with_repos(vec!["other/repo".into()]);
+    let err = p
+        .run_with_engine(&mut db, p.build_rule_engine().expect("engine"))
+        .await
+        .expect_err("must refuse");
+    assert!(err.to_string().contains("sha-a"), "{err}");
+    assert_eq!(category_of(&db, "sha-a"), None);
 }

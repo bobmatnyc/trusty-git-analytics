@@ -623,6 +623,32 @@ impl ClassificationPipeline {
             &self.repos,
             self.shas.as_deref(),
         )?;
+        // #111 review: with --force every listed SHA is a candidate unless a
+        // --repos/--since/--until filter excluded it; never skip one silently.
+        if let (true, Some(shas)) = (self.force, &self.shas) {
+            let found: std::collections::HashSet<&str> =
+                commits.iter().map(|c| c.sha.as_str()).collect();
+            let excluded: Vec<&str> = shas
+                .iter()
+                .map(String::as_str)
+                .filter(|s| !found.contains(s))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if !excluded.is_empty() {
+                return Err(crate::classify::errors::ClassifyError::Config(format!(
+                    "{} SHA(s) from --shas fall outside the --repos/--since/--until \
+                     filter (e.g. {}); nothing was written",
+                    excluded.len(),
+                    excluded
+                        .iter()
+                        .take(5)
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
         let total = commits.len();
         info!(
             total,
@@ -727,6 +753,17 @@ impl ClassificationPipeline {
             )
             .await;
         }
+        // #111 review: record billed calls before the classification writes,
+        // so a failed write-back never loses them.
+        if let Some((provider, model)) = engine.llm_identity() {
+            super::pipeline_llm::record_usage(
+                db,
+                &commits,
+                &usage_rows,
+                (provider, &model),
+                &run_started_at,
+            )?;
+        }
 
         // 5. Write back + coverage bookkeeping.
         let checkpoint_every = self
@@ -738,15 +775,6 @@ impl ClassificationPipeline {
         let mut stats =
             super::pipeline_db::write_results(db, &commits, &results, checkpoint_every)?;
         super::pipeline_db::compute_coverage(&mut stats);
-        if let Some((provider, model)) = engine.llm_identity() {
-            super::pipeline_llm::record_usage(
-                db,
-                &commits,
-                &usage_rows,
-                (provider, &model),
-                &run_started_at,
-            )?;
-        }
         if llm_totals.calls > 0 {
             info!(
                 calls = llm_totals.calls,

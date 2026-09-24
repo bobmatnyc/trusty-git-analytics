@@ -119,7 +119,7 @@ pub fn run_sample(params: &SampleParams) -> Result<SampleSummary> {
     let engine = ClassificationPipeline::new(params.config.clone()).build_rule_engine()?;
     // #111: `sample` and `repredict` share one verdict resolution.
     let refs: Vec<&CommitRow> = window.iter().collect();
-    let policy = CarryPolicy::from_config(&params.config);
+    let policy = CarryPolicy::from_config(&params.config)?;
     let (resolved, drifted) = resolve_verdicts(&engine, &policy, &refs);
     if drifted > 0 {
         warn!(
