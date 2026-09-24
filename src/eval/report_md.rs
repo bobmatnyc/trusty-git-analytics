@@ -18,7 +18,7 @@ fn table(out: &mut String, title: &str, key: &str, rows: &[PrecisionRow]) {
     }
     let _ = writeln!(
         out,
-        "| {key} | n | correct | precision | 95% CI (Wilson) | unclear/mixed |"
+        "| {key} | n | correct | precision | 95% CI (Wilson) | no answer |"
     );
     out.push_str("|---|---:|---:|---:|---|---:|\n");
     for r in rows {
@@ -55,14 +55,18 @@ pub(crate) fn render(report: &ScoreReport, strata: &StrataSummary) -> String {
         strata.seed,
         strata.cap
     );
+    // #111: no-answer counts per label, so release_merge shows on its own.
     let _ = writeln!(
         out,
-        "Sample {} · labelled {} · scored {} · unclear {} · mixed {} · unresolved disagreements {}\n",
+        "Sample {} · merges excluded {} · labelled {} · scored {} · unclear {} · mixed {} · \
+         release_merge {} · unresolved disagreements {}\n",
         report.sample_size,
+        report.merges_excluded,
         report.labelled,
         report.scored,
         report.unclear,
         report.mixed,
+        report.release_merge,
         report.unresolved_disagreements
     );
 
@@ -71,6 +75,11 @@ pub(crate) fn render(report: &ScoreReport, strata: &StrataSummary) -> String {
         out,
         "- Precision and coverage use the labels in `{}` (the first --labels file)",
         report.scored_rater
+    );
+    let _ = writeln!(
+        out,
+        "- {} rows excluded as merges (2+ parents), with their labels",
+        report.merges_excluded
     );
     match &report.weighted_accuracy {
         Some(w) => {

@@ -3,6 +3,8 @@
 //! Provides [`query_author_period_trends`] plus all private helpers
 //! (week-windowing, label formatting, per-period SQL aggregation).
 
+// #111: every commit query in this file skips merges (2+ parents); they are
+// excluded from metrics. Squash and rebase commits (1 parent) are counted.
 use std::collections::HashMap;
 
 use chrono::{Datelike, Duration, IsoWeek, NaiveDate};
@@ -126,7 +128,7 @@ fn effective_date_bounds(
             "SELECT MIN(c.timestamp), MAX(c.timestamp) \
              FROM commits c \
              JOIN authors a ON a.id = c.author_id \
-             WHERE LOWER(a.canonical_email) = LOWER(?1) \
+             WHERE LOWER(a.canonical_email) = LOWER(?1) AND c.is_merge = 0 \
                AND (?2 IS NULL OR c.timestamp >= ?2) \
                AND (?3 IS NULL OR c.timestamp <= ?3)",
         )
@@ -169,7 +171,7 @@ fn build_period_summary(
                     SUM(CASE WHEN c.ticketed = 1 THEN 1 ELSE 0 END) \
              FROM commits c \
              JOIN authors a ON a.id = c.author_id \
-             WHERE LOWER(a.canonical_email) = LOWER(?1) \
+             WHERE LOWER(a.canonical_email) = LOWER(?1) AND c.is_merge = 0 \
                AND c.timestamp >= ?2 \
                AND c.timestamp <= ?3 || 'T23:59:59Z'",
         )
@@ -237,7 +239,7 @@ fn query_repositories(
             "SELECT DISTINCT c.repository \
              FROM commits c \
              JOIN authors a ON a.id = c.author_id \
-             WHERE LOWER(a.canonical_email) = LOWER(?1) \
+             WHERE LOWER(a.canonical_email) = LOWER(?1) AND c.is_merge = 0 \
                AND c.timestamp >= ?2 \
                AND c.timestamp <= ?3 || 'T23:59:59Z' \
              ORDER BY c.repository",
@@ -276,7 +278,7 @@ fn query_categories(
              FROM commits c \
              JOIN authors a ON a.id = c.author_id \
              LEFT JOIN classifications cl ON cl.id = c.classification_id \
-             WHERE LOWER(a.canonical_email) = LOWER(?1) \
+             WHERE LOWER(a.canonical_email) = LOWER(?1) AND c.is_merge = 0 \
                AND cl.category IS NOT NULL \
                AND c.timestamp >= ?2 \
                AND c.timestamp <= ?3 || 'T23:59:59Z' \

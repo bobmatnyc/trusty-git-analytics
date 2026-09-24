@@ -35,8 +35,18 @@ harness measures how often that category is right, as judged by people:
   labelled, corrected for chance, with that overlap reported as `n`. The two
   sheets may cover different rows.
 
-Labels `unclear` and `mixed` are counted and reported but left out of
-precision. A label is correct when it equals the predicted category,
+Labels `unclear`, `mixed` and `release_merge` are counted and reported per
+label but score as no answer, left out of precision (#111).
+
+A commit with 2+ parents is a merge, and it is excluded from metrics and
+from the eval. Squash and rebase commits (1 parent) are normal commits,
+classified by content. `tga eval sample` never draws a merge and writes
+`is_merge` on every row. `tga eval score` drops merge rows with their labels
+and reports how many; for a sample written before this rule, pass `--db`
+with a copy of the database so each row's merge flag is resolved by SHA. A
+row whose status cannot be resolved stops the score with an error.
+
+A label is correct when it equals the predicted category,
 ignoring case; synonyms (`bug` vs `bugfix`) count as different, so raters
 should use the vocabulary `tga eval sample` prints.
 
@@ -101,8 +111,8 @@ sample goes to the others.
 
 2. **Label.** Give each rater a copy of `labels.csv`. It hides the predicted
    category and orders rows by a salted hash, so the stratum cannot be read
-   off the order. Raters fill `label` with one category name, `unclear` or
-   `mixed`, and may use `note`. A row left blank counts as unlabelled, not as
+   off the order. Raters fill `label` with one category name, `unclear`,
+   `mixed` or `release_merge`, and may use `note`. A row left blank counts as unlabelled, not as
    an error, so a sheet can be scored while it is only partly filled. Two
    raters give a kappa; disagreements can be settled in an adjudication file
    with the same columns.

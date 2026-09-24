@@ -6,6 +6,8 @@
 //! category counts, and author lookups.
 //! Test: each function has a dedicated unit test in `drilldown::tests`.
 
+// #111: every commit query in this file skips merges (2+ parents); they are
+// excluded from metrics. Squash and rebase commits (1 parent) are counted.
 use std::collections::HashMap;
 
 use rusqlite::params;
@@ -60,7 +62,7 @@ pub fn query_effort_histogram(
             .prepare(
                 "SELECT COUNT(*) FROM commits c \
                  JOIN authors a ON a.id = c.author_id \
-                 WHERE LOWER(a.canonical_email) = LOWER(?1) \
+                 WHERE LOWER(a.canonical_email) = LOWER(?1) AND c.is_merge = 0 \
                    AND (?2 IS NULL OR c.timestamp >= ?2) \
                    AND (?3 IS NULL OR c.timestamp <= ?3)",
             )
@@ -76,7 +78,7 @@ pub fn query_effort_histogram(
              FROM fact_commit_effort fce \
              JOIN commits c ON c.sha = fce.sha \
              JOIN authors a ON a.id = c.author_id \
-             WHERE LOWER(a.canonical_email) = LOWER(?1) \
+             WHERE LOWER(a.canonical_email) = LOWER(?1) AND c.is_merge = 0 \
                AND (?2 IS NULL OR c.timestamp >= ?2) \
                AND (?3 IS NULL OR c.timestamp <= ?3) \
              GROUP BY fce.size \
@@ -334,7 +336,7 @@ pub fn query_commit_summary(
                     SUM(c.insertions), SUM(c.deletions) \
              FROM commits c \
              JOIN authors a ON a.id = c.author_id \
-             WHERE LOWER(a.canonical_email) = LOWER(?1) \
+             WHERE LOWER(a.canonical_email) = LOWER(?1) AND c.is_merge = 0 \
                AND (?2 IS NULL OR c.timestamp >= ?2) \
                AND (?3 IS NULL OR c.timestamp <= ?3)",
         )
@@ -359,7 +361,7 @@ pub fn query_commit_summary(
             "SELECT DISTINCT c.repository \
              FROM commits c \
              JOIN authors a ON a.id = c.author_id \
-             WHERE LOWER(a.canonical_email) = LOWER(?1) \
+             WHERE LOWER(a.canonical_email) = LOWER(?1) AND c.is_merge = 0 \
                AND (?2 IS NULL OR c.timestamp >= ?2) \
                AND (?3 IS NULL OR c.timestamp <= ?3) \
              ORDER BY c.repository",
@@ -421,7 +423,7 @@ pub fn query_author_categories(
              FROM commits c \
              JOIN authors a ON a.id = c.author_id \
              LEFT JOIN classifications cl ON cl.id = c.classification_id \
-             WHERE LOWER(a.canonical_email) = LOWER(?1) \
+             WHERE LOWER(a.canonical_email) = LOWER(?1) AND c.is_merge = 0 \
                AND cl.category IS NOT NULL \
                AND (?2 IS NULL OR c.timestamp >= ?2) \
                AND (?3 IS NULL OR c.timestamp <= ?3) \

@@ -171,6 +171,7 @@ fn sample_then_score_end_to_end() {
         labels: vec![a.join("rater.csv")],
         adjudicated: None,
         categories: None,
+        db: None,
         out: a.join("report"),
     })
     .expect("score");
@@ -193,7 +194,8 @@ fn record(sha: &str, stratum: &str, rule: &str, cat: &str, conf: f64, weight: f6
         "diffstat": {"files": 1, "insertions": 1, "deletions": 0},
         "pr_title": null, "ticket_id": null, "issue_type": null,
         "stratum": stratum, "method": method, "rule_id": rule,
-        "predicted_category": cat, "confidence": conf, "weight": weight
+        "predicted_category": cat, "confidence": conf, "weight": weight,
+        "is_merge": false
     })
     .to_string()
 }
@@ -295,6 +297,7 @@ fn score_computes_expected_metrics() {
         labels: vec![d.join("a.csv"), d.join("b.csv")],
         adjudicated: Some(d.join("adj.csv")),
         categories: None,
+        db: None,
         out: d.join("out"),
     };
     let r = eval::run_score(&params).expect("score");
@@ -396,26 +399,27 @@ fn label_sheet_hides_trailers_and_emails() {
     assert!(sample.contains("Co-Authored-By: Jane Doe <jane@example.com>"));
 }
 
-/// SHAs drawn by seed 11 on `seed_db` before the label-sheet redaction change.
+/// SHAs drawn by seed 11 on `seed_db`, recorded when merge commits left the
+/// population (#111); the redaction change must not move them.
 const GOLDEN_SEED_11: &[&str] = &[
-    "000000000000000000000000000000000102e1d3",
-    "0000000000000000000000000000000001194131",
+    "0000000000000000000000000000000000e61e11",
+    "0000000000000000000000000000000000365553",
+    "0000000000000000000000000000000000000001",
+    "00000000000000000000000000000000017457c2",
+    "0000000000000000000000000000000000d95549",
+    "000000000000000000000000000000000172bea9",
     "0000000000000000000000000000000000265a59",
-    "00000000000000000000000000000000014134a2",
-    "000000000000000000000000000000000067df5a",
-    "00000000000000000000000000000000004cb4b1",
-    "0000000000000000000000000000000000d157cc",
-    "00000000000000000000000000000000005b1692",
-    "0000000000000000000000000000000001379e0c",
-    "00000000000000000000000000000000011c7363",
-    "00000000000000000000000000000000009b027a",
-    "00000000000000000000000000000000015ac632",
-    "000000000000000000000000000000000074a822",
-    "000000000000000000000000000000000127a312",
-    "00000000000000000000000000000000007fd7d1",
-    "0000000000000000000000000000000000664641",
-    "000000000000000000000000000000000076413b",
-    "00000000000000000000000000000000012609f9",
+    "0000000000000000000000000000000000e7b72a",
+    "0000000000000000000000000000000000a7cb42",
+    "000000000000000000000000000000000034bc3a",
+    "0000000000000000000000000000000000332321",
+    "00000000000000000000000000000000013f9b89",
+    "0000000000000000000000000000000000e95043",
+    "0000000000000000000000000000000000ce259a",
+    "000000000000000000000000000000000001991a",
+    "0000000000000000000000000000000000c15cd2",
+    "0000000000000000000000000000000000418502",
+    "00000000000000000000000000000000014dfd6a",
     "0000000000000000000000000000000000949e16",
     "00000000000000000000000000000000012470e0",
     "00000000000000000000000000000000011fa595",
@@ -521,6 +525,7 @@ fn score(
         labels: labels.iter().map(|p| p.to_path_buf()).collect(),
         adjudicated: adjudicated.map(Path::to_path_buf),
         categories: None,
+        db: None,
         out: sample.join("report"),
     })
 }
@@ -729,4 +734,227 @@ fn score_pairs_a_subset_rater_with_a_full_rater() {
     write_labels(&d.join("adj.csv"), &[(blank.as_str(), "feature")]);
     let err = score(d, &[&r1, &r2], Some(&d.join("adj.csv"))).expect_err("adjudicated a blank row");
     assert!(err.to_string().contains("leaves blank"));
+}
+
+/// Why: #111 — a commit with 2+ parents is a merge and never enters the eval.
+/// What: `seed_db` marks every eighth commit (30 of 240) as a merge; a sample
+/// sized to take the whole window draws none of them, flags every row
+/// `is_merge: false`, and records the 30 in `merges_excluded`.
+/// Test: this function.
+#[test]
+fn sample_never_draws_a_merge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("tga.db");
+    seed_db(&db);
+    let out = dir.path().join("s");
+    let params = SampleParams {
+        size: 400,
+        cap: 400,
+        ..sample_params(&db, &out, 5)
+    };
+    let summary = eval::run_sample(&params).expect("sample");
+    assert_eq!(summary.strata.merges_excluded, 30);
+    assert_eq!(summary.strata.population, 210);
+    let merges: Vec<String> = (0..240usize)
+        .filter(|i| i % MESSAGES.len() == 3)
+        .map(|i| format!("{:040x}", i * 104_729 + 1))
+        .collect();
+    let rows = read_sample(&out.join("sample.jsonl"));
+    assert_eq!(rows.len(), 210);
+    assert!(rows.iter().all(|r| r.is_merge == Some(false)));
+    assert!(rows.iter().all(|r| !merges.contains(&r.sha)));
+}
+
+/// Why: #111 scheme v2 — `release_merge` is a valid label that scores as no
+/// answer, like `unclear`, and the report counts it on its own.
+/// What: three rows labelled correct, `release_merge` and `unclear`: one is
+/// scored, both others are counted per label and as the rule's no-answer
+/// rows, and report.md shows `release_merge 1`.
+/// Test: this function.
+#[test]
+fn score_counts_release_merge_as_no_answer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let rows = write_source(d, &[("exact", 3, 30, "feature", 0.9)]);
+    let labels = [
+        (rows[0].0.as_str(), "feature"),
+        (rows[1].0.as_str(), "release_merge"),
+        (rows[2].0.as_str(), "unclear"),
+    ];
+    write_labels(&d.join("rater.csv"), &labels);
+    let r = score(d, &[&d.join("rater.csv")], None).expect("score");
+    assert_eq!((r.labelled, r.scored), (3, 1));
+    assert_eq!((r.release_merge, r.unclear, r.mixed), (1, 1, 0));
+    let rule = &r.per_rule[0];
+    assert_eq!((rule.n, rule.correct, rule.excluded), (1, 1, 2));
+    let md = fs::read_to_string(d.join("report/report.md")).expect("md");
+    assert!(md.contains("release_merge 1"), "{md}");
+}
+
+/// Write a sample in the pre-#111 format (no `is_merge` on any row) whose
+/// SHAs are `sha`, and a database holding `in_db` with their merge flags.
+fn legacy_sample_and_db(dir: &Path, shas: &[&str], in_db: &[(&str, bool)]) {
+    let lines: Vec<String> = shas
+        .iter()
+        .map(|sha| {
+            let mut rec: serde_json::Value =
+                serde_json::from_str(&record(sha, "exact", "rule_a", "feature", 0.9, 10.0))
+                    .expect("record");
+            rec.as_object_mut().expect("object").remove("is_merge");
+            rec.to_string()
+        })
+        .collect();
+    fs::write(dir.join("sample.jsonl"), lines.join("\n") + "\n").expect("sample");
+    let strata = serde_json::json!({
+        "seed": 1, "weeks": 26, "window_start": "a", "window_end": "b",
+        "requested_size": shas.len(), "cap": 5, "population": 30,
+        "strata": {"exact": {"population": 30, "sampled": shas.len()}},
+        "categories": ["feature", "bugfix"]
+    });
+    fs::write(dir.join("strata.json"), strata.to_string()).expect("strata");
+    let db = Database::open(&dir.join("tga.db")).expect("open db");
+    for (sha, is_merge) in in_db {
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, is_merge) VALUES (?1, 'n', 'a@example.com', \
+                 '2025-03-01T00:00:00Z', 'm', 'r', ?2)",
+                params![sha, i64::from(*is_merge)],
+            )
+            .expect("insert");
+    }
+}
+
+/// Why: #111 — the 400-row sample drawn before the merge rule has no merge
+/// flag; scoring it must still exclude its merges, resolved by SHA.
+/// What: a legacy sample of three rows, of which `m1` is a merge in the
+/// database and `q1` a squash commit (one parent). The merge's wrong label is
+/// dropped with it: 1 row excluded, 2 scored, precision 1.0, and report.md
+/// says so. A row whose SHA is missing from the database is an error.
+/// Test: this function.
+#[test]
+fn score_excludes_merges_resolved_from_the_db() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let flags = [("m1", true), ("q1", false), ("n1", false)];
+    legacy_sample_and_db(d, &["m1", "q1", "n1"], &flags);
+    write_labels(
+        &d.join("rater.csv"),
+        &[("m1", "bugfix"), ("q1", "feature"), ("n1", "feature")],
+    );
+    let params = ScoreParams {
+        sample: d.join("sample.jsonl"),
+        strata: None,
+        labels: vec![d.join("rater.csv")],
+        adjudicated: None,
+        categories: None,
+        db: Some(d.join("tga.db")),
+        out: d.join("report"),
+    };
+    let r = eval::run_score(&params).expect("score");
+    assert_eq!(r.merges_excluded, 1);
+    assert_eq!((r.sample_size, r.labelled, r.scored), (3, 2, 2));
+    assert_eq!(r.per_rule[0].precision, Some(1.0));
+    let md = fs::read_to_string(d.join("report/report.md")).expect("md");
+    assert!(md.contains("1 rows excluded as merges"), "{md}");
+
+    let gap = d.join("gap");
+    fs::create_dir_all(&gap).expect("mkdir");
+    legacy_sample_and_db(&gap, &["m1", "x9"], &[("m1", true)]);
+    write_labels(&gap.join("rater.csv"), &[("x9", "feature")]);
+    let err = eval::run_score(&ScoreParams {
+        sample: gap.join("sample.jsonl"),
+        labels: vec![gap.join("rater.csv")],
+        db: Some(gap.join("tga.db")),
+        out: gap.join("report"),
+        ..params
+    })
+    .expect_err("a row with unknown merge status was scored");
+    assert!(err.to_string().contains("merge status unknown"), "{err}");
+}
+
+/// Why: #111 fail-closed rule — a row whose merge status cannot be
+/// determined must never be scored as a non-merge. Before the rule, `tga eval
+/// score` scored a flagless sample with its merges in it and exited 0.
+/// What: runs the binary on a legacy sample (no `is_merge`) without `--db`;
+/// it must exit non-zero, name `--db`, and write no report.
+/// Test: this function.
+#[test]
+fn score_refuses_rows_with_unknown_merge_status() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    legacy_sample_and_db(d, &["m1", "q1"], &[]);
+    write_labels(
+        &d.join("rater.csv"),
+        &[("m1", "feature"), ("q1", "feature")],
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tga"))
+        .current_dir(d)
+        .args(["eval", "score", "--sample"])
+        .arg(d.join("sample.jsonl"))
+        .arg("--labels")
+        .arg(d.join("rater.csv"))
+        .arg("--out")
+        .arg(d.join("report"))
+        .output()
+        .expect("run tga");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "scored rows of unknown merge status");
+    assert!(stderr.contains("--db"), "{stderr}");
+    assert!(!d.join("report/report.json").exists());
+}
+
+/// Why: #111 — v2 labels are accepted whenever the config's rules file names
+/// the categories; tga hardcodes no category list.
+/// What: a rules file (`extend_defaults: false`) with `internal_tooling` and
+/// `data_science` rules; a label of `data_science`, which neither the sample
+/// nor the built-in taxonomy holds, is accepted once the config's categories
+/// are passed, and rejected without them.
+/// Test: this function.
+#[test]
+fn score_accepts_labels_named_by_the_rules_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let rules = d.join("rules.yaml");
+    fs::write(
+        &rules,
+        "extend_defaults: false\nrules:\n  - id: tooling\n    category: internal_tooling\n    \
+         keywords: [\"tooling:\"]\n  - id: ds\n    category: data_science\n    keywords: [\"model:\"]\n",
+    )
+    .expect("rules");
+    let cfg = d.join("config.yaml");
+    fs::write(
+        &cfg,
+        format!(
+            "classification:\n  rules_files:\n    - {}\n",
+            rules.display()
+        ),
+    )
+    .expect("config");
+    let config = Config::load(&cfg).expect("load config");
+    let rows = write_source(d, &[("exact", 2, 20, "internal_tooling", 0.9)]);
+    write_labels(
+        &d.join("rater.csv"),
+        &[
+            (rows[0].0.as_str(), "internal_tooling"),
+            (rows[1].0.as_str(), "data_science"),
+        ],
+    );
+    let params = ScoreParams {
+        sample: d.join("sample.jsonl"),
+        strata: None,
+        labels: vec![d.join("rater.csv")],
+        adjudicated: None,
+        categories: Some(eval::config_categories(&config).expect("categories")),
+        db: None,
+        out: d.join("report"),
+    };
+    let r = eval::run_score(&params).expect("v2 label rejected");
+    assert_eq!((r.scored, r.per_rule[0].correct), (2, 1));
+    let err = eval::run_score(&ScoreParams {
+        categories: None,
+        ..params
+    })
+    .expect_err("an unknown label was accepted");
+    assert!(err.to_string().contains("data_science"));
 }

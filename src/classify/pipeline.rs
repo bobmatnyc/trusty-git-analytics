@@ -337,6 +337,55 @@ impl ClassificationPipeline {
         }
     }
 
+    /// Load and merge `classification.rules_files`, or the built-ins when
+    /// none are configured (#445 batch C). The last file's `extend_defaults`
+    /// flag wins; with it set, custom rules override defaults by id.
+    fn load_ruleset(&self) -> Result<(crate::classify::rules::RuleSet, RuleSources)> {
+        use crate::classify::rules::load_rules_multi_with_sources;
+        let paths: Vec<&std::path::Path> = self
+            .config
+            .classification
+            .as_ref()
+            .map(|c| c.rules_files.iter().map(|p| p.as_path()).collect())
+            .unwrap_or_default();
+        if paths.is_empty() {
+            return Ok((default_rules(), RuleSources::builtin()));
+        }
+        let (custom, sources) = load_rules_multi_with_sources(&paths)?;
+        if !custom.extend_defaults {
+            return Ok((custom, sources));
+        }
+        let mut merged = default_rules();
+        let custom_ids: std::collections::HashSet<String> =
+            custom.rules.iter().map(|r| r.id.clone()).collect();
+        merged.rules.retain(|r| !custom_ids.contains(&r.id));
+        merged.rules.extend(custom.rules);
+        Ok((merged, sources))
+    }
+
+    /// Category names the loaded rules can emit, deduplicated, in rule order.
+    ///
+    /// Why: `tga eval score --config` accepts a rater label the config names
+    /// (#111). The rules file is the source of truth for its category set, and
+    /// a rule's category need not be declared in the taxonomy.
+    /// What: loads the ruleset [`Self::build_rule_engine`] uses and returns
+    /// each rule's `category`.
+    /// Test: `tests/eval_harness.rs::score_accepts_labels_named_by_the_rules_file`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a rules file fails to load.
+    pub fn rule_categories(&self) -> Result<Vec<String>> {
+        let (ruleset, _) = self.load_ruleset()?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(ruleset
+            .rules
+            .into_iter()
+            .map(|r| r.category)
+            .filter(|c| seen.insert(c.clone()))
+            .collect())
+    }
+
     /// Build the synchronous rule engine (tiers 1–3.5) with rule provenance,
     /// without the LLM tier.
     ///
@@ -354,34 +403,7 @@ impl ClassificationPipeline {
     ///
     /// Returns an error if a rules file fails to load or compile.
     pub fn build_rule_engine(&self) -> Result<ClassificationEngine> {
-        // Load user-supplied rule files (single or multiple, #445 batch C).
-        // When `rules_files` is non-empty, load and merge them in order via
-        // `RuleSet::merge`. The last file's `extend_defaults` flag wins.
-        let (ruleset, sources) = {
-            use crate::classify::rules::load_rules_multi_with_sources;
-            let class_cfg = self.config.classification.as_ref();
-            let paths: Vec<&std::path::PathBuf> = class_cfg
-                .map(|c| c.rules_files.iter().collect())
-                .unwrap_or_default();
-
-            if paths.is_empty() {
-                (default_rules(), RuleSources::builtin())
-            } else {
-                let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
-                let (custom, sources) = load_rules_multi_with_sources(&path_refs)?;
-                if custom.extend_defaults {
-                    // Merge: start with defaults, let custom rules override by id.
-                    let mut merged = default_rules();
-                    let custom_ids: std::collections::HashSet<String> =
-                        custom.rules.iter().map(|r| r.id.clone()).collect();
-                    merged.rules.retain(|r| !custom_ids.contains(&r.id));
-                    merged.rules.extend(custom.rules);
-                    (merged, sources)
-                } else {
-                    (custom, sources)
-                }
-            }
-        };
+        let (ruleset, sources) = self.load_ruleset()?;
 
         let custom_taxonomy = self
             .config

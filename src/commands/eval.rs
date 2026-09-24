@@ -46,9 +46,11 @@ pub enum EvalSubcommand {
     /// Score rater labels against a sample: precision per rule, method and stratum.
     ///
     /// Valid labels are the categories recorded in strata.json, or the taxonomy
-    /// of the config when --config is passed explicitly, plus every predicted
-    /// category in the sample, `unclear` and `mixed`. `unclear` and `mixed` are
-    /// reported but left out of precision.
+    /// and rule categories of the config when --config is passed explicitly,
+    /// plus every predicted category in the sample, `unclear`, `mixed` and
+    /// `release_merge`. Those three are reported per label but score as no
+    /// answer. Merge commits (2+ parents) are excluded with their labels; a
+    /// sample written without merge flags needs --db to resolve them.
     #[command(after_help = PRIVACY)]
     Score(ScoreArgs),
 }
@@ -121,6 +123,12 @@ pub struct ScoreArgs {
     /// strata.json; defaults to the one next to the sample.
     #[arg(long)]
     pub strata: Option<PathBuf>,
+    /// A COPY of the tga database the sample was drawn from; opened read-only.
+    /// Resolves the merge flag of rows that lack one (samples written before
+    /// merges were excluded) so merges can be dropped. Without it such a
+    /// sample is refused rather than scored with merges in it.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
     /// Output directory for report.md and report.json. Required.
     #[arg(long)]
     pub out: PathBuf,
@@ -184,6 +192,11 @@ fn run_sample(a: SampleArgs, config: Config, config_path: &Path) -> Result<()> {
         "Window {} → {} ({} weeks): {} commits, seed {}, cap {}",
         s.window_start, s.window_end, s.weeks, s.population, s.seed, s.cap
     );
+    // #111: merges (2+ parents) never enter the eval.
+    println!(
+        "Excluded {} merge commits (2+ parents) from the window.",
+        s.merges_excluded
+    );
     println!(
         "{:<14} {:>10} {:>8} {:>10}",
         "stratum", "population", "sampled", "weight"
@@ -232,7 +245,11 @@ fn run_sample(a: SampleArgs, config: Config, config_path: &Path) -> Result<()> {
             salt.display()
         );
     }
-    println!("Valid labels: {}, unclear, mixed", s.categories.join(", "));
+    println!(
+        "Valid labels: {}, {}",
+        s.categories.join(", "),
+        eval::score::NO_ANSWER_LABELS.join(", ")
+    );
     println!("{PRIVACY}");
     Ok(())
 }
@@ -288,19 +305,23 @@ fn run_score(a: ScoreArgs, config: Config, config_explicit: bool) -> Result<()> 
         labels: a.labels,
         adjudicated: a.adjudicated,
         categories,
+        db: a.db,
         out: a.out.clone(),
     })
     .context("tga eval score")?;
 
     println!(
-        "Sample {} · labelled {} · scored {} · unclear {} · mixed {} · unresolved {}",
+        "Sample {} · labelled {} · scored {} · unclear {} · mixed {} · release_merge {} · unresolved {}",
         report.sample_size,
         report.labelled,
         report.scored,
         report.unclear,
         report.mixed,
+        report.release_merge,
         report.unresolved_disagreements
     );
+    // #111: merges are excluded from the eval; say how many.
+    println!("{} rows excluded as merges", report.merges_excluded);
     if let Some(w) = &report.weighted_accuracy {
         println!(
             "Stratum-weighted accuracy {:.1}% [{:.1}%, {:.1}%]",

@@ -125,6 +125,9 @@ pub(super) fn build_weekly_velocity(
 /// Grouped inputs for [`compute_dora`].
 pub(super) struct DoraInputs<'a> {
     pub(super) rows: &'a [CommitRow],
+    /// #111: merge commits, excluded from every count but still a deploy's
+    /// `git_sha` target when lead time looks up the commit's time.
+    pub(super) merge_rows: &'a [CommitRow],
     pub(super) flags: &'a RowFlags,
     pub(super) category_total: &'a HashMap<String, usize>,
     pub(super) prs: &'a [PrRow],
@@ -289,6 +292,7 @@ fn deployment_frequency_and_lead_time(
     let commit_ts: HashMap<&str, DateTime<Utc>> = inputs
         .rows
         .iter()
+        .chain(inputs.merge_rows)
         .map(|r| (r.sha.as_str(), r.timestamp))
         .collect();
     let mut leads: Vec<f64> = Vec::new();
