@@ -116,8 +116,11 @@ taxonomy entries. tga hardcodes no deployment's category list.
 
 The #111 precision eval uses scheme v2 through the cto-reports rules file:
 `security`, `devops`, `qa`, `bug_fix`, `new_feature`, `internal_tooling`,
-`integration`, `platform_infrastructure`, `maintenance`, `data_science`, plus
-the rater labels `release_merge`, `unclear` and `mixed`. `tga eval score
+`integration`, `platform_infrastructure`, `upkeep`, `data_science`, plus
+the rater labels `release_merge`, `unclear` and `mixed`. The v2 category
+`upkeep` is not tga's built-in `maintenance` above: `maintenance` stays the
+default taxonomy's top-level category and catch-all, and only the v2 rules
+file emits `upkeep`. `tga eval score
 --config` accepts every category the config's rules or taxonomy name.
 `unclear`, `mixed` and `release_merge` are always valid, are counted per
 label, and score as no answer. See `docs/eval-harness.md`.
