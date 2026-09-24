@@ -1,14 +1,12 @@
 <script lang="ts">
 	import { CRATES_IO_URL, FACTS, GITHUB_URL } from '$lib/site';
+	import PageMeta from '$lib/components/PageMeta.svelte';
 </script>
 
-<svelte:head>
-	<title>tga — developer productivity analytics from git history</title>
-	<meta
-		name="description"
-		content="tga walks git repositories into SQLite, classifies every commit through a tiered cascade, and reports per-author and per-week velocity, quality, and DORA metrics."
-	/>
-</svelte:head>
+<PageMeta
+	title="tga — developer productivity analytics from git history"
+	description="tga walks git repositories into SQLite, classifies every commit through a tiered cascade, and reports per-author and per-week velocity, quality, and DORA metrics."
+/>
 
 <!-- HERO -->
 <section class="border-b border-foundry-border">

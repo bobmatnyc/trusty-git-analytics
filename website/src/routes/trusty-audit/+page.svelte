@@ -1,5 +1,6 @@
 <script lang="ts">
 	import CommandBlock from '$lib/components/CommandBlock.svelte';
+	import PageMeta from '$lib/components/PageMeta.svelte';
 	import { GITHUB_URL } from '$lib/site';
 
 	const SOURCE_URL = `${GITHUB_URL}/tree/main/crates/trusty-audit`;
@@ -45,13 +46,10 @@
 	];
 </script>
 
-<svelte:head>
-	<title>trusty-audit — acquisition due diligence from git history</title>
-	<meta
-		name="description"
-		content="trusty-audit is the auditor client: it installs its own pinned copies of tga, trusty-search, trusty-analyze, and trusty-review, then runs tga audit and returns a signed due-diligence report."
-	/>
-</svelte:head>
+<PageMeta
+	title="trusty-audit — acquisition due diligence from git history"
+	description="trusty-audit is the auditor client: it installs its own pinned copies of tga, trusty-search, trusty-analyze, and trusty-review, then runs tga audit and returns a signed due-diligence report."
+/>
 
 <section class="border-b border-foundry-border">
 	<div class="mx-auto max-w-content px-4 py-14 sm:px-6 sm:py-20">

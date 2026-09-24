@@ -93,6 +93,33 @@ describe('production build', () => {
 		}
 	});
 
+	it("emits og:title and og:description matching each page's title and description", () => {
+		const pages: [string, string][] = [
+			['/', 'index.html'],
+			['/install', 'install.html'],
+			['/docs/usage', 'docs/usage.html'],
+			['/trusty-audit', 'trusty-audit.html']
+		];
+		for (const [route, file] of pages) {
+			const html = readFileSync(path.join(STATIC, file), 'utf8');
+			const title = /<title>([^<]*)<\/title>/.exec(html)?.[1];
+			const description = /<meta name="description" content="([^"]*)"/.exec(html)?.[1];
+			expect(title, `${route} <title>`).toBeTruthy();
+			expect(description, `${route} meta description`).toBeTruthy();
+
+			const ogTitle = /<meta property="og:title" content="([^"]*)"/.exec(html)?.[1];
+			const ogDescription = /<meta property="og:description" content="([^"]*)"/.exec(html)?.[1];
+			expect(ogTitle, `${route} og:title`).toBe(title);
+			expect(ogDescription, `${route} og:description`).toBe(description);
+
+			expect(html, `${route} og:type`).toContain('<meta property="og:type" content="website"');
+			expect(html, `${route} twitter:card`).toContain(
+				'<meta name="twitter:card" content="summary"'
+			);
+			expect(html, `${route} og:image`).not.toContain('og:image');
+		}
+	});
+
 	it('renders the install page with the cargo and binary paths', () => {
 		const html = readFileSync(path.join(STATIC, 'install.html'), 'utf8');
 		expect(html).toContain('cargo install tga --locked');
