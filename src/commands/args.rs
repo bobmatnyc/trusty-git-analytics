@@ -26,6 +26,8 @@ pub struct DeploymentsSubcommandArgs {
 
 /// `tga deployments` subcommand variants.
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new subcommand is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum DeploymentsSubcommand {
     /// Ingest deployment events into `fact_deployments`.
     Collect(DeploymentsCollectArgs),
@@ -41,6 +43,8 @@ pub struct IncidentsSubcommandArgs {
 
 /// `tga incidents` subcommand variants.
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new subcommand is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum IncidentsSubcommand {
     /// Ingest incidents into `fact_incidents`.
     Collect(IncidentsCollectArgs),
@@ -56,6 +60,8 @@ pub struct JiraSubcommandArgs {
 
 /// `tga jira` subcommand variants (issue #3966).
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new subcommand is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum JiraSubcommand {
     /// Sync status transitions and comments into `fact_ticket_transitions` /
     /// `fact_jira_comment_detail`.
@@ -75,6 +81,8 @@ pub struct LinearSubcommandArgs {
 
 /// `tga linear` subcommand variants (issue #7139).
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new subcommand is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum LinearSubcommand {
     /// Bulk-sync a team's full issue set into `linear_issues` / `work_items`.
     Sync(LinearSyncArgs),

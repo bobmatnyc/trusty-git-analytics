@@ -50,6 +50,8 @@ pub struct RulesArgs {
 
 /// `tga rules` subcommands.
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new subcommand is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum RulesSubcommand {
     /// Print every rule the engine will load with the current config.
     List(ListArgs),

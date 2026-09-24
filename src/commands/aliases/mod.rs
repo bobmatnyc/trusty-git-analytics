@@ -56,6 +56,8 @@ pub(crate) const VALID_PROVIDERS: &[&str] = &["github", "gitlab", "ado", "bitbuc
 
 /// `tga aliases` subcommands.
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new subcommand is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum AliasesSubcommand {
     /// Print every canonical identity known to the database.
     List,
