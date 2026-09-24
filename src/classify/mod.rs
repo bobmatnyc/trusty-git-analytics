@@ -20,6 +20,8 @@ pub mod rules;
 pub mod sources;
 pub mod taxonomy;
 pub mod tiers;
+// #111: in-memory rule tracing for the eval harness; never persisted.
+pub mod trace;
 
 pub use classifier::{ClassificationEngine, ClassificationEngineConfig};
 pub use errors::{ClassifyError, Result};
@@ -27,9 +29,13 @@ pub use pipeline::{ClassificationPipeline, ClassificationStats};
 pub use rules::{Rule, RuleSet};
 pub use taxonomy::{SubcategoryDef, TaxonomyRegistry, TopLevelCategory};
 pub use tiers::ClassificationResult;
+pub use trace::{RuleSources, RuleTrace, TraceTier, TracedVerdict};
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod pipeline_tests;
+
+#[cfg(test)]
+mod trace_tests;

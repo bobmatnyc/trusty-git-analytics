@@ -144,6 +144,8 @@ exclude = [
     "tests/corpus_fixture/*",
     "tests/agentic_detection_corpus.rs",
     "tests/agentic_detection_corpus_configured.rs",
+    # #111: reads the same corpus plus its golden dump from tests/fixtures.
+    "tests/classify_byte_identical.rs",
 ]
 
 [[bin]]

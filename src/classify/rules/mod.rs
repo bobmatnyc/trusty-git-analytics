@@ -18,7 +18,9 @@ pub(super) mod default_rules_c;
 pub(super) mod default_rules_d;
 
 pub use loader::{default_rules, load_rules};
-pub use multi_loader::{apply_repo_category_fallback, load_rules_multi, repo_matches};
+pub use multi_loader::{
+    apply_repo_category_fallback, load_rules_multi, load_rules_multi_with_sources, repo_matches,
+};
 pub use types::{Rule, RuleSet};
 
 #[cfg(test)]

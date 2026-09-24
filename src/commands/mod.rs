@@ -14,6 +14,8 @@ pub mod collect;
 pub mod date_range;
 pub mod deployments;
 pub mod dora;
+// #111: classifier precision harness.
+pub mod eval;
 pub mod incidents;
 // #5218: read-only database inspection and the data-handling attestation.
 pub mod inspect;

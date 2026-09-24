@@ -544,6 +544,26 @@ impl WeightedSumClassifier {
         is_merge: bool,
         paths: &[String],
     ) -> Option<ClassificationResult> {
+        self.classify_traced(message, is_merge, paths)
+            .map(|(r, _)| r)
+    }
+
+    /// [`Self::classify`] plus the signal that contributed most to the
+    /// winning category (#111).
+    ///
+    /// Why: the eval harness measures precision per winning entry; the
+    /// dominant signal separates, say, keyword-driven from length-driven
+    /// verdicts for the same category.
+    /// What: returns the same verdict as [`Self::classify`] paired with one of
+    /// `keyword`, `ticket_prefix`, `message_length`, `merge_indicator`,
+    /// `file_paths` (the first on a tie, in that order).
+    /// Test: `classify::trace_tests::traced_cascade_matches_untraced_verdicts`.
+    pub fn classify_traced(
+        &self,
+        message: &str,
+        is_merge: bool,
+        paths: &[String],
+    ) -> Option<(ClassificationResult, &'static str)> {
         if !self.config.enabled {
             return None;
         }
@@ -605,20 +625,36 @@ impl WeightedSumClassifier {
 
         let best_cat = Cat::ALL[best_cat_idx];
         let (category, top_level) = best_cat.to_verdict();
+        let signals = [
+            ("keyword", keyword_scores[best_cat_idx]),
+            ("ticket_prefix", ticket_scores[best_cat_idx]),
+            ("message_length", length_scores[best_cat_idx]),
+            ("merge_indicator", merge_scores[best_cat_idx]),
+            ("file_paths", path_scores[best_cat_idx]),
+        ];
+        let mut dominant = signals[0];
+        for candidate in signals {
+            if candidate.1 > dominant.1 {
+                dominant = candidate;
+            }
+        }
 
         // Clamp confidence to [min_confidence, 0.95].
         let confidence = (best_score as f64)
             .max(self.config.min_confidence as f64)
             .min(0.95);
 
-        Some(ClassificationResult {
-            category: category.to_string(),
-            subcategory: None,
-            top_level: Some(top_level),
-            confidence,
-            method: ClassificationMethod::WeightedSum,
-            ticket_id: None,
-            complexity: None,
-        })
+        Some((
+            ClassificationResult {
+                category: category.to_string(),
+                subcategory: None,
+                top_level: Some(top_level),
+                confidence,
+                method: ClassificationMethod::WeightedSum,
+                ticket_id: None,
+                complexity: None,
+            },
+            dominant.0,
+        ))
     }
 }

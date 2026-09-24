@@ -13,6 +13,7 @@ use crate::classify::sources::ExternalSourceResolver;
 use crate::classify::tiers::bedrock::DEFAULT_BEDROCK_MODEL;
 use crate::classify::tiers::llm::ANTHROPIC_DEFAULT_MODEL;
 use crate::classify::tiers::ClassificationResult;
+use crate::classify::trace::RuleSources;
 use crate::core::config::{Config, LlmSource};
 use crate::core::db::Database;
 use crate::core::models::ClassificationMethod;
@@ -204,36 +205,8 @@ impl ClassificationPipeline {
     /// Returns an error if rules fail to load/compile or the LLM provider
     /// fails to initialize.
     async fn build_engine(&self) -> Result<ClassificationEngine> {
-        // Load user-supplied rule files (single or multiple, #445 batch C).
-        // When `rules_files` is non-empty, load and merge them in order via
-        // `RuleSet::merge`. The last file's `extend_defaults` flag wins.
-        // For back-compat the comment above still refers to "rules_file" but the
-        // implementation now drives off `rules_files`.
-        let ruleset = {
-            use crate::classify::rules::load_rules_multi;
-            let class_cfg = self.config.classification.as_ref();
-            let paths: Vec<&std::path::PathBuf> = class_cfg
-                .map(|c| c.rules_files.iter().collect())
-                .unwrap_or_default();
-
-            if paths.is_empty() {
-                default_rules()
-            } else {
-                let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
-                let custom = load_rules_multi(&path_refs)?;
-                if custom.extend_defaults {
-                    // Merge: start with defaults, let custom rules override by id.
-                    let mut merged = default_rules();
-                    let custom_ids: std::collections::HashSet<String> =
-                        custom.rules.iter().map(|r| r.id.clone()).collect();
-                    merged.rules.retain(|r| !custom_ids.contains(&r.id));
-                    merged.rules.extend(custom.rules);
-                    merged
-                } else {
-                    custom
-                }
-            }
-        };
+        let mut engine = self.build_rule_engine()?;
+        let engine_cfg = self.engine_config();
 
         // Determine whether the LLM tier is requested and which source.
         //
@@ -255,58 +228,6 @@ impl ClassificationPipeline {
                 .as_ref()
                 .map(|c| c.use_llm)
                 .unwrap_or(false);
-
-        let engine_cfg = match self.config.classification.as_ref() {
-            Some(c) => ClassificationEngineConfig {
-                use_llm: c.use_llm,
-                llm_model: c.llm_model.clone().unwrap_or_else(|| "gpt-4o-mini".into()),
-                llm_provider: c.llm_provider.clone(),
-                openrouter_api_key: c.openrouter_api_key.clone(),
-                confidence_threshold: c.confidence_threshold,
-                weighted_sum: c.weighted_sum.clone(),
-            },
-            None => ClassificationEngineConfig::default(),
-        };
-
-        let custom_taxonomy = self
-            .config
-            .classification
-            .as_ref()
-            .map(|c| c.custom_categories.clone())
-            .unwrap_or_default();
-
-        let jira_mappings = self
-            .config
-            .jira
-            .as_ref()
-            .map(|j| j.jira_project_mappings.clone())
-            .unwrap_or_default();
-
-        let jira_confidence = self
-            .config
-            .jira
-            .as_ref()
-            .and_then(|j| j.jira_project_mapping_confidence);
-
-        // Build the engine without an injected LLM tier first, then attach
-        // the LLM tier (which may require async SDK init for Bedrock) below.
-        let engine_cfg_no_llm = ClassificationEngineConfig {
-            use_llm: false,
-            ..engine_cfg.clone()
-        };
-        let mut engine = ClassificationEngine::with_taxonomy_mappings_and_confidence(
-            ruleset,
-            engine_cfg_no_llm,
-            custom_taxonomy,
-            jira_mappings,
-            jira_confidence,
-            // Override-tier DB wiring is deferred: rusqlite::Connection is
-            // not Send + Sync, so plumbing the live connection through the
-            // Rayon batch would require a redesign. The override tier is
-            // still constructible via `with_taxonomy_and_mappings` for
-            // single-threaded callers and tests.
-            None,
-        )?;
 
         // Wire the LLM tier when requested, preferring the `llm:` section.
         if use_llm {
@@ -399,6 +320,109 @@ impl ClassificationPipeline {
         }
 
         Ok(engine)
+    }
+
+    /// Map `Config` onto the engine's per-run tier knobs.
+    fn engine_config(&self) -> ClassificationEngineConfig {
+        match self.config.classification.as_ref() {
+            Some(c) => ClassificationEngineConfig {
+                use_llm: c.use_llm,
+                llm_model: c.llm_model.clone().unwrap_or_else(|| "gpt-4o-mini".into()),
+                llm_provider: c.llm_provider.clone(),
+                openrouter_api_key: c.openrouter_api_key.clone(),
+                confidence_threshold: c.confidence_threshold,
+                weighted_sum: c.weighted_sum.clone(),
+            },
+            None => ClassificationEngineConfig::default(),
+        }
+    }
+
+    /// Build the synchronous rule engine (tiers 1–3.5) with rule provenance,
+    /// without the LLM tier.
+    ///
+    /// Why: `tga classify` attaches the LLM tier on top of this engine; the
+    /// eval harness (#111) re-classifies with exactly the same rules but must
+    /// never call an LLM, and needs each rule's source file for its trace.
+    /// What: loads and merges `classification.rules_files` (or the built-ins),
+    /// maps `Config` onto the engine config with `use_llm = false`, applies
+    /// the custom taxonomy and JIRA project mappings, and records which file
+    /// defined each rule.
+    /// Test: `tests/classify_byte_identical.rs` (verdicts unchanged) and
+    /// `classify::rules::multi_loader::tests::multi_load_records_the_last_defining_file` (rule sources).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a rules file fails to load or compile.
+    pub fn build_rule_engine(&self) -> Result<ClassificationEngine> {
+        // Load user-supplied rule files (single or multiple, #445 batch C).
+        // When `rules_files` is non-empty, load and merge them in order via
+        // `RuleSet::merge`. The last file's `extend_defaults` flag wins.
+        let (ruleset, sources) = {
+            use crate::classify::rules::load_rules_multi_with_sources;
+            let class_cfg = self.config.classification.as_ref();
+            let paths: Vec<&std::path::PathBuf> = class_cfg
+                .map(|c| c.rules_files.iter().collect())
+                .unwrap_or_default();
+
+            if paths.is_empty() {
+                (default_rules(), RuleSources::builtin())
+            } else {
+                let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+                let (custom, sources) = load_rules_multi_with_sources(&path_refs)?;
+                if custom.extend_defaults {
+                    // Merge: start with defaults, let custom rules override by id.
+                    let mut merged = default_rules();
+                    let custom_ids: std::collections::HashSet<String> =
+                        custom.rules.iter().map(|r| r.id.clone()).collect();
+                    merged.rules.retain(|r| !custom_ids.contains(&r.id));
+                    merged.rules.extend(custom.rules);
+                    (merged, sources)
+                } else {
+                    (custom, sources)
+                }
+            }
+        };
+
+        let custom_taxonomy = self
+            .config
+            .classification
+            .as_ref()
+            .map(|c| c.custom_categories.clone())
+            .unwrap_or_default();
+
+        let jira_mappings = self
+            .config
+            .jira
+            .as_ref()
+            .map(|j| j.jira_project_mappings.clone())
+            .unwrap_or_default();
+
+        let jira_confidence = self
+            .config
+            .jira
+            .as_ref()
+            .and_then(|j| j.jira_project_mapping_confidence);
+
+        // Build the engine without an injected LLM tier; `build_engine`
+        // attaches it (which may require async SDK init for Bedrock).
+        let engine_cfg_no_llm = ClassificationEngineConfig {
+            use_llm: false,
+            ..self.engine_config()
+        };
+        let engine = ClassificationEngine::with_taxonomy_mappings_and_confidence(
+            ruleset,
+            engine_cfg_no_llm,
+            custom_taxonomy,
+            jira_mappings,
+            jira_confidence,
+            // Override-tier DB wiring is deferred: rusqlite::Connection is
+            // not Send + Sync, so plumbing the live connection through the
+            // Rayon batch would require a redesign. The override tier is
+            // still constructible via `with_taxonomy_and_mappings` for
+            // single-threaded callers and tests.
+            None,
+        )?;
+        Ok(engine.with_rule_sources(sources))
     }
 
     /// Build an [`ExternalSourceResolver`] from the pipeline's config, or

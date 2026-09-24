@@ -48,6 +48,7 @@ use crate::classify::errors::{ClassifyError, Result};
 use crate::classify::rules::loader::load_rules;
 use crate::classify::rules::types::RuleSet;
 use crate::classify::tiers::ClassificationResult;
+use crate::classify::trace::RuleSources;
 
 /// Load and merge multiple rule files in order.
 ///
@@ -64,23 +65,35 @@ use crate::classify::tiers::ClassificationResult;
 /// Returns [`ClassifyError::Io`] or parse errors from [`load_rules`] for any
 /// file that cannot be loaded.
 pub fn load_rules_multi(paths: &[&Path]) -> Result<RuleSet> {
-    if paths.is_empty() {
-        return Err(ClassifyError::RuleLoad(
-            "rules_files is empty — at least one file is required".to_string(),
-        ));
-    }
+    load_rules_multi_with_sources(paths).map(|(set, _)| set)
+}
 
+/// [`load_rules_multi`] plus which file last defined each rule id (#111).
+///
+/// Why: [`RuleSet::merge`] drops provenance; rule tracing names each rule by
+/// its source file.
+/// What: the same load-and-merge fold, recording every file's rule ids in a
+/// [`RuleSources`] whose unrecorded ids report `builtin`.
+/// Test: `tests::multi_load_records_the_last_defining_file`.
+///
+/// # Errors
+///
+/// As [`load_rules_multi`].
+pub fn load_rules_multi_with_sources(paths: &[&Path]) -> Result<(RuleSet, RuleSources)> {
+    let mut sources = RuleSources::builtin();
     let mut merged: Option<RuleSet> = None;
     for path in paths {
         let set = load_rules(path)?;
+        sources.record_file(path, &set.rules);
         merged = Some(match merged {
             None => set,
             Some(acc) => acc.merge(set),
         });
     }
-
-    // SAFETY: paths is non-empty, so the loop ran at least once.
-    Ok(merged.expect("at least one file was loaded"))
+    let merged = merged.ok_or_else(|| {
+        ClassifyError::RuleLoad("rules_files is empty — at least one file is required".to_string())
+    })?;
+    Ok((merged, sources))
 }
 
 /// Check whether a repo name matches a `repo_categories` key.
@@ -189,6 +202,22 @@ mod tests {
         let mut f = tempfile::NamedTempFile::with_suffix(".yaml").expect("create temp file");
         f.write_all(content.as_bytes()).expect("write yaml");
         f
+    }
+
+    /// Why (#111): a rule trace must name the file that last defined a rule,
+    /// matching the merge's later-file-wins semantics.
+    /// What: two files both define `shared`; only the first defines `first`.
+    /// Test: this function.
+    #[test]
+    fn multi_load_records_the_last_defining_file() {
+        let a = write_yaml("rules:\n  - id: shared\n    category: x\n    keywords: [a]\n  - id: first\n    category: y\n    keywords: [b]\n");
+        let b = write_yaml("rules:\n  - id: shared\n    category: z\n    keywords: [c]\n");
+        let (set, sources) = load_rules_multi_with_sources(&[a.path(), b.path()]).expect("load");
+        assert_eq!(set.rules.len(), 2);
+        assert_eq!(sources.source_of("shared"), b.path().display().to_string());
+        assert_eq!(sources.source_of("first"), a.path().display().to_string());
+        assert_eq!(sources.source_of("cc-fix"), "builtin");
+        assert!(load_rules_multi_with_sources(&[]).is_err());
     }
 
     /// Why: multiple rule files must merge in order so that rules from later
