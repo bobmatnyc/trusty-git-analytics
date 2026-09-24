@@ -16,6 +16,7 @@ use crate::core::db::Database;
 
 use super::aggregator::Aggregator;
 use super::formatters::{csv as csv_fmt, json as json_fmt, markdown as md_fmt};
+use super::persist::PersistScope;
 use super::pipeline::ReportPipeline;
 
 /// Seed an in-memory DB with two authors, two commits, and one classification.
@@ -873,7 +874,7 @@ fn persist_weekly_quality_upserts_rows_and_is_idempotent() {
     assert_eq!(cc, wa.commit_count as i64);
 
     // Idempotency: call persist again; row count must still be 1.
-    Aggregator::persist_weekly_quality(&db, &data).expect("second persist");
+    Aggregator::persist_weekly_quality(&db, &data, PersistScope::Full).expect("second persist");
     let count: i64 = db
         .connection()
         .query_row(
@@ -1250,12 +1251,13 @@ fn real_commit_shapes() -> Vec<CommitShape> {
 /// on arithmetic nothing proved end to end.
 /// What: runs the eight fixture messages through `ai_markers::detect` exactly as
 /// `collect::git::extractor` does, stores the verdict, aggregates, and reads the
-/// persisted row back. Dana's week is 7 commits, one of them a revert, so
-/// `net_commits` is 6 with 2 full-agentic — `agentic_pct` must be 33.33…, which
-/// no other bucketing produces: 42.9 would forget the revert, 28.6 would count
-/// the revert in the denominator, and 50.0 would fold `ide_assisted` into the
-/// numerator. The bot commit lands on its own grain key at 100.0, and a second
-/// persist proves the UPSERT.
+/// persisted row back. Dana's week is 7 commits; c5 is a merge (2+ parents)
+/// and is excluded from metrics (#111), and one of the other 6 is a revert, so
+/// `net_commits` is 5 with 2 full-agentic — `agentic_pct` must be 40.0, which
+/// no other bucketing produces: 33.3 would count the merge or keep the revert,
+/// 28.6 would do both, and 60.0 would fold `ide_assisted` into the numerator.
+/// The bot commit lands on its own grain key at 100.0, and a second persist
+/// proves the UPSERT.
 /// Test: this test itself.
 #[test]
 fn persist_weekly_engineer_upserts_rows() {
@@ -1299,7 +1301,11 @@ fn persist_weekly_engineer_upserts_rows() {
         .iter()
         .find(|w| w.author.contains("Dana"))
         .expect("Dana has a weekly bucket");
-    assert_eq!(dana.commit_count_net, 6, "7 commits less 1 revert");
+    // #111: c5 is a merge and is not counted.
+    assert_eq!(
+        dana.commit_count_net, 5,
+        "6 non-merge commits less 1 revert"
+    );
     assert_eq!(dana.agentic_count, 2, "c1 and c2 only");
     assert_eq!(dana.ide_assisted_count, 1, "c3 only");
 
@@ -1315,11 +1321,11 @@ fn persist_weekly_engineer_upserts_rows() {
     };
 
     let (net, agentic, ide, pct) = row("dana@example.com");
-    assert_eq!((net, agentic, ide), (6, 2, 1));
+    assert_eq!((net, agentic, ide), (5, 2, 1));
     assert!(
-        (pct - 200.0 / 6.0).abs() < 1e-9,
-        "agentic_pct must be 2/6; 42.9 would forget the revert, 28.6 would keep \
-         it in the denominator, 50.0 would count ide_assisted. got {pct}"
+        (pct - 40.0).abs() < 1e-9,
+        "agentic_pct must be 2/5; 33.3 would count the merge or keep the revert, \
+         28.6 would do both, 60.0 would count ide_assisted. got {pct}"
     );
 
     let (bot_net, bot_agentic, bot_ide, bot_pct) = row(shapes[7].author_email);
@@ -1332,7 +1338,8 @@ fn persist_weekly_engineer_upserts_rows() {
 
     // UPSERT, not INSERT: persisting the same data again must not duplicate a
     // grain key or change a value.
-    let written = Aggregator::persist_weekly_engineer(&db, &data).expect("second persist");
+    let written = Aggregator::persist_weekly_engineer(&db, &data, PersistScope::Full)
+        .expect("second persist");
     assert_eq!(written, 2, "one row per author-week");
     let total: i64 = db
         .connection()
@@ -1341,7 +1348,7 @@ fn persist_weekly_engineer_upserts_rows() {
         })
         .expect("count rows");
     assert_eq!(total, 2, "re-persisting must not duplicate the grain key");
-    assert_eq!(row("dana@example.com"), (6, 2, 1, pct));
+    assert_eq!(row("dana@example.com"), (5, 2, 1, pct));
 }
 
 // #212: `compute_dora` computed `deploys` from merged PRs and never queried
@@ -1612,4 +1619,275 @@ fn dora_marks_proxy_source_distinctly_when_fact_deployments_query_fails() {
         dora.deployment_frequency_source,
         "pr_merge_proxy_query_failed"
     );
+}
+
+/// Why: #111 — a commit with 2+ parents is a merge and is excluded from
+/// metrics; a squash or rebase commit has one parent and counts as a normal
+/// commit, however its message reads.
+/// What: one merge and one squash commit by the same author in one week, both
+/// classified. Every commit count, the category breakdown, the per-author,
+/// per-repo and weekly totals, and the summary see only the squash commit. A
+/// deploy whose `git_sha` is the merge still gets a measured lead time: the
+/// merge is looked up for its timestamp, never counted.
+/// Test: this test itself.
+#[test]
+fn aggregator_excludes_merge_commits_from_metrics() {
+    let db = Database::open_in_memory().expect("open db");
+    let conn = db.connection();
+    conn.execute(
+        "INSERT INTO classifications (id, category, confidence, method) VALUES \
+         (1, 'merge', 0.9, 'fuzzy'), (2, 'feature', 0.9, 'exact_rule')",
+        [],
+    )
+    .expect("insert classifications");
+    let commits = [
+        (
+            "merge1",
+            "Merge pull request #41 from org/topic",
+            1,
+            1,
+            "2024-01-16T07:00:00+00:00",
+        ),
+        (
+            "squash1",
+            "Merge the export endpoint (#42)\n\n* feat: add export\n* fix: typo",
+            2,
+            0,
+            "2024-01-16T10:00:00+00:00",
+        ),
+    ];
+    for (sha, message, class_id, is_merge, ts) in commits {
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, classification_id, is_merge) \
+             VALUES (?1, 'Alice', 'alice@example.com', ?2, ?3, 'repo-a', 2, 40, 4, ?4, ?5)",
+            rusqlite::params![sha, ts, message, class_id, is_merge],
+        )
+        .expect("insert commit");
+    }
+    seed_deployment_full(
+        &db,
+        "deploy-merge",
+        "2024-01-16T10:00:00+00:00",
+        "production",
+        "success",
+        Some("merge1"),
+    );
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+
+    assert_eq!(
+        data.total_commits, 1,
+        "the merge is not a commit in metrics"
+    );
+    assert_eq!(data.category_breakdown.get("feature").copied(), Some(1));
+    assert_eq!(data.category_breakdown.get("merge"), None);
+    assert_eq!(data.authors.len(), 1);
+    assert_eq!(data.authors[0].commit_count, 1);
+    assert_eq!(data.authors[0].insertions, 40);
+    assert_eq!(data.repositories[0].commit_count, 1);
+    let weekly: usize = data.weekly_activity.iter().map(|w| w.commit_count).sum();
+    assert_eq!(weekly, 1);
+    assert_eq!(data.summary.as_ref().map(|s| s.total_commits), Some(1));
+    // Neither commit has an author_id; only the squash commit is counted.
+    assert_eq!(data.unresolved_author_commits, 1);
+    let dora = data.dora.as_ref().expect("dora present");
+    assert_eq!(dora.lead_time_source, "measured");
+    assert_eq!(dora.lead_time_hours, Some(3.0));
+
+    let stored: i64 = conn
+        .query_row("SELECT COUNT(*) FROM commits", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(stored, 2, "merges stay in the database");
+}
+
+/// Seed the #111 stale-row fixture: Alice has one feature commit in 2024-W03
+/// and only a merge in 2024-W05. `table` already holds the rows an older tga
+/// wrote: a merge-inclusive `v1` row for W05, a current-formula row for a
+/// week Alice no longer produces (W07), and a current-formula row for Bob,
+/// whom the run does not touch. `insert` writes one row given
+/// `(email, iso_week, formula_version)`.
+fn seed_stale_fact_rows(insert: &dyn Fn(&Database, &str, i64, &str)) -> Database {
+    let db = Database::open_in_memory().expect("open db");
+    for (sha, msg, ts, is_merge) in [
+        ("f1", "feat: add export", "2024-01-15T10:00:00+00:00", 0),
+        ("m1", "Merge branch 'main'", "2024-01-29T10:00:00+00:00", 1),
+    ] {
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, is_merge) \
+                 VALUES (?1, 'Alice', 'alice@example.com', ?2, ?3, 'repo-a', 1, 5, 1, ?4)",
+                rusqlite::params![sha, ts, msg, is_merge],
+            )
+            .expect("insert commit");
+    }
+    insert(&db, "alice@example.com", 5, "v1");
+    insert(&db, "alice@example.com", 7, "v2");
+    insert(&db, "bob@example.com", 9, "v2");
+    db
+}
+
+/// Rows of `table` as `(email, iso_week, formula_version)`, sorted.
+fn fact_rows(db: &Database, table: &str) -> Vec<(String, i64, String)> {
+    let mut stmt = db
+        .connection()
+        .prepare(&format!(
+            "SELECT author_email, iso_week, formula_version FROM {table} \
+             ORDER BY author_email, iso_week"
+        ))
+        .expect("prepare");
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("rows")
+}
+
+/// Why: #111 — merges left `net_commits`, so a merge-inclusive row must not
+/// survive a persist run, and a week whose only commits were merges produces
+/// no new row to overwrite it.
+/// What: after `Aggregator::build` persists, Alice has exactly one row (W03,
+/// formula `v2`); her stale merge-only W05 row and orphaned W07 row are
+/// gone, and Bob's row, which the run did not produce or touch, is kept.
+/// Test: this test itself.
+#[test]
+fn persist_weekly_engineer_drops_stale_merge_only_rows() {
+    let db = seed_stale_fact_rows(&|db, email, week, version| {
+        db.connection()
+            .execute(
+                "INSERT INTO fact_weekly_engineer (author_email, iso_year, iso_week, \
+                 repository, net_commits, agentic_count, ide_assisted_count, agentic_pct, \
+                 formula_version, computed_at) VALUES (?1, 2024, ?2, 'repo-a', 1, 0, 0, 0.0, ?3, 0)",
+                rusqlite::params![email, week, version],
+            )
+            .expect("seed engineer row");
+    });
+    Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    assert_eq!(
+        fact_rows(&db, "fact_weekly_engineer"),
+        vec![
+            ("alice@example.com".to_string(), 3, "v2".to_string()),
+            ("bob@example.com".to_string(), 9, "v2".to_string()),
+        ]
+    );
+}
+
+/// Why: #111 — `fact_weekly_quality.commit_count` and its score also left
+/// merges out, so the same stale rows must not survive a persist run.
+/// What: the `persist_weekly_engineer_drops_stale_merge_only_rows` fixture
+/// against `fact_weekly_quality`; `QUALITY_FORMULA_VERSION` is `v2`.
+/// Test: this test itself.
+#[test]
+fn persist_weekly_quality_drops_stale_merge_only_rows() {
+    let db = seed_stale_fact_rows(&|db, email, week, version| {
+        db.connection()
+            .execute(
+                "INSERT INTO fact_weekly_quality (author_email, iso_year, iso_week, \
+                 repository, quality_score, quality_tshirt, revert_count, bugfix_count, \
+                 ticketed_count, commit_count, formula_version, computed_at) \
+                 VALUES (?1, 2024, ?2, 'repo-a', 0.5, 3, 0, 0, 0, 1, ?3, 0)",
+                rusqlite::params![email, week, version],
+            )
+            .expect("seed quality row");
+    });
+    Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    assert_eq!(
+        fact_rows(&db, "fact_weekly_quality"),
+        vec![
+            ("alice@example.com".to_string(), 3, "v2".to_string()),
+            ("bob@example.com".to_string(), 9, "v2".to_string()),
+        ]
+    );
+}
+
+/// Insert one row into `fact_weekly_engineer` or `fact_weekly_quality` for
+/// `(email, 2024, week, 'repo-a')` with the given `formula_version`.
+fn seed_fact_row(db: &Database, table: &str, email: &str, week: i64, version: &str) {
+    let sql = if table == "fact_weekly_engineer" {
+        "INSERT INTO fact_weekly_engineer (author_email, iso_year, iso_week, repository, \
+         net_commits, agentic_count, ide_assisted_count, agentic_pct, formula_version, \
+         computed_at) VALUES (?1, 2024, ?2, 'repo-a', 1, 0, 0, 0.0, ?3, 0)"
+    } else {
+        "INSERT INTO fact_weekly_quality (author_email, iso_year, iso_week, repository, \
+         quality_score, quality_tshirt, revert_count, bugfix_count, ticketed_count, \
+         commit_count, formula_version, computed_at) \
+         VALUES (?1, 2024, ?2, 'repo-a', 0.5, 3, 0, 0, 0, 1, ?3, 0)"
+    };
+    db.connection()
+        .execute(sql, rusqlite::params![email, week, version])
+        .expect("seed fact row");
+}
+
+const FACT_TABLES: [&str; 2] = ["fact_weekly_engineer", "fact_weekly_quality"];
+
+/// Persist `data` into both weekly fact tables with `scope`.
+fn persist_both(db: &Database, data: &crate::report::ReportData, scope: PersistScope) {
+    Aggregator::persist_weekly_engineer(db, data, scope).expect("persist engineer");
+    Aggregator::persist_weekly_quality(db, data, scope).expect("persist quality");
+}
+
+/// Why: #111 — pruning must never empty the fact tables when a run has
+/// nothing to write.
+/// What: both tables hold a current-formula row; persisting an empty
+/// `ReportData` with `PersistScope::Full` writes nothing and keeps it.
+/// Test: this test itself.
+#[test]
+fn persist_of_an_empty_report_keeps_existing_rows() {
+    let db = Database::open_in_memory().expect("open db");
+    for table in FACT_TABLES {
+        seed_fact_row(&db, table, "alice@example.com", 3, "v2");
+    }
+    persist_both(
+        &db,
+        &crate::report::ReportData::empty(String::new()),
+        PersistScope::Full,
+    );
+    for table in FACT_TABLES {
+        assert_eq!(
+            fact_rows(&db, table),
+            vec![("alice@example.com".to_string(), 3, "v2".to_string())],
+            "{table}"
+        );
+    }
+}
+
+/// Why: #111 review — an `--author`-scoped run must not delete other
+/// engineers' rows, even of an older formula; `fact_weekly_engineer` has no
+/// backfill to restore them.
+/// What: Alice's report data is persisted with `PersistScope::Authors` while
+/// Bob holds `v1` rows; Bob's rows survive in both tables. A `Full` persist
+/// of the same data then removes them.
+/// Test: this test itself.
+#[test]
+fn scoped_persist_keeps_other_authors_old_rows() {
+    let db = Database::open_in_memory().expect("open db");
+    db.connection()
+        .execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+             repository, files_changed, insertions, deletions, is_merge) \
+             VALUES ('f1', 'Alice', 'alice@example.com', '2024-01-15T10:00:00+00:00', \
+             'feat: add export', 'repo-a', 1, 5, 1, 0)",
+            [],
+        )
+        .expect("insert commit");
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    for table in FACT_TABLES {
+        seed_fact_row(&db, table, "bob@example.com", 9, "v1");
+    }
+    let alice = ("alice@example.com".to_string(), 3, "v2".to_string());
+    let bob = ("bob@example.com".to_string(), 9, "v1".to_string());
+
+    persist_both(&db, &data, PersistScope::Authors);
+    for table in FACT_TABLES {
+        assert_eq!(
+            fact_rows(&db, table),
+            vec![alice.clone(), bob.clone()],
+            "{table}"
+        );
+    }
+
+    persist_both(&db, &data, PersistScope::Full);
+    for table in FACT_TABLES {
+        assert_eq!(fact_rows(&db, table), vec![alice.clone()], "{table}");
+    }
 }

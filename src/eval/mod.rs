@@ -26,6 +26,8 @@ pub mod stats;
 // #111: a proportional, seeded subset of a sample for a second rater.
 pub mod subsample;
 
+// #111: resolve each sample row's merge flag, from the row or a tga DB.
+mod merges;
 mod population;
 // #111: strip identity trailers and e-mails from the rater sheet.
 mod redact;
@@ -95,23 +97,22 @@ pub(crate) fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> EvalError + 
     }
 }
 
-/// Category names a config's rule engine knows (its taxonomy).
+/// Category names a config knows: its taxonomy plus every rule's category.
 ///
 /// Used by `tga eval score --config` as the valid-label vocabulary; the
-/// sample's own predicted categories are always added on top.
+/// sample's own predicted categories and the no-answer labels are always
+/// added on top. #111: a rules file's categories count even when the
+/// taxonomy does not declare them, so a scheme such as v2 is accepted from
+/// the rules file alone and no category list is hardcoded here.
 ///
 /// # Errors
 ///
 /// A rules file that fails to load or compile.
 pub fn config_categories(config: &crate::core::config::Config) -> Result<Vec<String>> {
-    let engine =
-        crate::classify::ClassificationPipeline::new(config.clone()).build_rule_engine()?;
-    Ok(engine
-        .taxonomy()
-        .all()
-        .iter()
-        .map(|d| d.name.clone())
-        .collect())
+    let pipeline = crate::classify::ClassificationPipeline::new(config.clone());
+    let engine = pipeline.build_rule_engine()?;
+    let taxonomy = engine.taxonomy().all().iter().map(|d| d.name.clone());
+    Ok(taxonomy.chain(pipeline.rule_categories()?).collect())
 }
 
 /// Open a tga database for the harness, refusing any handle that can write.

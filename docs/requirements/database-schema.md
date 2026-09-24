@@ -516,7 +516,7 @@ warehouses can join on them without re-running it. Migration
 | `bugfix_count` | INTEGER | no | Default 0 |
 | `ticketed_count` | INTEGER | no | Default 0 |
 | `commit_count` | INTEGER | no | Default 0 |
-| `formula_version` | TEXT | no | Default `'v1'` |
+| `formula_version` | TEXT | no | Default `'v1'`; tga writes `'v2'` since #111 (merges excluded from counts) and deletes older-formula rows on persist |
 | `computed_at` | INTEGER | no | Unix timestamp (seconds); default 0 |
 
 **PK**: (`author_email`, `iso_year`, `iso_week`, `repository`).
@@ -541,7 +541,7 @@ with a `PRAGMA table_info` check because SQLite has no `ADD COLUMN IF NOT EXISTS
 | `agentic_count` | INTEGER | no | Commits with `agentic_mode = 'full_agentic'`; default 0 |
 | `ide_assisted_count` | INTEGER | no | Commits with `agentic_mode = 'ide_assisted'`; default 0 |
 | `agentic_pct` | REAL | no | Default 0.0 |
-| `formula_version` | TEXT | no | Default `'v1'` |
+| `formula_version` | TEXT | no | Default `'v1'`; tga writes `'v2'` since #111 (merges excluded from `net_commits`) and deletes older-formula rows on persist |
 | `computed_at` | INTEGER | no | Unix timestamp (seconds); default 0 |
 
 **PK**: (`author_email`, `iso_year`, `iso_week`, `repository`).

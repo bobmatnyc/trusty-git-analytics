@@ -35,8 +35,37 @@ harness measures how often that category is right, as judged by people:
   labelled, corrected for chance, with that overlap reported as `n`. The two
   sheets may cover different rows.
 
-Labels `unclear` and `mixed` are counted and reported but left out of
-precision. A label is correct when it equals the predicted category,
+Labels `unclear`, `mixed` and `release_merge` are counted and reported per
+label but score as no answer, left out of precision (#111).
+
+A commit with 2+ parents is a merge, and it is excluded from metrics and
+from the eval. Squash and rebase commits (1 parent) are normal commits,
+classified by content. `tga eval sample` never draws a merge and writes
+`is_merge` on every row. `tga eval score` drops merge rows with their labels
+and reports how many; for a sample written before this rule, pass `--db`
+with a copy of the database so each row's merge flag is resolved by SHA. A
+row whose status cannot be resolved stops the score with an error.
+`tga eval subsample --db` applies the same rule: it drops merge rows before
+drawing, writes `is_merge: false` on every subset row, and refuses a row it
+cannot resolve.
+
+Stratum weights leave merges out too. An older `strata.json` counts merges
+in each stratum population, and the window cannot be re-stratified without
+re-running the rules, so the merge count is estimated from the sample: a
+stratum with `m` merge rows among its `n` sample rows loses
+`round(population · m / n)` from its population, and the window population
+and `merges_excluded` move by the same total. Weighted accuracy, the
+coverage curve and the abstention share all use the adjusted populations. A
+sample drawn after this change holds no merges, so nothing is adjusted.
+The estimate assumes merges are sampled in proportion, but the draw's
+per-repo and per-author caps under-sample integrators who make most merges.
+With `--db`, `report.md` therefore marks the populations "estimated" and
+prints the exact merge count in the window (`window_start`..`window_end`,
+every repository) beside the estimate; `report.json` carries both as
+`window_merges_estimated` and `window_merges_exact`. Strata are not
+recomputed, because they come from the rules in force at sampling time.
+
+A label is correct when it equals the predicted category,
 ignoring case; synonyms (`bug` vs `bugfix`) count as different, so raters
 should use the vocabulary `tga eval sample` prints.
 
@@ -101,8 +130,8 @@ sample goes to the others.
 
 2. **Label.** Give each rater a copy of `labels.csv`. It hides the predicted
    category and orders rows by a salted hash, so the stratum cannot be read
-   off the order. Raters fill `label` with one category name, `unclear` or
-   `mixed`, and may use `note`. A row left blank counts as unlabelled, not as
+   off the order. Raters fill `label` with one category name, `unclear`,
+   `mixed` or `release_merge`, and may use `note`. A row left blank counts as unlabelled, not as
    an error, so a sheet can be scored while it is only partly filled. Two
    raters give a kappa; disagreements can be settled in an adjudication file
    with the same columns.

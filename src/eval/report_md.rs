@@ -18,7 +18,7 @@ fn table(out: &mut String, title: &str, key: &str, rows: &[PrecisionRow]) {
     }
     let _ = writeln!(
         out,
-        "| {key} | n | correct | precision | 95% CI (Wilson) | unclear/mixed |"
+        "| {key} | n | correct | precision | 95% CI (Wilson) | no answer |"
     );
     out.push_str("|---|---:|---:|---:|---|---:|\n");
     for r in rows {
@@ -47,22 +47,46 @@ pub(crate) fn render(report: &ScoreReport, strata: &StrataSummary) -> String {
     out.push_str("> Contains commit-derived text. Store privately, outside any repository.\n\n");
     let _ = writeln!(
         out,
-        "Window {} → {} ({} weeks), population {}, seed {}, cap {}.\n",
+        "Window {} → {} ({} weeks), population {}{}, seed {}, cap {}.\n",
         strata.window_start,
         strata.window_end,
         strata.weeks,
         strata.population,
+        if report.window_merges_estimated > 0 {
+            " (estimated, merges removed)"
+        } else {
+            ""
+        },
         strata.seed,
         strata.cap
     );
+    // #111: populations adjusted by a merge-share estimate say so.
+    if report.window_merges_estimated > 0 {
+        let exact = report
+            .window_merges_exact
+            .map_or_else(|| "— (pass --db)".to_string(), |n| n.to_string());
+        let _ = writeln!(
+            out,
+            "Stratum populations are estimated: {} merge commits were removed by each \
+             stratum's merge share in the sample. Merges in the window, exact from the \
+             database: {exact}.\n",
+            report.window_merges_estimated
+        );
+    } else if let Some(n) = report.window_merges_exact {
+        let _ = writeln!(out, "Merges in the window, exact from the database: {n}.\n");
+    }
+    // #111: no-answer counts per label, so release_merge shows on its own.
     let _ = writeln!(
         out,
-        "Sample {} · labelled {} · scored {} · unclear {} · mixed {} · unresolved disagreements {}\n",
+        "Sample {} · merges excluded {} · labelled {} · scored {} · unclear {} · mixed {} · \
+         release_merge {} · unresolved disagreements {}\n",
         report.sample_size,
+        report.merges_excluded,
         report.labelled,
         report.scored,
         report.unclear,
         report.mixed,
+        report.release_merge,
         report.unresolved_disagreements
     );
 
@@ -71,6 +95,11 @@ pub(crate) fn render(report: &ScoreReport, strata: &StrataSummary) -> String {
         out,
         "- Precision and coverage use the labels in `{}` (the first --labels file)",
         report.scored_rater
+    );
+    let _ = writeln!(
+        out,
+        "- {} rows excluded as merges (2+ parents), with their labels",
+        report.merges_excluded
     );
     match &report.weighted_accuracy {
         Some(w) => {

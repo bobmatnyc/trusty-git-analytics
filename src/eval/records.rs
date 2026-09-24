@@ -141,6 +141,11 @@ pub struct SampleRecord {
     pub confidence: f64,
     /// Stratum population ÷ stratum sample size.
     pub weight: f64,
+    /// #111: the commit has 2+ parents. `tga eval sample` writes `false` on
+    /// every row, since merges never enter the eval; `None` marks a sample
+    /// written before the merge rule, which `tga eval score --db` resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_merge: Option<bool>,
 }
 
 /// Population and sample counts of one stratum.
@@ -167,11 +172,16 @@ pub struct StrataSummary {
     pub requested_size: u64,
     /// Per-repo and per-author cap within a stratum.
     pub cap: u64,
-    /// Commits in the window.
+    /// Commits in the window, merges excluded.
     pub population: u64,
+    /// #111: merge commits (2+ parents) in the window, left out of
+    /// `population` and of the draw. 0 in a file written before the rule.
+    #[serde(default)]
+    pub merges_excluded: u64,
     /// Per-stratum counts, keyed by stratum label.
     pub strata: BTreeMap<String, StratumCounts>,
-    /// Valid rater labels other than `unclear` and `mixed`.
+    /// Valid rater labels other than the no-answer labels (`unclear`,
+    /// `mixed`, `release_merge`).
     pub categories: Vec<String>,
     /// Set when this file describes a `tga eval subsample` subset; `sampled`
     /// then counts the subset's rows.

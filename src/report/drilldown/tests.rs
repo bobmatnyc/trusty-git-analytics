@@ -283,3 +283,25 @@ fn format_json_parses() {
         "p95 should be null when None"
     );
 }
+
+/// Why: #111 — merges (2+ parents) are excluded from per-author metrics.
+/// What: two commits for Alice, one flagged `is_merge`; the commit summary
+/// and effort histogram count one.
+/// Test: this test itself.
+#[test]
+fn commit_summary_excludes_merges() {
+    let db = Database::open_in_memory().expect("open");
+    let aid = seed_author(&db, "Alice", "alice@example.com", "[]");
+    seed_commit(&db, "keep", aid, "2024-01-01T00:00:00Z", 1);
+    seed_commit(&db, "merge", aid, "2024-01-02T00:00:00Z", 1);
+    db.connection()
+        .execute("UPDATE commits SET is_merge = 1 WHERE sha = 'merge'", [])
+        .expect("flag merge");
+    seed_effort(&db, "merge", "S");
+
+    let s = query_commit_summary(&db, "alice@example.com", None, None).expect("query");
+    assert_eq!((s.total_commits, s.ticketed_commits), (1, 1));
+    assert_eq!((s.insertions, s.deletions), (10, 5));
+    let h = query_effort_histogram(&db, "alice@example.com", None, None).expect("query");
+    assert_eq!((h.total_commits, h.scored_commits), (1, 0));
+}

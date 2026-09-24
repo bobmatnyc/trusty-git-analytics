@@ -246,3 +246,25 @@ fn weeks_in_range_produces_correct_mondays() {
         assert_eq!(w.weekday(), chrono::Weekday::Mon, "{w} must be a Monday");
     }
 }
+
+/// Why: #111 — merges (2+ parents) are excluded from per-author metrics.
+/// What: two classified commits in one window, one flagged `is_merge`; the
+/// period counts one commit and one category.
+/// Test: this test itself.
+#[test]
+fn period_trends_exclude_merges() {
+    let db = Database::open_in_memory().expect("open");
+    let aid = seed_author(&db, "Alice", "alice@example.com");
+    seed_commit(&db, "keep", aid, "2024-01-01T00:00:00Z", 0, Some("feature"));
+    seed_commit(&db, "merge", aid, "2024-01-02T00:00:00Z", 0, Some("merge"));
+    db.connection()
+        .execute("UPDATE commits SET is_merge = 1 WHERE sha = 'merge'", [])
+        .expect("flag merge");
+
+    let trends =
+        query_author_period_trends(&db, "alice@example.com", 4, None, None).expect("query");
+    assert_eq!(trends.len(), 1);
+    assert_eq!(trends[0].commit_count, 1);
+    assert_eq!(trends[0].categories.get("feature").copied(), Some(1));
+    assert_eq!(trends[0].categories.get("merge"), None);
+}

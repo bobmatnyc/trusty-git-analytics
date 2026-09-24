@@ -10,7 +10,7 @@
 //! Test: `report::tests::persist_weekly_quality_upserts_rows_and_is_idempotent` and
 //! `report::tests::persist_weekly_engineer_upserts_rows`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tracing::warn;
 
@@ -46,6 +46,94 @@ fn name_to_email_map(data: &ReportData) -> HashMap<String, String> {
         .collect()
 }
 
+/// `fact_weekly_engineer.formula_version` written by this build (#111: `v2` excludes merges).
+pub const ENGINEER_FORMULA_VERSION: &str = "v2";
+
+/// Which rows a persist run is allowed to prune (#111).
+///
+/// The caller states it; it is never inferred from the data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistScope {
+    /// Every commit was aggregated: rows of an older formula are removed for
+    /// every author, and each written author's rows the run did not produce.
+    Full,
+    /// An `--author`-scoped report: only the authors the run wrote are
+    /// pruned; every other author's rows, of any formula, are kept.
+    Authors,
+}
+
+/// Grain key shared by both weekly fact tables:
+/// `(author_email, iso_year, iso_week, repository)`.
+type GrainKey = (String, i64, i64, String);
+
+/// Remove rows a persist run did not produce, so no stale row survives it.
+///
+/// Why: #111 changed both weekly formulas (merges left the counts), and
+/// `INSERT OR REPLACE` only rewrites the grain keys a run produces. A week
+/// whose only commits were merges produces no row, so its old
+/// merge-inclusive row would otherwise stay forever.
+/// What: on a [`PersistScope::Full`] run, deletes every row whose
+/// `formula_version` is not `version`. On any run, then deletes, for each
+/// author the run wrote, every row whose grain key the run did not produce;
+/// the aggregator reads each written author's whole history, so those rows
+/// are stale. An [`PersistScope::Authors`] run touches no other author.
+/// Test: `report::tests::persist_weekly_engineer_drops_stale_merge_only_rows`,
+/// `report::tests::persist_weekly_quality_drops_stale_merge_only_rows`,
+/// `report::tests::scoped_persist_keeps_other_authors_old_rows`.
+fn prune_stale(
+    db: &Database,
+    table: &'static str,
+    version: &str,
+    written: &HashSet<GrainKey>,
+    scope: PersistScope,
+) -> Result<usize> {
+    let conn = db.connection();
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(crate::core::TgaError::from)?;
+    let mut removed = 0;
+    if scope == PersistScope::Full {
+        removed += tx
+            .execute(
+                &format!("DELETE FROM {table} WHERE formula_version != ?1"),
+                [version],
+            )
+            .map_err(crate::core::TgaError::from)?;
+    }
+    let authors: HashSet<&str> = written.iter().map(|k| k.0.as_str()).collect();
+    let stale: Vec<GrainKey> = {
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT author_email, iso_year, iso_week, repository FROM {table}"
+            ))
+            .map_err(crate::core::TgaError::from)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(crate::core::TgaError::from)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let key: GrainKey = row.map_err(crate::core::TgaError::from)?;
+            if authors.contains(key.0.as_str()) && !written.contains(&key) {
+                out.push(key);
+            }
+        }
+        out
+    };
+    for (email, year, week, repo) in &stale {
+        removed += tx
+            .execute(
+                &format!(
+                    "DELETE FROM {table} WHERE author_email = ?1 AND iso_year = ?2 \
+                     AND iso_week = ?3 AND repository = ?4"
+                ),
+                rusqlite::params![email, year, week, repo],
+            )
+            .map_err(crate::core::TgaError::from)?;
+    }
+    tx.commit().map_err(crate::core::TgaError::from)?;
+    Ok(removed)
+}
+
 /// Unix-epoch seconds for "now", used as `computed_at` in fact rows.
 fn computed_at_secs() -> i64 {
     std::time::SystemTime::now()
@@ -61,7 +149,9 @@ fn computed_at_secs() -> i64 {
 /// This is called immediately after aggregation so stored values always
 /// reflect the corrected ticketed logic from migration v17.
 /// What: UPSERTs one row per [`crate::report::models::WeeklyActivity`] into
-/// `fact_weekly_quality`, batching in chunks of 500. Rows whose ISO week label
+/// `fact_weekly_quality`, batching in chunks of 500, then removes rows the run
+/// did not produce and rows of an older formula ([`prune_stale`]); #111
+/// excludes merges from `commit_count` (formula `v2`). Rows whose ISO week label
 /// cannot be parsed are skipped with a warning. Rows whose author display name
 /// cannot be resolved to a canonical email are also skipped with a `warn!` — the
 /// same policy as [`persist_weekly_engineer`]. This ensures both fact tables
@@ -70,12 +160,17 @@ fn computed_at_secs() -> i64 {
 /// name into the email-keyed column: doing so would produce rows that can never
 /// join with other tables and would silently corrupt aggregate queries.
 /// To fix unmapped identities run `tga aliases list` and add the missing mapping.
-/// Test: `report::tests::persist_weekly_quality_upserts_rows_and_is_idempotent`.
+/// Test: `report::tests::persist_weekly_quality_upserts_rows_and_is_idempotent`,
+/// `report::tests::persist_weekly_quality_drops_stale_merge_only_rows`.
 ///
 /// # Errors
 ///
 /// Returns [`ReportError::Core`](crate::report::ReportError::Core)(crate::report::ReportError::Core) if any SQLite operation fails.
-pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize> {
+pub fn persist_weekly_quality(
+    db: &Database,
+    data: &ReportData,
+    scope: PersistScope,
+) -> Result<usize> {
     if data.weekly_activity.is_empty() {
         return Ok(0);
     }
@@ -116,6 +211,7 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
             .collect();
 
     let mut written = 0usize;
+    let mut keys: HashSet<GrainKey> = HashSet::new();
     for chunk in rows.chunks(500) {
         let conn = db.connection();
         let tx = conn
@@ -170,11 +266,20 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
                     ca,
                 ])
                 .map_err(crate::core::TgaError::from)?;
+                keys.insert((author_email, *iso_year, *iso_week, repo.clone()));
                 written += 1;
             }
         }
         tx.commit().map_err(crate::core::TgaError::from)?;
     }
+    // #111: merges left the counts; drop rows this run did not rewrite.
+    prune_stale(
+        db,
+        "fact_weekly_quality",
+        QUALITY_FORMULA_VERSION,
+        &keys,
+        scope,
+    )?;
     Ok(written)
 }
 
@@ -184,13 +289,15 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
 /// ISO week without re-running the aggregator (issue #1113). Mirrors the
 /// `fact_weekly_quality` pattern from issue #445 batch B.
 /// What: UPSERTs one row per [`crate::report::models::WeeklyActivity`] into
-/// `fact_weekly_engineer`. `net_commits` = `commit_count - revert_count`;
-/// merge commits are **included** in the denominator (only reverts are
-/// subtracted), per the #1113 spec. `agentic_pct` = `agentic_count / net *
+/// `fact_weekly_engineer`. `net_commits` = `commit_count - revert_count`
+/// over non-merge commits: #111 excludes merges (2+ parents) from metrics, so
+/// they are in neither count (formula `v2`; `v1` counted them). `agentic_pct` = `agentic_count / net *
 /// 100` (full-agentic only — excludes `ide_assisted_count`). Rows with
 /// unresolvable author emails are skipped with a `warn!` to preserve
-/// grain-key integrity.
+/// grain-key integrity. Rows the run does not produce, and every row of an
+/// older formula, are then removed ([`prune_stale`]).
 /// Test: `report::tests::persist_weekly_engineer_upserts_rows`,
+/// `report::tests::persist_weekly_engineer_drops_stale_merge_only_rows`,
 /// `report::tests::agentic_pct_keeps_unknown_in_the_denominator`.
 ///
 /// # How `agentic_pct` treats `AgenticMode::Unknown` (#5250)
@@ -212,7 +319,11 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
 /// # Errors
 ///
 /// Returns [`ReportError::Core`](crate::report::ReportError::Core)(crate::report::ReportError::Core) if any SQLite operation fails.
-pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize> {
+pub fn persist_weekly_engineer(
+    db: &Database,
+    data: &ReportData,
+    scope: PersistScope,
+) -> Result<usize> {
     if data.weekly_activity.is_empty() {
         return Ok(0);
     }
@@ -225,12 +336,10 @@ pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize
         .filter_map(|wa| {
             let (iso_year, iso_week) = parse_week_label_to_parts(&wa.week)?;
             // net_commits = commit_count - revert_count, i.e.
-            // `wa.commit_count_net` (issue #660). Merge commits are
-            // intentionally INCLUDED in this denominator (per #1113 spec) —
-            // only reverts are subtracted. Future specs that wish to also
-            // exclude merge commits must update both the `commit_count_net`
-            // materialisation formula and the column description in the DB
-            // schema docs.
+            // `wa.commit_count_net` (issue #660).
+            // #111: merge commits (2+ parents) are excluded from metrics, so
+            // the aggregator never counts them here; this is formula `v2`
+            // (`v1`, per #1113, included them).
             let net = wa.commit_count_net as i64;
             // agentic_pct = agentic_count / net * 100 — intentionally
             // EXCLUDES ide_assisted_count (full-agentic only, per #1113 spec).
@@ -257,6 +366,7 @@ pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize
         .collect();
 
     let mut written = 0usize;
+    let mut keys: HashSet<GrainKey> = HashSet::new();
     for chunk in rows.chunks(500) {
         let conn = db.connection();
         let tx = conn
@@ -300,14 +410,23 @@ pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize
                     ac,
                     ic,
                     pct,
-                    "v1",
+                    ENGINEER_FORMULA_VERSION,
                     ca,
                 ])
                 .map_err(crate::core::TgaError::from)?;
+                keys.insert((author_email, *iso_year, *iso_week, repo.clone()));
                 written += 1;
             }
         }
         tx.commit().map_err(crate::core::TgaError::from)?;
     }
+    // #111: merges left `net_commits`; drop rows this run did not rewrite.
+    prune_stale(
+        db,
+        "fact_weekly_engineer",
+        ENGINEER_FORMULA_VERSION,
+        &keys,
+        scope,
+    )?;
     Ok(written)
 }

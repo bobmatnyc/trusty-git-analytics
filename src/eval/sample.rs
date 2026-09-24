@@ -105,8 +105,10 @@ fn excerpt(s: &str, max: usize) -> String {
 /// copy draws the same sample), re-classifies them with
 /// [`ClassificationPipeline::build_rule_engine`] and the traced batch API,
 /// takes manual / external / LLM / repo-fallback verdicts from the stored
-/// `method`, stratifies, and draws with [`draw`].
-/// Test: `tests/eval_harness.rs::sample_then_score_end_to_end`.
+/// `method`, stratifies, and draws with [`draw`]. Merge commits (2+ parents)
+/// in the window are counted in `merges_excluded` and never drawn (#111).
+/// Test: `tests/eval_harness.rs::sample_then_score_end_to_end`,
+/// `tests/eval_harness.rs::sample_never_draws_a_merge`.
 ///
 /// # Errors
 ///
@@ -127,11 +129,15 @@ pub fn run_sample(params: &SampleParams) -> Result<SampleSummary> {
         .max()
         .ok_or_else(|| EvalError::Invalid("the database holds no commits".into()))?;
     let start = end - Duration::weeks(i64::from(params.weeks));
-    let window: Vec<CommitRow> = all
+    let mut window: Vec<CommitRow> = all
         .into_iter()
         .filter(|c| c.ts.is_some_and(|t| t >= start))
         .collect();
-    info!(commits = window.len(), %start, %end, "eval window");
+    // #111: a commit with 2+ parents is a merge and never enters the eval.
+    // Squash and rebase commits have one parent and stay in.
+    let merges_excluded = window.iter().filter(|c| c.is_merge).count() as u64;
+    window.retain(|c| !c.is_merge);
+    info!(commits = window.len(), merges_excluded, %start, %end, "eval window");
 
     let engine = ClassificationPipeline::new(params.config.clone()).build_rule_engine()?;
     let pairs: Vec<(&str, bool)> = window
@@ -239,6 +245,7 @@ pub fn run_sample(params: &SampleParams) -> Result<SampleSummary> {
                 predicted_category: r.category.clone(),
                 confidence: r.confidence,
                 weight: pop / n,
+                is_merge: Some(c.is_merge),
             }
         })
         .collect();
@@ -248,8 +255,9 @@ pub fn run_sample(params: &SampleParams) -> Result<SampleSummary> {
     for name in names.chain(resolved.iter().map(|r| r.category.clone())) {
         categories.entry(name.to_lowercase()).or_insert(name);
     }
-    categories.remove("unclear");
-    categories.remove("mixed");
+    for label in super::score::NO_ANSWER_LABELS {
+        categories.remove(label);
+    }
 
     let strata = StrataSummary {
         seed: params.seed,
@@ -259,6 +267,7 @@ pub fn run_sample(params: &SampleParams) -> Result<SampleSummary> {
         requested_size: params.size as u64,
         cap: params.cap as u64,
         population: window.len() as u64,
+        merges_excluded,
         strata: Stratum::ALL
             .iter()
             .map(|s| {

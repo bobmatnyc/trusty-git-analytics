@@ -15,6 +15,14 @@ use super::{io_err, EvalError, Result};
 pub const UNCLEAR: &str = "unclear";
 /// Label meaning the commit spans several categories.
 pub const MIXED: &str = "mixed";
+/// Label for a release or merge commit (#111, scheme v2).
+pub const RELEASE_MERGE: &str = "release_merge";
+/// #111: labels counted but scored as no answer, never as right or wrong.
+pub const NO_ANSWER_LABELS: [&str; 3] = [UNCLEAR, MIXED, RELEASE_MERGE];
+
+fn is_no_answer(label: &str) -> bool {
+    NO_ANSWER_LABELS.contains(&label)
+}
 
 /// Inputs to [`run_score`].
 #[derive(Debug, Clone)]
@@ -29,6 +37,9 @@ pub struct ScoreParams {
     pub adjudicated: Option<PathBuf>,
     /// Valid categories from a config; `None` uses those in `strata.json`.
     pub categories: Option<Vec<String>>,
+    /// #111: tga database copy used to resolve the merge flag of sample rows
+    /// that lack one; opened read-only.
+    pub db: Option<PathBuf>,
     /// Output directory for `report.md` and `report.json`.
     pub out: PathBuf,
 }
@@ -38,7 +49,7 @@ pub struct ScoreParams {
 pub struct PrecisionRow {
     /// Group key.
     pub key: String,
-    /// Labelled commits scored (unclear/mixed excluded).
+    /// Labelled commits scored (no-answer labels excluded).
     pub n: u64,
     /// Of those, labelled with the predicted category.
     pub correct: u64,
@@ -48,7 +59,7 @@ pub struct PrecisionRow {
     pub ci_low: Option<f64>,
     /// Wilson 95% upper bound.
     pub ci_high: Option<f64>,
-    /// Labels of `unclear` or `mixed` in this group.
+    /// No-answer labels (`unclear`, `mixed`, `release_merge`) in this group.
     pub excluded: u64,
 }
 
@@ -98,8 +109,12 @@ pub struct ScoreReport {
     /// adjudication) are scored; a second rater only feeds `kappa`.
     #[serde(default)]
     pub scored_rater: String,
-    /// Sampled commits.
+    /// Rows in `sample.jsonl`, merges included.
     pub sample_size: u64,
+    /// #111: sample rows excluded as merge commits (2+ parents), with every
+    /// label given to them.
+    #[serde(default)]
+    pub merges_excluded: u64,
     /// Commits with a final label: the scored rater's labelled rows.
     pub labelled: u64,
     /// Commits scored for precision.
@@ -108,6 +123,17 @@ pub struct ScoreReport {
     pub unclear: u64,
     /// Final label `mixed`.
     pub mixed: u64,
+    /// #111: final label `release_merge`, scored as no answer.
+    #[serde(default)]
+    pub release_merge: u64,
+    /// #111: merges estimated out of the stratum populations from each
+    /// stratum's merge share in the sample; 0 when the sample has none.
+    #[serde(default)]
+    pub window_merges_estimated: u64,
+    /// #111: merges in the sampling window counted exactly from `--db`;
+    /// `None` without a database.
+    #[serde(default)]
+    pub window_merges_exact: Option<u64>,
     /// Two raters disagreed and no adjudication resolved it; the scored
     /// rater's label is still the one scored.
     pub unresolved_disagreements: u64,
@@ -151,7 +177,7 @@ fn read_labels(path: &Path, valid: &BTreeSet<String>) -> Result<BTreeMap<String,
         }
         if !valid.contains(&label) {
             return Err(EvalError::Invalid(format!(
-                "{}: label {label:?} for {} is not a known category, `unclear` or `mixed`",
+                "{}: label {label:?} for {} is not a known category, `unclear`, `mixed` or `release_merge`",
                 path.display(),
                 row.sha
             )));
@@ -219,25 +245,33 @@ fn precision_rows<'a>(
 /// set, and each row's final label is the adjudicated one, else that rater's.
 /// A second file only feeds Cohen's kappa over the SHAs both labelled, and
 /// the SHA sets may differ; an unadjudicated disagreement is counted but
-/// does not drop the row. `unclear` and `mixed` are counted but excluded
-/// from precision. Precision rows use Wilson 95% intervals; the weighted
-/// accuracy is Σ W_h · p_h with W_h from the `strata.json` populations, and
+/// does not drop the row. `unclear`, `mixed` and `release_merge` are counted
+/// but score as no answer (#111). Merge rows (2+ parents) and their labels are
+/// dropped before scoring; a row without a merge flag is resolved by SHA in
+/// `db`, and one that cannot be resolved is an error (#111). Precision rows
+/// use Wilson 95% intervals; the weighted accuracy is Σ W_h · p_h with W_h
+/// from the `strata.json` populations less each stratum's merge share
+/// (see [`super::merges::scale_out_merges`]), and
 /// the coverage curve weights each labelled row by its stratum population ÷
 /// labelled rows in that stratum, never by the sample's stored `weight`.
 /// Test: `tests/eval_harness.rs::score_computes_expected_metrics`,
 /// `tests/eval_harness.rs::score_weights_by_labelled_rows`,
-/// `tests/eval_harness.rs::score_pairs_a_subset_rater_with_a_full_rater`.
+/// `tests/eval_harness.rs::score_pairs_a_subset_rater_with_a_full_rater`,
+/// `tests/eval_harness.rs::score_counts_release_merge_as_no_answer`,
+/// `tests/eval_harness.rs::score_excludes_merges_resolved_from_the_db`.
 ///
 /// # Errors
 ///
 /// I/O and parse failures; [`EvalError::Invalid`] for an unknown label, a
 /// label for a SHA outside the sample, an adjudicated SHA the scored rater
-/// left blank, or more than two rater files.
+/// left blank, more than two rater files, or a row whose merge status is
+/// unknown.
 pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
     if params.labels.is_empty() || params.labels.len() > 2 {
         return Err(EvalError::Invalid("pass one or two --labels files".into()));
     }
     let sample = read_sample(&params.sample)?;
+    let merge_flags = super::merges::resolve_merges(&sample, params.db.as_deref())?;
     let strata_path = params.strata.clone().unwrap_or_else(|| {
         params
             .sample
@@ -245,7 +279,15 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
             .unwrap_or(Path::new("."))
             .join("strata.json")
     });
-    let strata = read_strata(&strata_path)?;
+    let mut strata = read_strata(&strata_path)?;
+    // #111: stratum weights must not count merges either.
+    let window_merges_estimated =
+        super::merges::scale_out_merges(&mut strata, &sample, &merge_flags);
+    let window_merges_exact = params
+        .db
+        .as_deref()
+        .map(|db| super::merges::count_window_merges(db, &strata))
+        .transpose()?;
 
     let mut valid: BTreeSet<String> = params
         .categories
@@ -255,15 +297,14 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
         .chain(sample.iter().map(|r| r.predicted_category.clone()))
         .map(|c| c.to_lowercase())
         .collect();
-    valid.insert(UNCLEAR.into());
-    valid.insert(MIXED.into());
+    valid.extend(NO_ANSWER_LABELS.map(String::from));
 
-    let raters: Vec<BTreeMap<String, String>> = params
+    let mut raters: Vec<BTreeMap<String, String>> = params
         .labels
         .iter()
         .map(|p| read_labels(p, &valid))
         .collect::<Result<_>>()?;
-    let adjudicated = match &params.adjudicated {
+    let mut adjudicated = match &params.adjudicated {
         Some(p) => read_labels(p, &valid)?,
         None => BTreeMap::new(),
     };
@@ -275,6 +316,24 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
                  every rater's rows (for a subsample, the source sample.jsonl)"
             )));
         }
+    }
+    // #111: a merge (2+ parents) is excluded from the eval, with its labels.
+    let sample_size = sample.len() as u64;
+    let merge_shas: BTreeSet<String> = sample
+        .iter()
+        .zip(&merge_flags)
+        .filter(|&(_, &m)| m)
+        .map(|(r, _)| r.sha.clone())
+        .collect();
+    let merges_excluded = merge_flags.iter().filter(|&&m| m).count() as u64;
+    let sample: Vec<SampleRecord> = sample
+        .into_iter()
+        .zip(&merge_flags)
+        .filter(|&(_, &m)| !m)
+        .map(|(r, _)| r)
+        .collect();
+    for labels in raters.iter_mut().chain(std::iter::once(&mut adjudicated)) {
+        labels.retain(|sha, _| !merge_shas.contains(sha));
     }
     // #111: adjudication settles the scored rater's rows; it cannot add rows.
     if let Some(sha) = adjudicated.keys().find(|s| !raters[0].contains_key(*s)) {
@@ -315,13 +374,14 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
             .count() as u64
     });
 
-    // outcome: Some(Some(correct)) scored, Some(None) unclear/mixed, None unlabelled.
+    // outcome: Some(Some(correct)) scored, Some(None) no answer, None unlabelled.
     let outcomes: Vec<Option<Option<bool>>> = sample
         .iter()
         .zip(&finals)
         .map(|(r, l)| {
             l.as_ref().map(|l| {
-                (l != UNCLEAR && l != MIXED).then(|| l.eq_ignore_ascii_case(&r.predicted_category))
+                // #111: release_merge scores as no answer, like unclear and mixed.
+                (!is_no_answer(l)).then(|| l.eq_ignore_ascii_case(&r.predicted_category))
             })
         })
         .collect();
@@ -369,7 +429,8 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
         scored_rater: params.labels[0]
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-        sample_size: sample.len() as u64,
+        sample_size,
+        merges_excluded,
         labelled: finals.iter().flatten().count() as u64,
         scored: outcomes
             .iter()
@@ -377,6 +438,9 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
             .count() as u64,
         unclear: count(&|l| l == UNCLEAR),
         mixed: count(&|l| l == MIXED),
+        release_merge: count(&|l| l == RELEASE_MERGE),
+        window_merges_estimated,
+        window_merges_exact,
         unresolved_disagreements: unresolved,
         per_rule,
         per_method,
@@ -438,7 +502,7 @@ struct WeightedRow {
     confidence: f64,
     /// Stratum population ÷ labelled rows in the stratum.
     weight: f64,
-    /// `Some(correct)` when scored, `None` for `unclear` / `mixed`.
+    /// `Some(correct)` when scored, `None` for a no-answer label.
     outcome: Option<bool>,
 }
 

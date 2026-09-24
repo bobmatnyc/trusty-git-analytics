@@ -4,6 +4,12 @@
 //! against `classifications`) and groups the results in-memory. For the
 //! data sizes typical of `trusty-git-analytics` this is simpler and
 //! faster than emitting multiple grouped SQL queries.
+//!
+//! Merge rule (#111): a commit with 2+ parents is a merge, and it is excluded
+//! from metrics and from the eval. Squash and rebase commits (1 parent) are
+//! normal commits, classified by content. Merges stay in the database; the
+//! only use made of them here is as a deploy's `git_sha` target when the DORA
+//! lead time looks up that commit's time.
 
 use std::collections::HashMap;
 
@@ -17,6 +23,7 @@ use crate::core::config::Config;
 use crate::core::db::Database;
 use crate::report::errors::{ReportError, Result};
 use crate::report::models::{ActivityWeights, ReportData, VelocitySummary};
+use crate::report::persist::PersistScope;
 
 /// Helper that walks the database and assembles [`ReportData`].
 ///
@@ -56,6 +63,8 @@ pub(super) struct CommitRow {
     /// claimed, and for any row written before migration v29 that has not yet
     /// been re-classified.
     pub(super) ai_detection_method: Option<MarkerScope>,
+    /// #111: the commit has 2+ parents (`commits.is_merge`).
+    pub(super) is_merge: bool,
 }
 
 /// Minimal PR row used by velocity / DORA computations and (issue #377)
@@ -259,7 +268,13 @@ impl Aggregator {
         // re-running the aggregator. Non-fatal: a persistence failure is
         // logged but does not abort report generation (the in-memory data is
         // still complete and formatters will still write their files).
-        match Self::persist_weekly_quality(db, &data) {
+        // #111: only a full run may prune other authors' older-formula rows.
+        let scope = if canonical_email.is_none() {
+            PersistScope::Full
+        } else {
+            PersistScope::Authors
+        };
+        match Self::persist_weekly_quality(db, &data, scope) {
             Ok(n) => {
                 tracing::debug!(
                     rows = n,
@@ -277,7 +292,7 @@ impl Aggregator {
 
         // Issue #1113: persist per-engineer-per-week agentic counts to
         // `fact_weekly_engineer`. Same non-fatal pattern as quality above.
-        match Self::persist_weekly_engineer(db, &data) {
+        match Self::persist_weekly_engineer(db, &data, scope) {
             Ok(n) => {
                 tracing::debug!(
                     rows = n,
@@ -308,11 +323,13 @@ impl Aggregator {
     /// signal. This is distinct from `unresolved_authors` (configured-alias
     /// membership): an `author_id IS NULL` commit means identity resolution
     /// never ran for it, so it is silently treated as its own developer.
+    /// #111: merges (2+ parents) are excluded, like every other commit count.
+    /// Test: `report::tests::aggregator_excludes_merge_commits_from_metrics`.
     fn count_unresolved_author_commits(db: &Database) -> Result<usize> {
         let conn = db.connection();
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM commits WHERE author_id IS NULL",
+                "SELECT COUNT(*) FROM commits WHERE author_id IS NULL AND is_merge = 0",
                 [],
                 |r| r.get(0),
             )
@@ -484,7 +501,7 @@ impl Aggregator {
                         c.insertions, c.deletions, c.files_changed, cl.category, \
                         c.message, c.ticketed, c.is_ai_assisted, cl.complexity, \
                         COALESCE(c.agentic_mode, 'none') AS agentic_mode, \
-                        c.ai_detection_method \
+                        c.ai_detection_method, c.is_merge \
                  FROM commits c \
                  LEFT JOIN authors a ON a.id = c.author_id \
                  LEFT JOIN classifications cl ON cl.id = c.classification_id";
@@ -518,6 +535,7 @@ impl Aggregator {
                 .get::<_, Option<String>>(14)
                 .unwrap_or(None)
                 .and_then(|s| s.parse::<MarkerScope>().ok());
+            let is_merge: i64 = row.get(15)?;
             Ok(CommitRow {
                 sha: row.get(0)?,
                 author_name: row.get(1)?,
@@ -534,6 +552,7 @@ impl Aggregator {
                 complexity,
                 agentic_mode,
                 ai_detection_method,
+                is_merge: is_merge != 0,
             })
         };
 
@@ -572,13 +591,13 @@ impl Aggregator {
     /// Why: keeping the row→report transformation pure (no I/O) makes it
     /// trivial to unit-test against fixture data and to decompose into
     /// named phases.
-    /// What: orchestrates the pipeline — pre-pass row flagging,
+    /// What: drops merge commits (#111), then orchestrates the pipeline —
+    /// pre-pass row flagging,
     /// single-pass accumulation, materialisation of each output slice,
     /// and computation of derived metrics (velocity / DORA / quality /
     /// developer activity).
-    /// Test: indirectly via `Aggregator::build` tests; behaviour is a
-    /// pure refactor — every output field is produced by a named helper
-    /// below.
+    /// Test: indirectly via `Aggregator::build` tests; merge exclusion by
+    /// `report::tests::aggregator_excludes_merge_commits_from_metrics`.
     fn aggregate(
         rows: Vec<CommitRow>,
         prs: Vec<PrRow>,
@@ -588,6 +607,10 @@ impl Aggregator {
         let generated_at = Utc::now().to_rfc3339();
         let mut data = ReportData::empty(generated_at);
 
+        // #111: a merge (2+ parents) is excluded from every metric below;
+        // squash and rebase commits (1 parent) stay in.
+        let (merge_rows, rows): (Vec<CommitRow>, Vec<CommitRow>) =
+            rows.into_iter().partition(|r| r.is_merge);
         if rows.is_empty() {
             return data;
         }
@@ -639,6 +662,7 @@ impl Aggregator {
 
         let dora = Some(compute_dora(DoraInputs {
             rows: &rows,
+            merge_rows: &merge_rows,
             flags: &row_flags,
             category_total: &acc.category_total,
             prs: &prs,
@@ -708,8 +732,12 @@ impl Aggregator {
     /// within the 500-line cap.
     /// What: delegates to [`crate::report::persist::persist_weekly_quality`].
     /// Test: `report::tests::persist_weekly_quality_upserts_rows_and_is_idempotent`.
-    pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize> {
-        crate::report::persist::persist_weekly_quality(db, data)
+    pub fn persist_weekly_quality(
+        db: &Database,
+        data: &ReportData,
+        scope: PersistScope,
+    ) -> Result<usize> {
+        crate::report::persist::persist_weekly_quality(db, data, scope)
     }
 
     /// Persist per-engineer-per-week agentic counts to `fact_weekly_engineer`.
@@ -719,8 +747,12 @@ impl Aggregator {
     /// within the 500-line cap.
     /// What: delegates to [`crate::report::persist::persist_weekly_engineer`].
     /// Test: `report::tests::persist_weekly_engineer_upserts_rows`.
-    pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize> {
-        crate::report::persist::persist_weekly_engineer(db, data)
+    pub fn persist_weekly_engineer(
+        db: &Database,
+        data: &ReportData,
+        scope: PersistScope,
+    ) -> Result<usize> {
+        crate::report::persist::persist_weekly_engineer(db, data, scope)
     }
 }
 

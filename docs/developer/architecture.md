@@ -165,6 +165,18 @@ Integration tests link against the library (no dependency on the binary) and can
                    ./reports/
 ```
 
+### Merge commits
+
+**Merge rule (#111):** a commit with 2+ parents is a merge, and it is excluded from metrics and from the eval. Squash and rebase commits (1 parent) are normal commits, classified by content.
+
+Stage 1 records `commits.is_merge` (`parent_count() > 1`) and keeps every merge
+in the database. Stage 3 drops merges before it counts anything
+(`src/report/aggregator/mod.rs`, the per-author drill-down and period-trend
+queries, and the authorship query); DORA lead time still looks up a merge's
+timestamp when a deploy's `git_sha` names it. `tga eval sample` never draws a
+merge, and `tga eval score` excludes merge rows, resolving rows without a
+merge flag from `--db` and refusing rows it cannot resolve.
+
 ---
 
 ## Database Design Rationale

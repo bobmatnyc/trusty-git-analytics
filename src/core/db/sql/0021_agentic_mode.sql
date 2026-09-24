@@ -44,7 +44,8 @@ CREATE INDEX IF NOT EXISTS idx_commits_agentic_mode ON commits(agentic_mode);
 --   by cto-reports for agentic %).
 -- agentic_pct: agentic_count / net_commits * 100, or 0.0 when net_commits = 0.
 --   Stored as REAL so downstream tools can filter on it directly.
--- formula_version: bump when the agentic_pct formula changes; currently 'v1'.
+-- formula_version: bump when the agentic_pct formula changes. tga writes 'v2'
+--   since #111 (merges excluded from net_commits); the column default stays 'v1'.
 -- computed_at: Unix timestamp (seconds) of last aggregation run.
 CREATE TABLE IF NOT EXISTS fact_weekly_engineer (
     author_email        TEXT    NOT NULL,

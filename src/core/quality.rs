@@ -51,9 +51,10 @@
 ///
 /// Why: lets downstream consumers distinguish scores computed with different
 /// coefficient sets / orientations when the formula evolves.
-/// What: static `"v1"` for the current coefficient set and orientation.
+/// What: static `"v2"`: the v1 coefficients and orientation over non-merge
+/// commits only (#111 excludes merges, 2+ parents, from metrics).
 /// Test: referenced as a literal; equality checked in unit tests.
-pub const QUALITY_FORMULA_VERSION: &str = "v1";
+pub const QUALITY_FORMULA_VERSION: &str = "v2";
 
 /// v1 quality coefficients (must sum to 1.0).
 const W_REVERT: f64 = 0.35;
@@ -160,8 +161,8 @@ mod tests {
     }
 
     #[test]
-    fn formula_version_is_v1() {
-        assert_eq!(QUALITY_FORMULA_VERSION, "v1");
+    fn formula_version_is_v2() {
+        assert_eq!(QUALITY_FORMULA_VERSION, "v2");
     }
 
     #[test]

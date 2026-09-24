@@ -67,7 +67,7 @@ startup for O(message_length) matching.
 
 | Priority | change_type | Patterns (case-insensitive substrings / regex) |
 |----------|-------------|------------------------------------------------|
-| 1 | `maintenance` | merge commit patterns, `chore:`, `update deps`, `bump version` |
+| 1 | `maintenance` | `chore:`, `update deps`, `bump version` |
 | 2 | `bugfix` | `revert`, `fix:`, `bug:`, `resolve`, `repair`, `correct` |
 | 3 | `platform` | `platform:`, `infra:`, `devops:`, `tooling:`, `architect` |
 | 4 | `feature` | `feat:`, `add feature`, `implement`, `introduce` |
@@ -80,37 +80,50 @@ Default: `maintenance`.
 
 ---
 
-## Change Type Taxonomy (19 values)
+## Categories
 
-| Value | Description |
-|-------|-------------|
-| `feature` | New user-facing functionality |
-| `bugfix` | Defect repair |
-| `platform` | Infrastructure / platform engineering |
-| `refactor` | Code restructuring without behavior change |
-| `documentation` | Docs-only changes |
-| `test` | Test additions or fixes |
-| `maintenance` | Routine upkeep (deps, config, chores) |
-| `style` | Formatting, lint fixes |
-| `build` | Build system changes |
-| `security` | Security patches |
-| `hotfix` | Urgent production fix |
-| `revert` | Code reversion |
-| `integration` | Third-party integration work |
-| `content` | Content updates (non-code) |
-| `localization` | i18n / translation |
-| `research` | Spike / investigation |
-| `ktlo` | Keep-the-lights-on operational work |
-| `other` | Uncategorized |
-| `unknown` | Classifier could not decide |
+**Merge rule (#111):** a commit with 2+ parents is a merge, and it is excluded from metrics and from the eval. Squash and rebase commits (1 parent) are normal commits, classified by content.
 
-### Fallthrough Categories
+tga records `commits.is_merge` (`parent_count() > 1`) at collection and keeps
+merges in the database. The classifier may still label a merge `merge`, but
+reports, per-author drill-downs, period trends and `tga eval` leave merges out.
 
-For coverage metrics, these are treated as "unclassified":
+### Built-in default categories
 
-```
-{maintenance, ktlo, other, unknown}
-```
+Without a rules file, the built-in ruleset and taxonomy
+(`src/classify/taxonomy.rs::built_in_defs`) map each subcategory to one of
+eight top-level categories:
+
+| Top level | Built-in subcategories |
+|-----------|------------------------|
+| `feature` | `feature`, `enhancement`, `new-feature`, `new_feature`, `breaking`, `experiment`, `spike`, `prototype` |
+| `bugfix` | `bugfix`, `bug`, `bug_fix`, `hotfix`, `security` |
+| `ktlo` | `ci`, `build`, `ops`, `release` |
+| `integrations` | `integration`, `integrations`, `api`, `webhook` |
+| `platform_work` | `infra`, `platform`, `performance`, `perf`, `architecture`, `devops`, `cloud`, `monitoring`, `observability`, `database`, `messaging`, `networking`, `storage` |
+| `content` | `docs`, `documentation`, `content`, `localization`, `content-docs`, `translation`, `assets` |
+| `maintenance` | `refactor`, `test`, `tests`, `style`, `cleanup`, `maintenance`, `deps`, `dependencies`, `revert`, `merge`, `chore`, `tech_debt_refactoring`, `rollback`, `config`, `tooling` |
+| `unknown` | `wip`, `uncategorized` |
+
+### Category sets are config-driven
+
+A rules file (`classification.rules_files`, alias `rules_file`) defines the
+categories its rules emit; with `extend_defaults: false` it replaces the
+built-in ruleset. `classification.custom_categories` adds or overrides
+taxonomy entries. tga hardcodes no deployment's category list.
+
+### Eval scheme v2 (#111)
+
+The #111 precision eval uses scheme v2 through the cto-reports rules file:
+`security`, `devops`, `qa`, `bug_fix`, `new_feature`, `internal_tooling`,
+`integration`, `platform_infrastructure`, `upkeep`, `data_science`, plus
+the rater labels `release_merge`, `unclear` and `mixed`. The v2 category
+`upkeep` is not tga's built-in `maintenance` above: `maintenance` stays the
+default taxonomy's top-level category and catch-all, and only the v2 rules
+file emits `upkeep`. `tga eval score
+--config` accepts every category the config's rules or taxonomy name.
+`unclear`, `mixed` and `release_merge` are always valid, are counted per
+label, and score as no answer. See `docs/eval-harness.md`.
 
 ---
 
@@ -134,7 +147,7 @@ When no mapping exists for a given `change_type`, `work_type` falls back to `cha
 ## Coverage Metrics
 
 ```
-coverage_pct = 100 * (commits NOT IN fallthrough) / total_commits
+coverage_pct = 100 * (commits with a category other than uncategorized) / total_commits
 ```
 
 - Computed per-repo, stored in `repository_analysis_status.classification_coverage_pct`

@@ -16,7 +16,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::draw::seeded_shuffle;
-use super::records::{StrataSummary, Stratum, SubsampleOrigin};
+use super::merges::{resolve_merges, scale_out_merges};
+use super::records::{SampleRecord, StrataSummary, Stratum, SubsampleOrigin};
 use super::sample::{write_json, write_jsonl, write_labels};
 use super::score::{read_sample, read_strata};
 use super::{io_err, EvalError, Result};
@@ -32,6 +33,9 @@ pub struct SubsampleParams {
     pub size: usize,
     /// RNG seed.
     pub seed: u64,
+    /// #111: tga database copy used to resolve the merge flag of source rows
+    /// that lack one; opened read-only.
+    pub db: Option<PathBuf>,
     /// Output directory; must not already hold the three output files.
     pub out: PathBuf,
 }
@@ -91,30 +95,31 @@ fn subsample_seed(seed: u64, stratum: Stratum) -> u64 {
 
 /// Draw the subset and write `sample.jsonl`, `labels.csv` and `strata.json`.
 ///
-/// Why: see the module doc. What: allocates with [`largest_remainder`] over
-/// the source rows per stratum in [`Stratum::ALL`] order; within a stratum,
+/// Why: see the module doc. What: drops merge rows first (#111), resolving
+/// rows without a merge flag from `db` and refusing any it cannot resolve, and
+/// takes each stratum's merge share out of its population
+/// ([`scale_out_merges`]); kept rows are written with `is_merge: false`. It
+/// then allocates with [`largest_remainder`] over the non-merge source rows
+/// per stratum in [`Stratum::ALL`] order; within a stratum,
 /// rows are sorted by SHA and shuffled with a seed-derived stream, and the
 /// first `k` are kept. Rows keep their source order in the output. Each
 /// row's `weight` becomes stratum population ÷ subset rows in the stratum.
 /// The sheet has the same columns and redaction as `tga eval sample`'s,
 /// ordered by a seed-salted hash. On Unix a created `out` is mode 0700 and
 /// every file 0600.
-/// Test: `tests/eval_harness.rs::subsample_is_proportional_and_seeded`.
+/// Test: `tests/eval_harness.rs::subsample_is_proportional_and_seeded`,
+/// `tests/eval_harness.rs::subsample_drops_merges_resolved_from_the_db`.
 ///
 /// # Errors
 ///
-/// I/O and parse failures; [`EvalError::Invalid`] for a zero size, a size
-/// above the source rows, a duplicated SHA, a stratum with rows but no
+/// I/O and parse failures; [`EvalError::Invalid`] for a row whose merge
+/// status is unknown, a zero size, a size above the non-merge source rows, a
+/// duplicated SHA, a stratum with rows but no
 /// population in `strata.json`, or an output file that already exists.
 pub fn run_subsample(params: &SubsampleParams) -> Result<SubsampleSummary> {
-    let source = read_sample(&params.from)?;
-    if params.size == 0 || params.size > source.len() {
-        return Err(EvalError::Invalid(format!(
-            "--size must be between 1 and the {} rows of {}",
-            source.len(),
-            params.from.display()
-        )));
-    }
+    let all = read_sample(&params.from)?;
+    // #111: merges never enter a subset; a row of unknown status is an error.
+    let merge_flags = resolve_merges(&all, params.db.as_deref())?;
     let strata_path = params.strata.clone().unwrap_or_else(|| {
         params
             .from
@@ -122,7 +127,24 @@ pub fn run_subsample(params: &SubsampleParams) -> Result<SubsampleSummary> {
             .unwrap_or(Path::new("."))
             .join("strata.json")
     });
-    let source_strata = read_strata(&strata_path)?;
+    let mut source_strata = read_strata(&strata_path)?;
+    let _estimated = scale_out_merges(&mut source_strata, &all, &merge_flags);
+    let source: Vec<SampleRecord> = all
+        .into_iter()
+        .zip(merge_flags)
+        .filter(|&(_, m)| !m)
+        .map(|(mut r, _)| {
+            r.is_merge = Some(false);
+            r
+        })
+        .collect();
+    if params.size == 0 || params.size > source.len() {
+        return Err(EvalError::Invalid(format!(
+            "--size must be between 1 and the {} non-merge rows of {}",
+            source.len(),
+            params.from.display()
+        )));
+    }
     let mut seen = HashSet::new();
     if let Some(dup) = source.iter().find(|r| !seen.insert(r.sha.as_str())) {
         return Err(EvalError::Invalid(format!(

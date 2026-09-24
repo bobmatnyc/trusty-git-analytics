@@ -72,10 +72,11 @@ pub fn run(config: Config, db: &mut Database, args: DoraArgs) -> anyhow::Result<
 /// keeping `deployment_failures` purely derived means a config edit
 /// always produces a consistent CFR/MTTR without manual SQL cleanup.
 /// What: deletes all rows, then for every deploy in `fact_deployments`
-/// finds the first commit after `triggered_at` whose classification
-/// (or message regex) matches a signal within that signal's window;
-/// inserts one failure row per match.
-/// Test: covered by `rebuild_deployment_failures_*` integration test.
+/// takes the first non-merge commit after `triggered_at` (#111) and, when
+/// its classification (or message regex) matches a signal within that
+/// signal's window, inserts one failure row.
+/// Test: `rebuild_deployment_failures_with_no_signals_is_a_clean_noop`,
+/// `rebuild_deployment_failures_skips_a_merge_after_the_deploy`.
 fn rebuild_deployment_failures(db: &mut Database, config: &Config) -> anyhow::Result<usize> {
     let signals: Vec<FailureSignal> = config
         .dora
@@ -113,11 +114,14 @@ fn rebuild_deployment_failures(db: &mut Database, config: &Config) -> anyhow::Re
              FROM fact_deployments \
              WHERE environment = 'production' AND status = 'success'",
         )?;
+        // #111: merges (2+ parents) are excluded from metrics, so the commit
+        // checked after a deploy is the first non-merge one.
         let mut commits = tx.prepare(
             "SELECT c.sha, c.message, c.timestamp, cl.category \
              FROM commits c \
              LEFT JOIN classifications cl ON cl.id = c.classification_id \
              WHERE c.repository = ?1 \
+               AND c.is_merge = 0 \
                AND c.timestamp > ?2 \
                AND c.timestamp <= ?3 \
              ORDER BY c.timestamp ASC LIMIT 1",
@@ -349,5 +353,61 @@ mod tests {
         let mut db = Database::open_in_memory().expect("db");
         let n = rebuild_deployment_failures(&mut db, &Config::default()).expect("rebuild");
         assert_eq!(n, 0);
+    }
+
+    /// Why: #111 — merges (2+ parents) are excluded from metrics, including
+    /// the failure scan behind change-failure rate and MTTR.
+    /// What: after one production deploy, a merge commit lands first and a
+    /// `hotfix:` commit second; the hotfix signal must record one failure on
+    /// the hotfix commit, not stop at the merge.
+    /// Test: this function.
+    #[test]
+    fn rebuild_deployment_failures_skips_a_merge_after_the_deploy() {
+        let mut db = Database::open_in_memory().expect("db");
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO fact_deployments (deploy_id, repo, environment, triggered_at, status) \
+             VALUES ('d1', 'repo-a', 'production', '2024-01-15T10:00:00+00:00', 'success')",
+            [],
+        )
+        .expect("deploy");
+        for (sha, msg, ts, is_merge) in [
+            ("m1", "Merge branch 'main'", "2024-01-15T11:00:00+00:00", 1),
+            (
+                "h1",
+                "hotfix: restore login",
+                "2024-01-15T12:00:00+00:00",
+                0,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, is_merge) VALUES (?1, 'n', 'e', ?2, ?3, 'repo-a', ?4)",
+                params![sha, ts, msg, is_merge],
+            )
+            .expect("commit");
+        }
+        let config = Config {
+            dora: Some(tga::core::config::DoraConfig {
+                failure_signals: vec![FailureSignal {
+                    commit_message_pattern: Some("(?i)^hotfix".into()),
+                    within_hours: 48,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let n = rebuild_deployment_failures(&mut db, &config).expect("rebuild");
+        assert_eq!(n, 1);
+        let sha: String = db
+            .connection()
+            .query_row(
+                "SELECT failure_commit_sha FROM deployment_failures",
+                [],
+                |r| r.get(0),
+            )
+            .expect("failure row");
+        assert_eq!(sha, "h1");
     }
 }
