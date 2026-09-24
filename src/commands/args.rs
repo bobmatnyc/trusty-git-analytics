@@ -3,7 +3,8 @@
 //! Why: extracted from `main.rs` to keep that file under the 500-line cap.
 //! All types are `pub` so `main.rs` can re-export them via `use crate::commands::args::*`.
 //! What: defines the clap `#[derive(Args)]` and `#[derive(Subcommand)]` types
-//! consumed by the top-level `Commands` enum in `main.rs`.
+//! consumed by the top-level `Commands` enum in `main.rs`, plus the `run`
+//! dispatchers for the subcommand trees whose enums are `#[non_exhaustive]`.
 //! Test: exercised indirectly by every CLI invocation; clap's derive tests cover
 //! the argument definitions.
 
@@ -11,10 +12,12 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 
-use crate::commands::deployments::DeploymentsCollectArgs;
-use crate::commands::incidents::IncidentsCollectArgs;
-use crate::commands::jira::{JiraFreshnessArgs, JiraSyncArgs};
-use crate::commands::linear::{LinearFreshnessArgs, LinearSyncArgs};
+use crate::commands::deployments::{self, DeploymentsCollectArgs};
+use crate::commands::incidents::{self, IncidentsCollectArgs};
+use crate::commands::jira::{self, JiraFreshnessArgs, JiraSyncArgs};
+use crate::commands::linear::{self, LinearFreshnessArgs, LinearSyncArgs};
+use crate::core::config::Config;
+use crate::core::db::Database;
 
 /// Args wrapper for the `tga deployments` subcommand tree.
 #[derive(Args, Debug)]
@@ -89,6 +92,49 @@ pub enum LinearSubcommand {
     /// Check freshness of the Linear bulk-sync cursor (fails loudly if
     /// stale/never run).
     Freshness(LinearFreshnessArgs),
+}
+
+// #111: the subcommand enums above are `#[non_exhaustive]`, and `main.rs` is a
+// separate crate, so a `match` there would need a wildcard arm that turns a
+// forgotten variant into a runtime error. Dispatching here, inside the defining
+// crate, keeps each match exhaustive and checked at compile time.
+
+impl DeploymentsSubcommandArgs {
+    /// Runs the selected `tga deployments` operation.
+    pub async fn run(self, config: Config, db: &mut Database) -> anyhow::Result<()> {
+        match self.subcommand {
+            DeploymentsSubcommand::Collect(a) => deployments::run(config, db, a).await,
+        }
+    }
+}
+
+impl IncidentsSubcommandArgs {
+    /// Runs the selected `tga incidents` operation.
+    pub fn run(self, config: Config, db: &mut Database) -> anyhow::Result<()> {
+        match self.subcommand {
+            IncidentsSubcommand::Collect(a) => incidents::run(config, db, a),
+        }
+    }
+}
+
+impl JiraSubcommandArgs {
+    /// Runs the selected `tga jira` operation.
+    pub async fn run(self, config: Config, db: &mut Database) -> anyhow::Result<()> {
+        match self.subcommand {
+            JiraSubcommand::Sync(a) => jira::run_sync(config, db, a).await,
+            JiraSubcommand::Freshness(a) => jira::run_freshness(&config, db, a),
+        }
+    }
+}
+
+impl LinearSubcommandArgs {
+    /// Runs the selected `tga linear` operation.
+    pub async fn run(self, config: Config, db: &mut Database) -> anyhow::Result<()> {
+        match self.subcommand {
+            LinearSubcommand::Sync(a) => linear::run_sync(config, db, a).await,
+            LinearSubcommand::Freshness(a) => linear::run_freshness(&config, db, a),
+        }
+    }
 }
 
 /// Arguments for `tga analyze`.

@@ -22,9 +22,8 @@ use tga::core::db::Database;
 
 use crate::commands::aliases::AliasesArgs;
 use crate::commands::args::{
-    AnalyzeArgs, ClassifyArgs, CollectArgs, DeploymentsSubcommand, DeploymentsSubcommandArgs,
-    IncidentsSubcommand, IncidentsSubcommandArgs, JiraSubcommand, JiraSubcommandArgs,
-    LinearSubcommand, LinearSubcommandArgs, ReportArgs, TuiArgs,
+    AnalyzeArgs, ClassifyArgs, CollectArgs, DeploymentsSubcommandArgs, IncidentsSubcommandArgs,
+    JiraSubcommandArgs, LinearSubcommandArgs, ReportArgs, TuiArgs,
 };
 use crate::commands::audit::AuditArgs;
 use crate::commands::author::AuthorArgs;
@@ -434,26 +433,16 @@ async fn run() -> anyhow::Result<()> {
         Commands::Backfill(args) => commands::backfill::run(config, &mut db, args).await?,
         Commands::Override(args) => commands::override_cmd::run(config, &mut db, args)?,
         Commands::Rules(args) => commands::rules::run(config, &db, args)?,
-        Commands::Deployments(args) => match args.subcommand {
-            DeploymentsSubcommand::Collect(a) => {
-                commands::deployments::run(config, &mut db, a).await?
-            }
-        },
-        Commands::Incidents(args) => match args.subcommand {
-            IncidentsSubcommand::Collect(a) => commands::incidents::run(config, &mut db, a)?,
-        },
+        // #111: the subcommand enums are `#[non_exhaustive]`, so their matches
+        // live in the library (`commands::args`), where they stay exhaustive.
+        Commands::Deployments(args) => args.run(config, &mut db).await?,
+        Commands::Incidents(args) => args.run(config, &mut db)?,
         Commands::Dora(args) => commands::dora::run(config, &mut db, args)?,
         // #5237: the audit command owns orchestration; `tga::audit::run_full_sweep`
         // owns stage sequencing. Nothing here re-sequences the subcommands.
         Commands::Audit(args) => commands::audit::run(config, &mut db, args).await?,
-        Commands::Linear(args) => match args.subcommand {
-            LinearSubcommand::Sync(a) => commands::linear::run_sync(config, &mut db, a).await?,
-            LinearSubcommand::Freshness(a) => commands::linear::run_freshness(&config, &db, a)?,
-        },
-        Commands::Jira(args) => match args.subcommand {
-            JiraSubcommand::Sync(a) => commands::jira::run_sync(config, &mut db, a).await?,
-            JiraSubcommand::Freshness(a) => commands::jira::run_freshness(&config, &db, a)?,
-        },
+        Commands::Linear(args) => args.run(config, &mut db).await?,
+        Commands::Jira(args) => args.run(config, &mut db).await?,
         // Handled above — match is exhaustive.
         Commands::Tui(_) => unreachable!("tui dispatched above"),
         Commands::Profile(_) => unreachable!("profile dispatched above"),
