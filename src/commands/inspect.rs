@@ -24,6 +24,8 @@ pub struct InspectArgs {
 
 /// The two things worth inspecting.
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new subcommand is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum InspectSubcommand {
     /// Every table, view, and column the database actually holds.
     Schema(InspectFormatArgs),

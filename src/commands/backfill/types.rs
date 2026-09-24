@@ -63,6 +63,8 @@ pub struct BackfillArgs {
 
 /// `tga backfill` subcommands.
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new subcommand is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum BackfillSubcommand {
     /// Re-run LLM classification on low-confidence prior LLM verdicts.
     ///

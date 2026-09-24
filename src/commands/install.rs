@@ -26,6 +26,8 @@ use super::install_plan::{render_yaml, Credential, InstallPlan, JiraSettings, Li
 
 /// Where repositories come from.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+// #111: non_exhaustive so a new host is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum InstallHost {
     /// Repositories are already cloned locally and named by path.
     #[default]
@@ -38,6 +40,8 @@ pub enum InstallHost {
 
 /// Which project-management system supplies work items.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+// #111: non_exhaustive so a new PM system is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum InstallPm {
     /// No PM integration.
     #[default]

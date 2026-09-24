@@ -46,6 +46,8 @@ pub struct OverrideArgs {
 
 /// `tga override` subcommands.
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new subcommand is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum OverrideSubcommand {
     /// Insert (or replace) an override row for a commit SHA.
     Add {

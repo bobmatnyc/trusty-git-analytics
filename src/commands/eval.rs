@@ -33,6 +33,8 @@ pub struct EvalArgs {
 
 /// The harness steps.
 #[derive(Subcommand, Debug)]
+// #111: non_exhaustive so a new step is an additive change, not a SemVer break.
+#[non_exhaustive]
 pub enum EvalSubcommand {
     /// Draw a stratified, capped, seeded sample of classified commits for labelling.
     #[command(after_help = PRIVACY)]
