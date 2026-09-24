@@ -13,8 +13,9 @@ use super::draw::{draw, Candidate, DrawParams};
 use super::population::{load_commits, load_issue_types, load_paths, load_pr_titles, CommitRow};
 use super::records::{Diffstat, SampleRecord, StrataSummary, Stratum, StratumCounts};
 use super::redact::{redact_emails, strip_trailers};
+use super::verdict::resolve_verdicts;
 use super::{io_err, open_eval_db, EvalError, Result};
-use crate::classify::{ClassificationPipeline, TraceTier};
+use crate::classify::ClassificationPipeline;
 use crate::core::config::Config;
 
 /// Characters of the message body shown to raters.
@@ -56,30 +57,6 @@ pub struct SampleSummary {
     pub drifted: u64,
     /// Commits skipped for an unparseable timestamp.
     pub bad_timestamps: u64,
-}
-
-/// A commit's verdict as the harness evaluates it.
-struct Resolved {
-    tier: TraceTier,
-    rule_id: String,
-    category: String,
-    confidence: f64,
-}
-
-/// Map a stored `method` decided outside the rule engine to its trace.
-fn stored_override(method: &str, traced: TraceTier) -> Option<(TraceTier, &'static str)> {
-    match method {
-        "manual" => Some((TraceTier::Manual, "manual_override")),
-        "llm_fallback" => Some((TraceTier::Llm, "llm")),
-        "repo_category_fallback" => Some((TraceTier::RepoCategory, "repo_category")),
-        // The engine's own JIRA-project and issue-type tiers also store
-        // `external_source`; only a verdict the engine did not reproduce came
-        // from the pipeline's external resolver.
-        "external_source" if !matches!(traced, TraceTier::JiraProject | TraceTier::IssueType) => {
-            Some((TraceTier::ExternalSource, "external_source"))
-        }
-        _ => None,
-    }
 }
 
 fn author_hash(salt: &str, email: &str) -> String {
@@ -140,38 +117,9 @@ pub fn run_sample(params: &SampleParams) -> Result<SampleSummary> {
     info!(commits = window.len(), merges_excluded, %start, %end, "eval window");
 
     let engine = ClassificationPipeline::new(params.config.clone()).build_rule_engine()?;
-    let pairs: Vec<(&str, bool)> = window
-        .iter()
-        .map(|c| (c.message.as_str(), c.is_merge))
-        .collect();
-    let traced = engine.classify_batch_traced(&pairs);
-
-    let mut drifted = 0u64;
-    let resolved: Vec<Resolved> = window
-        .iter()
-        .zip(traced)
-        .map(|(c, t)| {
-            if let Some((cat, conf, method)) = &c.stored {
-                if let Some((tier, rule)) = stored_override(method, t.trace.tier) {
-                    return Resolved {
-                        tier,
-                        rule_id: rule.to_string(),
-                        category: cat.clone(),
-                        confidence: *conf,
-                    };
-                }
-                if cat != &t.verdict.category {
-                    drifted += 1;
-                }
-            }
-            Resolved {
-                tier: t.trace.tier,
-                rule_id: t.trace.rule_id,
-                category: t.verdict.category,
-                confidence: t.verdict.confidence,
-            }
-        })
-        .collect();
+    // #111: `sample` and `repredict` share one verdict resolution.
+    let refs: Vec<&CommitRow> = window.iter().collect();
+    let (resolved, drifted) = resolve_verdicts(&engine, &refs);
     if drifted > 0 {
         warn!(
             drifted,

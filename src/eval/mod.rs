@@ -1,5 +1,5 @@
 //! Classifier precision harness (#111): `tga eval sample`, `tga eval
-//! subsample` and `tga eval score`.
+//! subsample`, `tga eval repredict` and `tga eval score`.
 //!
 //! Why: the classification cascade reports a category and a confidence for
 //! every commit, but nothing measured how often those verdicts are right. A
@@ -8,7 +8,8 @@
 //! What: [`sample`] re-classifies a window of commits from a read-only
 //! database copy with the traced rule engine, stratifies the verdicts, and
 //! draws a capped, seeded sample for human raters; [`subsample`] draws a
-//! proportional, seeded subset of that sample. [`score`] joins the raters'
+//! proportional, seeded subset of that sample; [`repredict`] re-derives a
+//! sample's predictions under another config. [`score`] joins the raters'
 //! labels to that sample and computes per-rule, per-method and per-stratum
 //! precision with Wilson intervals, a stratum-weighted accuracy, a
 //! coverage-at-precision curve, a confusion matrix, the abstention share and
@@ -20,6 +21,8 @@
 
 pub mod draw;
 pub mod records;
+// #111: re-derive an existing sample's predictions under a given config.
+pub mod repredict;
 pub mod sample;
 pub mod score;
 pub mod stats;
@@ -32,6 +35,8 @@ mod population;
 // #111: strip identity trailers and e-mails from the rater sheet.
 mod redact;
 mod report_md;
+// #111: the verdict resolution `sample` and `repredict` share.
+mod verdict;
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +44,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 pub use records::{SampleRecord, StrataSummary, Stratum};
+pub use repredict::{run_repredict, RepredictParams, RepredictSummary};
 pub use sample::{run_sample, SampleParams, SampleSummary};
 pub use score::{run_score, ScoreParams, ScoreReport};
 pub use subsample::{run_subsample, SubsampleParams, SubsampleSummary};

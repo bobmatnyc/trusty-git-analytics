@@ -37,6 +37,8 @@ mod credential_debug;
 // the same credentials to disk rather than to a log.
 mod credential_serialize;
 pub mod database_path;
+// #111: anchor a config's relative paths to its own directory.
+mod relative_paths;
 pub mod validator;
 
 pub use aliases::{AliasFile, DeveloperAliasEntry};
@@ -553,7 +555,8 @@ pub struct ClassificationConfig {
     /// Accepts either a single path string (backward-compatible alias
     /// `rules_file`) or a YAML list of paths. An absent key yields an empty
     /// vec, meaning no user rules are loaded and the built-in defaults are
-    /// used exclusively.
+    /// used exclusively. A relative path is relative to the config file's
+    /// directory (#111), as `database:` is.
     ///
     /// Example (YAML):
     /// ```yaml
@@ -1515,6 +1518,10 @@ impl Config {
         tracing::debug!(path = %resolved.display(), "loading config");
         let text = std::fs::read_to_string(&resolved)?;
         let mut cfg: Config = serde_yaml::from_str(&text)?;
+        // #111: relative paths in the file are relative to the file, not CWD.
+        if let Some(dir) = resolved.parent() {
+            relative_paths::anchor_relative_paths(&mut cfg, dir, home_dir().as_deref());
+        }
         cfg.source_path = Some(resolved);
         cfg.validate_ticket_regexes()?;
         Ok(cfg)
