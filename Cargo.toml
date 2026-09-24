@@ -123,7 +123,14 @@ name = "tga"
 # moving the two agentic-detection corpus tests onto a recorded history
 # fixture; see CHANGELOG.md. This is tga's first release from this
 # repository — publishing waits until tga 8.0.0 ships from trusty-tools.
-version = "8.0.1"
+# 8.0.1 -> 9.0.0 (owner ruling 2026-09-24): MAJOR, superseding the unpublished
+# 8.0.1 (never tagged). #111/#131/#133 land three breaking changes since:
+# `#[non_exhaustive]` on the public command/value enums (a downstream `match`
+# needs a wildcard arm), `persist_weekly_engineer`/`persist_weekly_quality`
+# gaining a required `scope: PersistScope` parameter, and the merge-commit
+# exclusion changing every reported total. Post-1.0, a break sits in the
+# MAJOR position; see CHANGELOG.md.
+version = "9.0.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
