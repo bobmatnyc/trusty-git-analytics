@@ -13,4 +13,8 @@ Changed
 - `tga eval score` excludes merge rows and their labels and reports
   `merges_excluded`. A sample written before this change needs `--db` to
   resolve each row's merge flag by SHA; a row it cannot resolve is an error,
-  never scored as a non-merge (#111).
+  never scored as a non-merge (#111). Each stratum's population loses its
+  estimated merge share (population · merge rows ÷ sample rows), so weighted
+  accuracy, coverage and abstention no longer weigh merges.
+- `tga eval subsample` drops merge rows before drawing and refuses rows of
+  unknown merge status; `--db` resolves rows that carry no merge flag (#111).

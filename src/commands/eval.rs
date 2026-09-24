@@ -97,6 +97,11 @@ pub struct SubsampleArgs {
     /// RNG seed; the same seed on the same sample draws the same subset.
     #[arg(long)]
     pub seed: u64,
+    /// A COPY of the tga database the sample was drawn from; opened read-only.
+    /// Resolves the merge flag of rows that lack one so merges are left out
+    /// of the subset (#111). Without it such a sample is refused.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
     /// Output directory (private, outside any repository); must not already
     /// hold sample.jsonl, labels.csv or strata.json. Required.
     #[arg(long)]
@@ -261,6 +266,7 @@ fn run_subsample(a: SubsampleArgs) -> Result<()> {
         strata: a.strata,
         size: a.size,
         seed: a.seed,
+        db: a.db,
         out: a.out,
     })
     .context("tga eval subsample")?;

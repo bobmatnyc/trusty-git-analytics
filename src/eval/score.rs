@@ -240,8 +240,10 @@ fn precision_rows<'a>(
 /// does not drop the row. `unclear`, `mixed` and `release_merge` are counted
 /// but score as no answer (#111). Merge rows (2+ parents) and their labels are
 /// dropped before scoring; a row without a merge flag is resolved by SHA in
-/// `db`, and one that cannot be resolved is an error (#111). Precision rows use Wilson 95% intervals; the weighted
-/// accuracy is Σ W_h · p_h with W_h from the `strata.json` populations, and
+/// `db`, and one that cannot be resolved is an error (#111). Precision rows
+/// use Wilson 95% intervals; the weighted accuracy is Σ W_h · p_h with W_h
+/// from the `strata.json` populations less each stratum's merge share
+/// (see [`super::merges::scale_out_merges`]), and
 /// the coverage curve weights each labelled row by its stratum population ÷
 /// labelled rows in that stratum, never by the sample's stored `weight`.
 /// Test: `tests/eval_harness.rs::score_computes_expected_metrics`,
@@ -269,7 +271,9 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
             .unwrap_or(Path::new("."))
             .join("strata.json")
     });
-    let strata = read_strata(&strata_path)?;
+    let mut strata = read_strata(&strata_path)?;
+    // #111: stratum weights must not count merges either.
+    super::merges::scale_out_merges(&mut strata, &sample, &merge_flags);
 
     let mut valid: BTreeSet<String> = params
         .categories

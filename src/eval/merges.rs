@@ -9,12 +9,12 @@
 //! Test: `tests/eval_harness.rs::score_excludes_merges_resolved_from_the_db`,
 //! `tests/eval_harness.rs::score_refuses_rows_with_unknown_merge_status`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use rusqlite::params_from_iter;
 
-use super::records::SampleRecord;
+use super::records::{SampleRecord, StrataSummary, Stratum};
 use super::{open_eval_db, EvalError, Result};
 
 /// Merge flag per sample row, in sample order.
@@ -64,6 +64,43 @@ pub(crate) fn resolve_merges(sample: &[SampleRecord], db: Option<&Path>) -> Resu
         )));
     }
     Ok(flags.into_iter().map(|f| f == Some(true)).collect())
+}
+
+/// Remove each stratum's estimated merge commits from `strata.json` counts.
+///
+/// Why: a `strata.json` written before merges were excluded counts them in
+/// every stratum population, so stratum weights would still weigh merges
+/// (#111). The window cannot be re-stratified without re-running the rules,
+/// so the merge count is estimated from the sample.
+/// What: for each stratum with `m` merge rows among its `n` sample rows, the
+/// population drops by `round(population · m / n)`; `population` falls and
+/// `merges_excluded` rises by the same total. A sample without merges leaves
+/// `strata` unchanged.
+/// Test: `tests/eval_harness.rs::score_weights_strata_without_their_merges`.
+pub(crate) fn scale_out_merges(
+    strata: &mut StrataSummary,
+    sample: &[SampleRecord],
+    merges: &[bool],
+) {
+    let mut rows: BTreeMap<Stratum, (u64, u64)> = BTreeMap::new();
+    for (r, &m) in sample.iter().zip(merges) {
+        let e = rows.entry(r.stratum).or_default();
+        e.0 += 1;
+        e.1 += u64::from(m);
+    }
+    for (stratum, (n, m)) in rows {
+        let Some(counts) = strata.strata.get_mut(stratum.as_str()) else {
+            continue;
+        };
+        if m == 0 {
+            continue;
+        }
+        let removed = (counts.population as f64 * m as f64 / n as f64).round() as u64;
+        let removed = removed.min(counts.population);
+        counts.population -= removed;
+        strata.population = strata.population.saturating_sub(removed);
+        strata.merges_excluded += removed;
+    }
 }
 
 /// `commits.is_merge` for the wanted SHAs that the database holds.

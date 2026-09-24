@@ -509,6 +509,7 @@ fn subsample(from: &Path, size: usize, seed: u64, out: &Path) -> eval::Result<()
         strata: None,
         size,
         seed,
+        db: None,
         out: out.to_path_buf(),
     })
     .map(|_| ())
@@ -957,4 +958,93 @@ fn score_accepts_labels_named_by_the_rules_file() {
     })
     .expect_err("an unknown label was accepted");
     assert!(err.to_string().contains("data_science"));
+}
+
+/// Why: #111 — a `strata.json` written before merges were excluded counts
+/// them in its stratum populations; weighting by those would still weigh
+/// merges.
+/// What: stratum `exact` (population 600) has 4 correct rows; `catch_all`
+/// (population 400) has 4 rows, 2 of them merges and 2 wrong. Its population
+/// scales to 400 · 2/4 = 200, so weighted accuracy is 600/800 = 0.75, not
+/// the unscaled 600/1000 = 0.6, and still covers the whole population.
+/// Test: this function.
+#[test]
+fn score_weights_strata_without_their_merges() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let rows = write_source(
+        d,
+        &[
+            ("exact", 4, 600, "feature", 0.9),
+            ("catch_all", 4, 400, "maintenance", 0.3),
+        ],
+    );
+    let merges = ["catch_all-0000", "catch_all-0001"];
+    let text = fs::read_to_string(d.join("sample.jsonl")).expect("sample");
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let mut rec: serde_json::Value = serde_json::from_str(l).expect("record");
+            let is_merge = merges.contains(&rec["sha"].as_str().unwrap_or(""));
+            rec["is_merge"] = serde_json::json!(is_merge);
+            rec.to_string()
+        })
+        .collect();
+    fs::write(d.join("sample.jsonl"), lines.join("\n") + "\n").expect("sample");
+    let labels: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(sha, s, _)| {
+            let label = match s.as_str() {
+                "exact" => "feature",
+                _ if merges.contains(&sha.as_str()) => "maintenance",
+                _ => "bugfix",
+            };
+            (sha.as_str(), label)
+        })
+        .collect();
+    write_labels(&d.join("rater.csv"), &labels);
+
+    let r = score(d, &[&d.join("rater.csv")], None).expect("score");
+    assert_eq!((r.merges_excluded, r.scored), (2, 6));
+    let acc = r.weighted_accuracy.expect("accuracy");
+    assert!((acc.estimate - 0.75).abs() < 1e-9, "{}", acc.estimate);
+    assert!((acc.population_covered - 1.0).abs() < 1e-9);
+}
+
+/// Why: #111 — a subset drawn from a sample written before merges were
+/// excluded must not hand a rater merge rows, and must refuse rows whose
+/// merge status it cannot resolve, as `score` does.
+/// What: a legacy four-row sample where `m1` is a merge in the database.
+/// With `--db`, a 3-row subset holds exactly the three non-merge rows, all
+/// written `is_merge: false`, and the stratum population drops from 30 to 22
+/// (30 − round(30 · 1/4)); a 4-row subset is refused. Without `--db` the
+/// draw is refused.
+/// Test: this function.
+#[test]
+fn subsample_drops_merges_resolved_from_the_db() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let flags = [("m1", true), ("q1", false), ("n1", false), ("p1", false)];
+    legacy_sample_and_db(d, &["m1", "q1", "n1", "p1"], &flags);
+    let params = |size: usize, db: Option<&Path>, out: &str| eval::SubsampleParams {
+        from: d.join("sample.jsonl"),
+        strata: None,
+        size,
+        seed: 4,
+        db: db.map(Path::to_path_buf),
+        out: d.join(out),
+    };
+    let db = d.join("tga.db");
+    let summary = eval::run_subsample(&params(3, Some(&db), "sub")).expect("subsample");
+    let rows = read_sample(&d.join("sub/sample.jsonl"));
+    let mut shas: Vec<&str> = rows.iter().map(|r| r.sha.as_str()).collect();
+    shas.sort_unstable();
+    assert_eq!(shas, ["n1", "p1", "q1"]);
+    assert!(rows.iter().all(|r| r.is_merge == Some(false)));
+    assert_eq!(summary.strata.population_of(eval::Stratum::Exact), 22);
+
+    let err = eval::run_subsample(&params(4, Some(&db), "big")).expect_err("drew a merge");
+    assert!(err.to_string().contains("non-merge rows"), "{err}");
+    let err = eval::run_subsample(&params(3, None, "nodb")).expect_err("unknown status drawn");
+    assert!(err.to_string().contains("--db"), "{err}");
 }

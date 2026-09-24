@@ -289,6 +289,9 @@ fn deployment_frequency_and_lead_time(
 
     let deployment_frequency = period_deploys.len() as f64 / total_weeks_f;
 
+    // #111: merges are excluded from metrics, but a deploy's `git_sha` often
+    // names a merge commit. Reading its timestamp here is a lookup, not a
+    // count, so merge rows stay in this map.
     let commit_ts: HashMap<&str, DateTime<Utc>> = inputs
         .rows
         .iter()

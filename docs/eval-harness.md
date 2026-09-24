@@ -45,6 +45,18 @@ classified by content. `tga eval sample` never draws a merge and writes
 and reports how many; for a sample written before this rule, pass `--db`
 with a copy of the database so each row's merge flag is resolved by SHA. A
 row whose status cannot be resolved stops the score with an error.
+`tga eval subsample --db` applies the same rule: it drops merge rows before
+drawing, writes `is_merge: false` on every subset row, and refuses a row it
+cannot resolve.
+
+Stratum weights leave merges out too. An older `strata.json` counts merges
+in each stratum population, and the window cannot be re-stratified without
+re-running the rules, so the merge count is estimated from the sample: a
+stratum with `m` merge rows among its `n` sample rows loses
+`round(population · m / n)` from its population, and the window population
+and `merges_excluded` move by the same total. Weighted accuracy, the
+coverage curve and the abstention share all use the adjusted populations. A
+sample drawn after this change holds no merges, so nothing is adjusted.
 
 A label is correct when it equals the predicted category,
 ignoring case; synonyms (`bug` vs `bugfix`) count as different, so raters
