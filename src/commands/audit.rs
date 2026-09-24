@@ -306,7 +306,7 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
         .zip(&config.repositories)
         .enumerate()
     {
-        let repository = repo_name(repo_cfg.name.as_deref(), &repo_cfg.path);
+        let repository = repo_name(repo_cfg.name.as_deref(), repo_cfg.name_path());
         match authorship_artifact(db, &output, &repository, i, &suggestions) {
             Ok(AuthorshipArtifact::Written(path)) => entry.authorship = Some(path),
             Ok(AuthorshipArtifact::NameMatchedNothing(recorded)) => {

@@ -103,9 +103,10 @@ fn build_github_http_client(token: Option<&str>) -> anyhow::Result<reqwest::Clie
 /// API and the caller must skip it.
 /// Test: covered by `resolve_repo_to_github_slug_*` unit tests.
 pub(super) fn resolve_repo_to_github_slug(repo_cfg: &RepositoryConfig) -> Option<(String, String)> {
+    // #111: names derive from the path as written (`name_path`).
     let repo_name = repo_cfg.name.clone().or_else(|| {
         repo_cfg
-            .path
+            .name_path()
             .file_name()
             .and_then(|n| n.to_str())
             .map(str::to_string)
@@ -239,7 +240,7 @@ pub(super) async fn ingest_github_releases(
         for repo_cfg in repositories {
             let repo_name = repo_cfg.name.clone().unwrap_or_else(|| {
                 repo_cfg
-                    .path
+                    .name_path()
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("(unknown)")
@@ -386,7 +387,7 @@ pub(super) async fn ingest_github_actions(
         for repo_cfg in repositories {
             let repo_name = repo_cfg.name.clone().unwrap_or_else(|| {
                 repo_cfg
-                    .path
+                    .name_path()
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("(unknown)")

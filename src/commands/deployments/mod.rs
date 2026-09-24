@@ -210,7 +210,7 @@ pub(super) fn ingest_git_tags(
         for repo_cfg in repositories {
             let repo_name = repo_cfg.name.clone().unwrap_or_else(|| {
                 repo_cfg
-                    .path
+                    .name_path()
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("(unknown)")

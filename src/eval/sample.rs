@@ -13,7 +13,7 @@ use super::draw::{draw, Candidate, DrawParams};
 use super::population::{load_commits, load_issue_types, load_paths, load_pr_titles, CommitRow};
 use super::records::{Diffstat, SampleRecord, StrataSummary, Stratum, StratumCounts};
 use super::redact::{redact_emails, strip_trailers};
-use super::verdict::resolve_verdicts;
+use super::verdict::{resolve_verdicts, CarryPolicy};
 use super::{io_err, open_eval_db, EvalError, Result};
 use crate::classify::ClassificationPipeline;
 use crate::core::config::Config;
@@ -119,7 +119,8 @@ pub fn run_sample(params: &SampleParams) -> Result<SampleSummary> {
     let engine = ClassificationPipeline::new(params.config.clone()).build_rule_engine()?;
     // #111: `sample` and `repredict` share one verdict resolution.
     let refs: Vec<&CommitRow> = window.iter().collect();
-    let (resolved, drifted) = resolve_verdicts(&engine, &refs);
+    let policy = CarryPolicy::from_config(&params.config);
+    let (resolved, drifted) = resolve_verdicts(&engine, &policy, &refs);
     if drifted > 0 {
         warn!(
             drifted,

@@ -14,7 +14,7 @@
 //! Test: `tests/eval_harness.rs::repredict_keeps_rows_and_follows_the_new_rules`,
 //! `tests/eval_harness.rs::repredict_refuses_a_sha_missing_from_the_db`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -25,7 +25,7 @@ use super::records::{SampleRecord, Stratum};
 use super::sample::{write_json, write_jsonl};
 use super::score::read_sample;
 use super::subsample::{create_private_dir, create_private_file};
-use super::verdict::resolve_verdicts;
+use super::verdict::{resolve_verdicts, CarryPolicy};
 use super::{io_err, open_eval_db, EvalError, Result};
 use crate::classify::ClassificationPipeline;
 use crate::core::config::Config;
@@ -74,9 +74,13 @@ pub struct Provenance {
     /// Rows that now predict no category (`uncategorized`/`unknown`, or no
     /// tier matched); `tga eval score` treats them as it always has.
     pub abstentions: u64,
-    /// Rows whose verdict was carried from the database (manual, LLM,
-    /// external source, repo fallback) rather than re-derived.
-    pub carried: u64,
+    /// Rows whose stored verdict was carried from the database rather than
+    /// re-derived, by method (`manual`, `llm`, `external_source`,
+    /// `repo_category`). #111: only tiers the config's cascade still reaches.
+    pub carried: BTreeMap<String, u64>,
+    /// Rows whose stored manual, LLM, external or repo-fallback verdict the
+    /// config no longer reaches, so the re-derived verdict replaced it.
+    pub superseded: u64,
 }
 
 /// What [`run_repredict`] wrote.
@@ -166,9 +170,11 @@ pub fn run_repredict(params: &RepredictParams) -> Result<RepredictSummary> {
     let commits: Vec<&CommitRow> = found.into_iter().flatten().collect();
 
     let engine = ClassificationPipeline::new(params.config.clone()).build_rule_engine()?;
-    let (resolved, _drifted) = resolve_verdicts(&engine, &commits);
+    let policy = CarryPolicy::from_config(&params.config);
+    let (resolved, _drifted) = resolve_verdicts(&engine, &policy, &commits);
 
-    let (mut changed, mut abstentions, mut carried) = (0u64, 0u64, 0u64);
+    let (mut changed, mut abstentions, mut superseded) = (0u64, 0u64, 0u64);
+    let mut carried: BTreeMap<String, u64> = BTreeMap::new();
     let records: Vec<SampleRecord> = sample
         .iter()
         .zip(&commits)
@@ -178,7 +184,10 @@ pub fn run_repredict(params: &RepredictParams) -> Result<RepredictSummary> {
             // #111: abstention means what it means in `tga eval sample`.
             abstentions +=
                 u64::from(Stratum::classify(v.tier, &v.category, v.confidence) == Stratum::Unknown);
-            carried += u64::from(v.carried);
+            if v.carried {
+                *carried.entry(v.tier.as_str().to_string()).or_default() += 1;
+            }
+            superseded += u64::from(v.superseded);
             SampleRecord {
                 method: v.tier.as_str().to_string(),
                 rule_id: v.rule_id.clone(),
@@ -212,15 +221,27 @@ pub fn run_repredict(params: &RepredictParams) -> Result<RepredictSummary> {
         changed,
         abstentions,
         carried,
+        superseded,
     };
 
     if let Some(dir) = params.out.parent().filter(|d| !d.as_os_str().is_empty()) {
         create_private_dir(dir)?;
     }
     create_private_file(&params.out)?;
-    create_private_file(&prov_path)?;
-    write_jsonl(&params.out, &records)?;
-    write_json(&prov_path, &provenance)?;
+    // #111 review: a failed write removes the files this run created, so a
+    // retry is not refused with "already exists".
+    let mut created = vec![params.out.as_path()];
+    let written = create_private_file(&prov_path).and_then(|()| {
+        created.push(prov_path.as_path());
+        write_jsonl(&params.out, &records)?;
+        write_json(&prov_path, &provenance)
+    });
+    if let Err(e) = written {
+        for f in created {
+            let _ = fs::remove_file(f);
+        }
+        return Err(e);
+    }
     Ok(RepredictSummary {
         provenance,
         files: vec![params.out.clone(), prov_path],

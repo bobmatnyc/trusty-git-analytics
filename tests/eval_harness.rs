@@ -1251,6 +1251,100 @@ fn repredict_refuses_a_sha_missing_from_the_db() {
     assert!(!eval::repredict::provenance_path(&out).exists());
 }
 
+/// Why: #111 review — a stored LLM, external or repo-fallback verdict may be
+/// carried only when the new config's cascade would still reach that tier;
+/// otherwise the rows measure the old classifier, not the new rules.
+/// What: `l1` (`fix: x`, stored LLM `feature`) re-derives as `defect` under v2
+/// with or without the LLM tier, since the exact rule's 0.85 is above the
+/// 0.65 fallback threshold. `u1` (`b`, stored LLM) abstains without the LLM
+/// tier and keeps its LLM verdict with it. `m1`'s manual override is always
+/// carried. Provenance counts carried rows by method and superseded ones.
+/// Fails on 7abf001, which carried both LLM rows unconditionally.
+/// Test: this function.
+#[test]
+fn repredict_carries_a_stored_verdict_only_when_its_tier_is_reached() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let rows = [
+        ("l1", "fix: x", "feature", 0.9, "llm_fallback"),
+        ("u1", "b", "feature", 0.8, "llm_fallback"),
+        ("m1", "fix: y", "chore", 1.0, "manual"),
+    ];
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|(sha, ..)| record(sha, "other", "llm", "feature", 0.9, 1.0))
+        .collect();
+    fs::write(d.join("sample.jsonl"), lines.join("\n") + "\n").expect("sample");
+    let db = Database::open(&d.join("tga.db")).expect("open db");
+    for (sha, message, category, confidence, method) in rows {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO classifications (category, confidence, method) VALUES (?1, ?2, ?3)",
+            params![category, confidence, method],
+        )
+        .expect("classification");
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+             repository, is_merge, classification_id) VALUES (?1, 'n', 'a@example.com', \
+             '2025-03-01T00:00:00Z', ?2, 'r', 0, ?3)",
+            params![sha, message, conn.last_insert_rowid()],
+        )
+        .expect("commit");
+    }
+    drop(db);
+
+    let run = |cfg_dir: &Path, use_llm: bool| {
+        fs::create_dir_all(cfg_dir).expect("mkdir");
+        let cfg = v2_config(cfg_dir);
+        if use_llm {
+            let text = fs::read_to_string(&cfg).expect("config");
+            fs::write(&cfg, text + "  use_llm: true\n").expect("config");
+        }
+        let out = cfg_dir.join("sample.jsonl");
+        let summary = eval::run_repredict(&eval::RepredictParams {
+            sample: d.join("sample.jsonl"),
+            db: d.join("tga.db"),
+            config: Config::load(&cfg).expect("load config"),
+            config_path: cfg,
+            out: out.clone(),
+        })
+        .expect("repredict");
+        let got: Vec<(String, String)> = read_sample(&out)
+            .into_iter()
+            .map(|r| (r.predicted_category, r.method))
+            .collect();
+        (got, summary.provenance)
+    };
+    let pair = |c: &str, m: &str| (c.to_string(), m.to_string());
+
+    let (got, p) = run(&d.join("no-llm"), false);
+    assert_eq!(
+        got,
+        vec![
+            pair("defect", "exact"),
+            pair("uncategorized", "unclassified"),
+            pair("chore", "manual"),
+        ]
+    );
+    assert_eq!(p.carried, [("manual".to_string(), 1)].into());
+    assert_eq!(p.superseded, 2);
+
+    let (got, p) = run(&d.join("llm"), true);
+    assert_eq!(
+        got,
+        vec![
+            pair("defect", "exact"),
+            pair("feature", "llm"),
+            pair("chore", "manual"),
+        ]
+    );
+    assert_eq!(
+        p.carried,
+        [("llm".to_string(), 1), ("manual".to_string(), 1)].into()
+    );
+    assert_eq!(p.superseded, 1);
+}
+
 /// Insert commits `(sha, message)` into a fresh database in repo `r`.
 fn db_with(path: &Path, rows: &[(&str, &str)]) {
     let db = Database::open(path).expect("open db");

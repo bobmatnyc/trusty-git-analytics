@@ -102,7 +102,8 @@ impl GitCollector {
         // manifest reads it back by must come from ONE function — a second copy
         // here disagreed whenever a configured name was blank, and a mismatched
         // name joins zero rows rather than erroring.
-        let name = crate::report::repo_name(config.name.as_deref(), &path);
+        // #111: the name comes from the path as the config wrote it.
+        let name = crate::report::repo_name(config.name.as_deref(), config.name_path());
 
         let since = parse_iso_date(config.since_date.as_deref())?;
         let until = parse_iso_date(config.until_date.as_deref())?;
@@ -1186,6 +1187,7 @@ mod tests {
             org: None,
             head_only: false,
             fetch_timeout_secs: None,
+            configured_path: None,
         }
     }
 
@@ -1206,6 +1208,7 @@ mod tests {
             org: None,
             head_only,
             fetch_timeout_secs: None,
+            configured_path: None,
         };
         GitCollector::new(&cfg)
             .expect("collector::new")

@@ -211,8 +211,14 @@ tga eval score --config ~/private/eval/config-v2.yaml \
   `confidence` become what the config's rules give for that commit. The
   commit is looked up by SHA and repository in `--db`, and classified from
   its message and merge flag, the inputs `tga classify` gives the cascade.
-  A verdict stored as manual, LLM, external source or repo fallback is
-  carried over, as `tga eval sample` does; no LLM or network tier is called.
+  No LLM or network tier is called. A stored verdict from a tier that is not
+  re-run is carried only when the config's cascade would still reach that
+  tier, the same rule `tga eval sample` applies: a manual override always;
+  an LLM verdict only when the config enables the LLM tier and the
+  re-derived confidence is at or below `llm_fallback_threshold`; an
+  external-source verdict only when the config still enables an external
+  source; a repo fallback only when no tier matches. Otherwise the
+  re-derived verdict replaces it.
 - **What stays.** The row set, the row order, each row's `stratum` and
   `weight`, and every commit field. Strata and weights describe the original
   draw, so `strata.json` still applies: write the output next to the source
@@ -226,13 +232,15 @@ tga eval score --config ~/private/eval/config-v2.yaml \
   file is never overwritten.
 - **Provenance.** `sample.v2.provenance.json` records the tga version, the
   config file and each rules file with its BLAKE3 hash, the source sample
-  and its hash, the database path, and how many rows changed, abstain, or
-  were carried from the database.
+  and its hash, the database path, how many rows changed or abstain, the
+  carried rows by method, and how many stored verdicts were superseded.
 
 A relative `rules_file` in the config is resolved against the config
 file's directory, as `database:` is, so `--config /abs/path/config.yaml`
 works from any directory. Repository paths, `output.directory`,
-`cache.directory` and `dora.datadog_dir` follow the same rule.
+`cache.directory` and `dora.datadog_dir` follow the same rule; use an
+absolute path to keep a working-directory-relative one. A name derived from
+a repository path still comes from the path as written.
 
 With `extend_defaults: false` the fuzzy tier is off, but the weighted-sum
 tier still names its own categories (`feature`, `bugfix`, `chore`,

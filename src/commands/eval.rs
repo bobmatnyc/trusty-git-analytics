@@ -344,13 +344,16 @@ fn run_repredict(
     .context("tga eval repredict")?;
     let p = &summary.provenance;
     println!(
-        "Re-predicted {} rows under {} (blake3 {}): {} changed, {} abstain, {} carried from the database",
+        "Re-predicted {} rows under {} (blake3 {}): {} changed, {} abstain, {} carried from the \
+         database {:?}, {} stored verdicts superseded",
         p.rows,
         p.config.path,
         &p.config.blake3[..16],
         p.changed,
         p.abstentions,
-        p.carried
+        p.carried.values().sum::<u64>(),
+        p.carried,
+        p.superseded
     );
     for f in &summary.files {
         println!("wrote {}", f.display());

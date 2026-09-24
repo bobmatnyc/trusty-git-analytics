@@ -11,6 +11,7 @@
 //! already anchored where they are read and are left alone here.
 //! Test: `tests::relative_paths_anchor_to_the_config_dir`,
 //! `tests::a_nameless_repo_keeps_its_old_name`,
+//! `tests::path_dot_resolves_the_github_slug_from_the_remote`,
 //! `tests/eval_harness.rs::rules_file_resolves_from_another_cwd`.
 
 use std::path::{Path, PathBuf};
@@ -23,11 +24,12 @@ use super::Config;
 /// Why: see the module doc. What: anchors `classification.rules_files`,
 /// `repositories[].path`, `output.directory`, `cache.directory` and
 /// `dora.datadog_dir`; absolute and `~` paths are only `~`-expanded. A
-/// repository with no `name` whose path has no final component (`.`, `..`)
-/// took its display name from the raw path; that name is pinned into `name`
-/// so anchoring cannot rename the repository in stored data.
+/// relative repository path is kept in `configured_path`, which names are
+/// derived from ([`super::RepositoryConfig::name_path`]), so `path: .` keeps
+/// its stored name and its GitHub slug still comes from the remote.
 /// Test: `tests::relative_paths_anchor_to_the_config_dir`,
-/// `tests::a_nameless_repo_keeps_its_old_name`.
+/// `tests::a_nameless_repo_keeps_its_old_name`,
+/// `tests::path_dot_resolves_the_github_slug_from_the_remote`.
 pub(crate) fn anchor_relative_paths(config: &mut Config, config_dir: &Path, home: Option<&Path>) {
     let anchor = |p: &mut PathBuf| {
         if let Some(resolved) = resolve_with_home(Some(p), Some(config_dir), home) {
@@ -38,9 +40,10 @@ pub(crate) fn anchor_relative_paths(config: &mut Config, config_dir: &Path, home
         c.rules_files.iter_mut().for_each(anchor);
     }
     for repo in &mut config.repositories {
-        let relative = !super::expand_path_with(&repo.path, home).is_absolute();
-        if relative && repo.name.is_none() && repo.path.file_name().is_none() {
-            repo.name = Some(repo.path.display().to_string());
+        // #111: names derive from the path as written (`name_path`), never
+        // from the anchored one, and `name` itself is left untouched.
+        if !super::expand_path_with(&repo.path, home).is_absolute() {
+            repo.configured_path = Some(repo.path.clone());
         }
         anchor(&mut repo.path);
     }
@@ -97,17 +100,60 @@ mod tests {
 
     /// Why: a repository's stored name comes from its path's last component,
     /// falling back to the whole path; anchoring `.` would rename it to the
-    /// config directory's name and split its history in the database.
-    /// What: `.` without a name gets `name: "."`; `repos/a` gets no name, since
-    /// its last component is unchanged by anchoring; a set name is kept.
+    /// config directory's name and split its history in the database. A blank
+    /// `name` counts as unset (#111 review).
+    /// What: `name` is never written; the stored name (`report::repo_name`
+    /// over `name_path`) is `.` for `path: .`, with or without `name: ""`,
+    /// `a` for `repos/a`, and a set name wins.
     /// Test: this function.
     #[test]
     fn a_nameless_repo_keeps_its_old_name() {
-        let mut cfg =
-            parse("repositories:\n  - path: .\n  - path: repos/a\n  - path: ..\n    name: up\n");
+        let mut cfg = parse(
+            "repositories:\n  - path: .\n  - path: .\n    name: \"\"\n  - path: repos/a\n  \
+             - path: ..\n    name: up\n",
+        );
         anchor_relative_paths(&mut cfg, Path::new("/cfg"), None);
         let names: Vec<Option<&str>> = cfg.repositories.iter().map(|r| r.name.as_deref()).collect();
-        assert_eq!(names, vec![Some("."), None, Some("up")]);
-        assert_eq!(cfg.repositories[1].path, PathBuf::from("/cfg/repos/a"));
+        assert_eq!(names, vec![None, Some(""), None, Some("up")]);
+        let stored: Vec<String> = cfg
+            .repositories
+            .iter()
+            .map(|r| crate::report::repo_name(r.name.as_deref(), r.name_path()))
+            .collect();
+        assert_eq!(stored, vec![".", ".", "a", "up"]);
+        assert_eq!(cfg.repositories[2].path, PathBuf::from("/cfg/repos/a"));
+    }
+
+    /// Why: #111 review — `path: .` with `github.org` and no `name` found its
+    /// GitHub slug from the clone's `origin` remote; a derived name of `.` or
+    /// of the config directory would ask GitHub for the wrong repository and
+    /// report zero PRs without an error.
+    /// What: a config inside a clone whose origin is `acme/widget` resolves to
+    /// `acme/widget`, leaves `name` unset and keeps the stored name `.`.
+    /// Test: this function.
+    #[test]
+    fn path_dot_resolves_the_github_slug_from_the_remote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("git init");
+        repo.remote("origin", "https://github.com/acme/widget.git")
+            .expect("remote");
+        let cfg_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg_path,
+            "repositories:\n  - path: .\ngithub:\n  org: acme\n",
+        )
+        .expect("write config");
+        let cfg = Config::load(&cfg_path).expect("load");
+        let github = cfg.github.as_ref().expect("github section");
+        assert_eq!(
+            crate::collect::github::resolve_github_repos(github, &cfg.repositories),
+            vec![("acme".to_string(), "widget".to_string())]
+        );
+        let r = &cfg.repositories[0];
+        assert_eq!(r.name, None);
+        assert_eq!(
+            crate::report::repo_name(r.name.as_deref(), r.name_path()),
+            "."
+        );
     }
 }
