@@ -6,10 +6,132 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [8.0.1] — 2026-09-23
+## [9.0.0] — 2026-09-24
+
+### Breaking
+
+- The public subcommand enums in `tga::commands` are now `#[non_exhaustive]`
+  (#111): `EvalSubcommand`, `RulesSubcommand`, `OverrideSubcommand`,
+  `InspectSubcommand`, `BackfillSubcommand`, `AliasesSubcommand`,
+  `DeploymentsSubcommand`, `IncidentsSubcommand`, `JiraSubcommand` and
+  `LinearSubcommand`. The same applies to the public clap value enums
+  `ListFormat`, `AuthorFormat`, `InstallHost` and `InstallPm`. A downstream
+  `match` on any of them needs a wildcard (`_ =>`) arm; constructing a
+  variant still works. In return, a future subcommand or flag value is an
+  additive change and no longer forces a major release. The CLI itself is
+  unchanged.
+- Relative `output.directory`, `cache.directory` and `dora.datadog_dir`
+  values in a config file now resolve from the config file's directory, as
+  the Python tool does, not from the working directory (#111). A shared
+  `~/cfg/tga.yaml` with `output: {directory: reports}`, run from inside each
+  repository, now writes to `~/cfg/reports`. Use absolute paths to keep the
+  old behaviour. `repositories[].path` is unchanged: a relative repository
+  path still resolves from the working directory.
+- `tga eval sample` keeps a commit's stored verdict from a tier it does not
+  re-run only when the sampling config still reaches that tier, as
+  `tga classify` would (#111). A stored LLM verdict is kept only when the
+  config enables the LLM tier (an `llm:` section or
+  `classification.use_llm`) and the re-derived confidence is at or below
+  `llm_fallback_threshold`. A stored external-source verdict is kept only
+  when an external source is configured. A stored repo fallback is never
+  kept. Manual overrides are always kept. Any other commit is stratified by
+  its re-derived verdict, so on the same database and seed a config without
+  `llm:` can place formerly-LLM commits in other strata and draw a different
+  sample than earlier releases did.
+- `persist_weekly_engineer` and `persist_weekly_quality` (`tga::report`) gain
+  a new required `scope: PersistScope` parameter (#111): `PersistScope::Full`
+  for a run that aggregated every commit, `PersistScope::Authors` for an
+  `--author`-scoped run. A caller passing the old two-argument signature no
+  longer compiles.
+- A commit with 2+ parents is a merge, and it is excluded from metrics and
+  from the eval (#111). Squash and rebase commits (1 parent) are normal
+  commits, classified by content. Reports drop merges from total and
+  per-author, per-repo and weekly commit counts, the category breakdown,
+  the unresolved-author commit count, `fact_weekly_engineer` and
+  `fact_weekly_quality`, the quality score, `tga author` drill-downs and
+  period trends. DORA change-failure rate and MTTR skip merges in both
+  places they are computed: the report aggregator, and `tga dora`, whose
+  failure scan now checks the first non-merge commit after a deploy. Merges
+  stay in the database, and a deploy whose `git_sha` is a merge still gets a
+  measured lead time. **Historical totals drop by the merge count.**
+  `fact_weekly_engineer` and `fact_weekly_quality` rows are written with
+  `formula_version` `v2`; each persist run deletes rows of an older formula
+  and, for every author it writes, rows it no longer produces, so a
+  merge-only week keeps no merge-inclusive row. `tga eval sample` never
+  draws a merge; `strata.json` gains `merges_excluded`, and `population` no
+  longer counts merges. `tga eval score` excludes merge rows and their
+  labels and reports `merges_excluded`; a sample written before this change
+  needs `--db` to resolve each row's merge flag by SHA. `tga eval subsample`
+  drops merge rows before drawing and refuses rows of unknown merge status.
 
 ### Added
 
+- `tga eval sample` and `tga eval score`, a classifier precision harness
+  (#111). `sample` re-classifies a window of a read-only database copy with
+  rule tracing and draws a seeded, stratified sample capped per repository
+  and per author, writing `sample.jsonl`, a rater sheet `labels.csv` with the
+  prediction hidden, and `strata.json`. `score` turns one or two rater files
+  (plus optional adjudication) into `report.md` / `report.json`: precision
+  per rule, method and stratum with Wilson 95% intervals, stratum-weighted
+  accuracy, a coverage-at-precision curve, a confusion matrix, the
+  abstention share and Cohen's kappa. The outputs contain commit text and
+  have no default location; see `docs/eval-harness.md`. The rater sheet
+  drops identity trailers and replaces e-mail addresses with `<email>`.
+- `tga eval score` accepts the label `release_merge` (eval scheme v2), which
+  scores as no answer like `unclear` and `mixed`; `report.json` and
+  `report.md` count it on its own (#111). `tga eval score --config` accepts
+  every category the config's rules file emits, not only those in its
+  taxonomy, so a v2 rules file is enough to validate v2 labels. `tga eval
+  score --db <path>` resolves the merge flag of sample rows that lack one,
+  from a read-only copy of the tga database.
+- `tga eval repredict --config <cfg> --sample <sample.jsonl> --db <tga.db>
+  --out <out.jsonl>` re-derives an existing sample's predictions under a
+  config's rules, so a sample labelled under old rules can be scored under
+  new ones (#111). Rows keep their order, SHA, stratum and weight; only
+  `predicted_category`, `method`, `rule_id` and `confidence` change. A row
+  whose commit is not in the database stops the run, the database is opened
+  read-only, and `<out>.provenance.json` records the tga version and the
+  BLAKE3 hashes of the config and its rules files.
+- `tga eval subsample --from <sample.jsonl> --size N --seed S --out <dir>`
+  draws a seeded subset of an existing eval sample for a second rater
+  (#111). Each stratum's share of N follows its share of the source rows,
+  by largest remainder, so the subset has exactly N rows; no label file is
+  read. It writes the subset's `sample.jsonl`, a blind `labels.csv` with the
+  same columns and redaction as `tga eval sample`, and a `strata.json` that
+  records the seed. The directory is created 0700 and the files 0600 on
+  Unix, and existing output files are never overwritten.
+- `classification.llm_fallback_scope: unanswered` sends only the commits the
+  rules left uncategorized to the LLM tier; the default `low_confidence`
+  keeps the `llm_fallback_threshold` routing (#111). `tga eval repredict`
+  carries a stored LLM verdict under the same rule, and supersedes one
+  whose category is outside a custom-only rules set.
+- LLM token accounting: every LLM-tier call records its input/output tokens
+  from the provider reply in the new `llm_usage` table (migration v31), and
+  `tga classify` prints call counts by outcome (adopted, not adopted,
+  abstained, out-of-set, failed), token totals and tokens per call (#111).
+  Rows are written before the classification write-back.
+- `tga classify --shas <file>` classifies only the listed commit SHAs and
+  fails before any write on an empty list, an unknown SHA, or (with
+  `--force`) a SHA a `--repos`/`--since`/`--until` filter excludes. It writes, so
+  use it on a scratch database copy (#111).
+- Rules files accept a top-level `categories:` list with an optional
+  `description` per category, and the `llm:` section accepts
+  `effort: low|medium|high|xhigh|max` for `anthropic-api` (#131).
+- Rule tracing for the classification cascade (#111):
+  `ClassificationEngine::classify_sync_traced` and `classify_batch_traced`
+  return each verdict with a `RuleTrace` naming the tier and a stable rule id
+  (`<rules file or builtin>#<rule id>`, `catch_all`,
+  `weighted_sum:<category>/<signal>`, `fuzzy:<heuristic>`,
+  `jira_project:<KEY>`, ...). The trace is held in memory only; `tga classify`
+  writes byte-identical `classifications` rows, pinned by a golden test over
+  the recorded corpus. `ClassificationPipeline::build_rule_engine` exposes the
+  rule engine `tga classify` uses, without the LLM tier, and
+  `load_rules_multi_with_sources` records which rules file defined each rule.
+- `DeploymentsSubcommandArgs::run`, `IncidentsSubcommandArgs::run`,
+  `JiraSubcommandArgs::run` and `LinearSubcommandArgs::run` in
+  `tga::commands::args` dispatch the selected operation (#111). Library
+  callers use them instead of matching the now `#[non_exhaustive]`
+  subcommand enums, so a new operation reaches them without a code change.
 - `commits.ai_detection_method` records which signal family produced each
   `is_ai_assisted` verdict — `trailer`, `message`, or `email` — and is NULL for
   a commit no marker claimed (trusty-tools#4418). Consumers can now cut the trailer-matched
@@ -57,6 +179,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- A relative `classification.rules_file` in a config is now resolved against
+  the config file's directory, as `database:` already was, instead of the
+  process working directory (#111). `tga --config /abs/path/config.yaml` run
+  from another directory no longer fails with an I/O error.
 - `compute_dora()` now reads `fact_deployments` (`environment='production',
   status='success'`, filtered to the report period) for deployment frequency
   and lead time, instead of always counting merged PRs as a deploy proxy
@@ -130,6 +256,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- With `extend_defaults: false`, the LLM prompt offers only the configured
+  categories plus an `unclear` abstain option, and a reply outside that set
+  is dropped instead of stored (#131). Other configs keep the built-in list.
+- The `anthropic-api` default model is now `claude-haiku-4-5`; the previous
+  default, Claude Haiku 3.5, is retired. The Anthropic request allows 2048
+  output tokens so adaptive thinking on Claude Sonnet 5 fits (#131).
+- A non-2xx LLM reply now logs the provider's error body, cut to 500
+  characters (never headers or the key), so a 400 such as a model rejecting
+  `effort` is diagnosable (#131).
+- `tga eval score` scores the first `--labels` file only (#111). Precision,
+  weighted accuracy and coverage use that rater's labels over the rows it
+  labelled, with `--adjudicated` overriding them; the second file feeds
+  Cohen's kappa over the SHAs both labelled, and the two sheets may cover
+  different rows. An unadjudicated disagreement is still counted but no
+  longer drops the row from precision. `report.json` gains `scored_rater`.
+  The coverage curve weights each labelled row by its stratum population ÷
+  rows labelled in that stratum instead of the sample's stored `weight`, so
+  a subset or a partly filled sheet no longer skews coverage precision
+  toward the source sample's allocation.
 - `tga` now lives in `bobmatnyc/trusty-git-analytics`, split out of `bobmatnyc/trusty-tools`, and depends on the published `trusty-common`/`trusty-progress` crates.io releases instead of in-workspace paths — no functional change from 8.0.0 beyond moving the two agentic-detection corpus tests onto a recorded history fixture. CI, release, and semver workflows for the standalone repository land alongside it (#109).
 - `tga tui` now builds against ratatui 0.30 and crossterm 0.29, up from 0.29 and 0.28, following the workspace pins that trusty-tools#2872 bumped to drop the vulnerable transitive `lru 0.12.5`. No tga source changed — ratatui 0.30's facade re-exports the types the TUI names.
 - The fallback contributor-profile narrative now counts distinct recurring issues rather than tagged occurrences, so one issue seen in three periods reads as 1 recurring issue instead of 3 (trusty-tools#5490).
