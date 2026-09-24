@@ -83,6 +83,18 @@ fn stratum_seed(seed: u64, stratum: Stratum) -> u64 {
     u64::from_le_bytes(first)
 }
 
+/// Fisher-Yates shuffle driven by a SplitMix64 stream seeded with `seed`.
+///
+/// Callers sort `items` first, so the result depends only on the item set and
+/// the seed. Shared by [`draw`] and `eval::subsample`.
+pub(crate) fn seeded_shuffle<T>(items: &mut [T], seed: u64) {
+    let mut rng = SplitMix64(seed);
+    for i in (1..items.len()).rev() {
+        let j = rng.below(i as u64 + 1) as usize;
+        items.swap(i, j);
+    }
+}
+
 /// Equal allocation of `size` across strata, capped by each one's capacity.
 ///
 /// Why: equal allocation gives every stratum — including small, low-precision
@@ -141,11 +153,7 @@ pub fn draw(candidates: &[Candidate], params: &DrawParams) -> Draw {
             continue;
         };
         members.sort_by(|a, b| candidates[*a].sha.cmp(&candidates[*b].sha));
-        let mut rng = SplitMix64(stratum_seed(params.seed, stratum));
-        for i in (1..members.len()).rev() {
-            let j = rng.below(i as u64 + 1) as usize;
-            members.swap(i, j);
-        }
+        seeded_shuffle(members, stratum_seed(params.seed, stratum));
         let mut per_repo: HashMap<&str, usize> = HashMap::new();
         let mut per_author: HashMap<&str, usize> = HashMap::new();
         let mut walk = Vec::new();

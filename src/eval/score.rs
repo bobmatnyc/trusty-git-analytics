@@ -94,9 +94,13 @@ pub struct Abstention {
 /// Everything `report.json` holds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScoreReport {
+    /// File name of the first `--labels` file, the rater whose labels (with
+    /// adjudication) are scored; a second rater only feeds `kappa`.
+    #[serde(default)]
+    pub scored_rater: String,
     /// Sampled commits.
     pub sample_size: u64,
-    /// Commits with a final label.
+    /// Commits with a final label: the scored rater's labelled rows.
     pub labelled: u64,
     /// Commits scored for precision.
     pub scored: u64,
@@ -104,7 +108,8 @@ pub struct ScoreReport {
     pub unclear: u64,
     /// Final label `mixed`.
     pub mixed: u64,
-    /// Two raters disagreed and no adjudication resolved it.
+    /// Two raters disagreed and no adjudication resolved it; the scored
+    /// rater's label is still the one scored.
     pub unresolved_disagreements: u64,
     /// Precision per rule id.
     pub per_rule: Vec<PrecisionRow>,
@@ -114,7 +119,7 @@ pub struct ScoreReport {
     pub per_stratum: Vec<PrecisionRow>,
     /// Stratum-weighted accuracy; `None` without scored labels.
     pub weighted_accuracy: Option<WeightedAccuracy>,
-    /// Coverage at each confidence threshold present in the sample.
+    /// Coverage at each confidence threshold among the labelled rows.
     pub coverage_curve: Vec<CoveragePoint>,
     /// Counts by predicted category, then final label.
     pub confusion: BTreeMap<String, BTreeMap<String, u64>>,
@@ -156,7 +161,15 @@ fn read_labels(path: &Path, valid: &BTreeSet<String>) -> Result<BTreeMap<String,
     Ok(out)
 }
 
-fn read_sample(path: &Path) -> Result<Vec<SampleRecord>> {
+pub(crate) fn read_strata(path: &Path) -> Result<StrataSummary> {
+    let text = fs::read_to_string(path).map_err(io_err(path))?;
+    serde_json::from_str(&text).map_err(|source| EvalError::Json {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+pub(crate) fn read_sample(path: &Path) -> Result<Vec<SampleRecord>> {
     let text = fs::read_to_string(path).map_err(io_err(path))?;
     text.lines()
         .filter(|l| !l.trim().is_empty())
@@ -201,18 +214,25 @@ fn precision_rows<'a>(
 
 /// Score the labels and write `report.md` and `report.json`.
 ///
-/// Why: see [`crate::eval`]. What: final label per SHA is the adjudicated
-/// one, else the single rater's, else the two raters' shared label; a
-/// disagreement stays unresolved and unscored. `unclear` and `mixed` are
-/// counted but excluded from precision. Precision rows use Wilson 95%
-/// intervals; the weighted accuracy is the stratified estimator
-/// Σ W_h · p_h with W_h from `strata.json`.
-/// Test: `tests/eval_harness.rs::score_computes_expected_metrics`.
+/// Why: see [`crate::eval`]. What: the first `--labels` file is the scored
+/// rater. The rows it labels (a blank `label` is unlabelled) are the scored
+/// set, and each row's final label is the adjudicated one, else that rater's.
+/// A second file only feeds Cohen's kappa over the SHAs both labelled, and
+/// the SHA sets may differ; an unadjudicated disagreement is counted but
+/// does not drop the row. `unclear` and `mixed` are counted but excluded
+/// from precision. Precision rows use Wilson 95% intervals; the weighted
+/// accuracy is Σ W_h · p_h with W_h from the `strata.json` populations, and
+/// the coverage curve weights each labelled row by its stratum population ÷
+/// labelled rows in that stratum, never by the sample's stored `weight`.
+/// Test: `tests/eval_harness.rs::score_computes_expected_metrics`,
+/// `tests/eval_harness.rs::score_weights_by_labelled_rows`,
+/// `tests/eval_harness.rs::score_pairs_a_subset_rater_with_a_full_rater`.
 ///
 /// # Errors
 ///
 /// I/O and parse failures; [`EvalError::Invalid`] for an unknown label, a
-/// label for a SHA outside the sample, or more than two rater files.
+/// label for a SHA outside the sample, an adjudicated SHA the scored rater
+/// left blank, or more than two rater files.
 pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
     if params.labels.is_empty() || params.labels.len() > 2 {
         return Err(EvalError::Invalid("pass one or two --labels files".into()));
@@ -225,12 +245,7 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
             .unwrap_or(Path::new("."))
             .join("strata.json")
     });
-    let strata_text = fs::read_to_string(&strata_path).map_err(io_err(&strata_path))?;
-    let strata: StrataSummary =
-        serde_json::from_str(&strata_text).map_err(|source| EvalError::Json {
-            path: strata_path.clone(),
-            source,
-        })?;
+    let strata = read_strata(&strata_path)?;
 
     let mut valid: BTreeSet<String> = params
         .categories
@@ -256,11 +271,19 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
     for sha in raters.iter().chain([&adjudicated]).flat_map(|m| m.keys()) {
         if !in_sample.contains(sha.as_str()) {
             return Err(EvalError::Invalid(format!(
-                "label for {sha}, which is not in the sample"
+                "label for {sha}, which is not in the sample; score against a sample holding \
+                 every rater's rows (for a subsample, the source sample.jsonl)"
             )));
         }
     }
+    // #111: adjudication settles the scored rater's rows; it cannot add rows.
+    if let Some(sha) = adjudicated.keys().find(|s| !raters[0].contains_key(*s)) {
+        return Err(EvalError::Invalid(format!(
+            "adjudicated label for {sha}, which the first --labels file leaves blank"
+        )));
+    }
 
+    // Kappa pairs only the SHAs both raters labelled, so the sets may differ.
     let kappa = if raters.len() == 2 {
         let pairs: Vec<(String, String)> = raters[0]
             .iter()
@@ -271,26 +294,26 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
         None
     };
 
-    // Final label per record: Some(label), or None when unlabelled/unresolved.
-    let mut unresolved = 0u64;
+    // #111: final label per record is the adjudicated one, else the first
+    // rater's; None when that rater left the row blank. The second rater never
+    // supplies a scored label, so precision stays one rater's over its rows.
     let finals: Vec<Option<String>> = sample
         .iter()
         .map(|r| {
-            if let Some(l) = adjudicated.get(&r.sha) {
-                return Some(l.clone());
-            }
-            let given: Vec<&String> = raters.iter().filter_map(|m| m.get(&r.sha)).collect();
-            match given.as_slice() {
-                [one] => Some((*one).clone()),
-                [a, b] if a == b => Some((*a).clone()),
-                [_, _] => {
-                    unresolved += 1;
-                    None
-                }
-                _ => None,
-            }
+            adjudicated
+                .get(&r.sha)
+                .or_else(|| raters[0].get(&r.sha))
+                .cloned()
         })
         .collect();
+    let unresolved = raters.get(1).map_or(0, |second| {
+        raters[0]
+            .iter()
+            .filter(|(sha, a)| {
+                !adjudicated.contains_key(*sha) && second.get(*sha).is_some_and(|b| b != *a)
+            })
+            .count() as u64
+    });
 
     // outcome: Some(Some(correct)) scored, Some(None) unclear/mixed, None unlabelled.
     let outcomes: Vec<Option<Option<bool>>> = sample
@@ -315,7 +338,7 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
         precision_rows(labelled_rows().map(|(r, o)| (r.stratum.as_str().to_string(), o)));
 
     let weighted_accuracy = weighted_accuracy(&per_stratum, &strata);
-    let coverage_curve = coverage_curve(&sample, &outcomes);
+    let coverage_curve = coverage_curve(&labelled_weights(&sample, &outcomes, &strata));
 
     let mut confusion: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
     for (r, l) in sample.iter().zip(&finals) {
@@ -343,6 +366,9 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
 
     let count = |f: &dyn Fn(&str) -> bool| finals.iter().flatten().filter(|l| f(l)).count() as u64;
     let report = ScoreReport {
+        scored_rater: params.labels[0]
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
         sample_size: sample.len() as u64,
         labelled: finals.iter().flatten().count() as u64,
         scored: outcomes
@@ -407,26 +433,57 @@ fn weighted_accuracy(
     })
 }
 
-fn coverage_curve(
+/// A labelled row as the coverage curve sees it.
+struct WeightedRow {
+    confidence: f64,
+    /// Stratum population ÷ labelled rows in the stratum.
+    weight: f64,
+    /// `Some(correct)` when scored, `None` for `unclear` / `mixed`.
+    outcome: Option<bool>,
+}
+
+/// #111: weight each labelled row by its stratum population over the rows
+/// labelled in that stratum. The sample's stored `weight` divides by the
+/// source allocation, which is wrong for a subset or a partly labelled sheet.
+fn labelled_weights(
     sample: &[SampleRecord],
     outcomes: &[Option<Option<bool>>],
-) -> Vec<CoveragePoint> {
-    let mut thresholds: Vec<f64> = sample.iter().map(|r| r.confidence).collect();
+    strata: &StrataSummary,
+) -> Vec<WeightedRow> {
+    let mut labelled: BTreeMap<Stratum, u64> = BTreeMap::new();
+    for (r, o) in sample.iter().zip(outcomes) {
+        if o.is_some() {
+            *labelled.entry(r.stratum).or_default() += 1;
+        }
+    }
+    sample
+        .iter()
+        .zip(outcomes)
+        .filter_map(|(r, o)| {
+            o.map(|outcome| WeightedRow {
+                confidence: r.confidence,
+                weight: strata.population_of(r.stratum) as f64
+                    / labelled.get(&r.stratum).copied().unwrap_or(1).max(1) as f64,
+                outcome,
+            })
+        })
+        .collect()
+}
+
+fn coverage_curve(rows: &[WeightedRow]) -> Vec<CoveragePoint> {
+    let mut thresholds: Vec<f64> = rows.iter().map(|r| r.confidence).collect();
     thresholds.sort_by(f64::total_cmp);
     thresholds.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    let total_weight: f64 = sample.iter().map(|r| r.weight).sum();
+    let total_weight: f64 = rows.iter().map(|r| r.weight).sum();
     thresholds
         .into_iter()
         .map(|t| {
             let (mut kept_weight, mut w_scored, mut w_correct, mut n) = (0.0, 0.0, 0.0, 0u64);
-            for (r, o) in sample.iter().zip(outcomes) {
-                if r.confidence < t - 1e-9 {
-                    continue;
-                }
+            for r in rows.iter().filter(|r| r.confidence >= t - 1e-9) {
                 kept_weight += r.weight;
-                if let Some(Some(correct)) = o {
+                if let Some(correct) = r.outcome {
                     w_scored += r.weight;
-                    w_correct += if *correct { r.weight } else { 0.0 };
+                    w_correct += if correct { r.weight } else { 0.0 };
                     n += 1;
                 }
             }

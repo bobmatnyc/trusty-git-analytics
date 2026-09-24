@@ -270,6 +270,7 @@ pub fn run_sample(params: &SampleParams) -> Result<SampleSummary> {
             })
             .collect(),
         categories: categories.into_keys().collect(),
+        subsample: None,
     };
 
     fs::create_dir_all(&params.out).map_err(io_err(&params.out))?;
@@ -295,7 +296,7 @@ pub fn run_sample(params: &SampleParams) -> Result<SampleSummary> {
     })
 }
 
-fn write_jsonl(path: &Path, records: &[SampleRecord]) -> Result<PathBuf> {
+pub(crate) fn write_jsonl(path: &Path, records: &[SampleRecord]) -> Result<PathBuf> {
     let file = fs::File::create(path).map_err(io_err(path))?;
     let mut w = BufWriter::new(file);
     for r in records {
@@ -320,7 +321,7 @@ pub(crate) fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<
 
 /// Rater sheet: the prediction is hidden, and rows are ordered by a salted
 /// hash of the SHA so the stratum cannot be read off the row order.
-fn write_labels(path: &Path, records: &[SampleRecord], salt: &str) -> Result<PathBuf> {
+pub(crate) fn write_labels(path: &Path, records: &[SampleRecord], salt: &str) -> Result<PathBuf> {
     let csv_err = |source| EvalError::Csv {
         path: path.to_path_buf(),
         source,

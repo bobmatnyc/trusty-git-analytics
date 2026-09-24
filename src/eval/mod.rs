@@ -1,4 +1,5 @@
-//! Classifier precision harness (#111): `tga eval sample` and `tga eval score`.
+//! Classifier precision harness (#111): `tga eval sample`, `tga eval
+//! subsample` and `tga eval score`.
 //!
 //! Why: the classification cascade reports a category and a confidence for
 //! every commit, but nothing measured how often those verdicts are right. A
@@ -6,7 +7,8 @@
 //! fix, and how much of the population the cascade abstains on.
 //! What: [`sample`] re-classifies a window of commits from a read-only
 //! database copy with the traced rule engine, stratifies the verdicts, and
-//! draws a capped, seeded sample for human raters. [`score`] joins the raters'
+//! draws a capped, seeded sample for human raters; [`subsample`] draws a
+//! proportional, seeded subset of that sample. [`score`] joins the raters'
 //! labels to that sample and computes per-rule, per-method and per-stratum
 //! precision with Wilson intervals, a stratum-weighted accuracy, a
 //! coverage-at-precision curve, a confusion matrix, the abstention share and
@@ -21,6 +23,8 @@ pub mod records;
 pub mod sample;
 pub mod score;
 pub mod stats;
+// #111: a proportional, seeded subset of a sample for a second rater.
+pub mod subsample;
 
 mod population;
 // #111: strip identity trailers and e-mails from the rater sheet.
@@ -35,6 +39,7 @@ use thiserror::Error;
 pub use records::{SampleRecord, StrataSummary, Stratum};
 pub use sample::{run_sample, SampleParams, SampleSummary};
 pub use score::{run_score, ScoreParams, ScoreReport};
+pub use subsample::{run_subsample, SubsampleParams, SubsampleSummary};
 
 /// Errors raised by the eval harness.
 #[derive(Debug, Error)]

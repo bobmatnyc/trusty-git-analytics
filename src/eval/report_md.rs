@@ -67,6 +67,11 @@ pub(crate) fn render(report: &ScoreReport, strata: &StrataSummary) -> String {
     );
 
     out.push_str("## Summary\n\n");
+    let _ = writeln!(
+        out,
+        "- Precision and coverage use the labels in `{}` (the first --labels file)",
+        report.scored_rater
+    );
     match &report.weighted_accuracy {
         Some(w) => {
             let _ = writeln!(

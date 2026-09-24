@@ -2,7 +2,8 @@
 //!
 //! Why: measure how often the classification cascade is right, per rule and
 //! per method, from a human-labelled stratified sample.
-//! What: `sample` draws the sample from a read-only database copy; `score`
+//! What: `sample` draws the sample from a read-only database copy; `subsample`
+//! draws a proportional subset of a sample; `score`
 //! turns rater labels into a precision report. The library side lives in
 //! [`tga::eval`]; this module only parses flags and prints summaries.
 //! Test: `tests/eval_harness.rs`.
@@ -13,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 
 use tga::core::config::Config;
-use tga::eval::{self, SampleParams, ScoreParams, Stratum};
+use tga::eval::{self, SampleParams, ScoreParams, Stratum, SubsampleParams};
 
 const PRIVACY: &str = "PRIVACY: every file this command writes contains commit text \
 (subjects, bodies, paths, PR titles). Store the output directory privately, outside any \
@@ -35,6 +36,13 @@ pub enum EvalSubcommand {
     /// Draw a stratified, capped, seeded sample of classified commits for labelling.
     #[command(after_help = PRIVACY)]
     Sample(SampleArgs),
+    /// Draw a seeded subset of an existing sample, proportional per stratum.
+    ///
+    /// Writes sample.jsonl, a blind labels.csv and strata.json for the subset.
+    /// No label file is read. Score a rater of the subset alongside a rater of
+    /// the full sample with `score --sample <source sample.jsonl>`.
+    #[command(after_help = PRIVACY)]
+    Subsample(SubsampleArgs),
     /// Score rater labels against a sample: precision per rule, method and stratum.
     ///
     /// Valid labels are the categories recorded in strata.json, or the taxonomy
@@ -72,17 +80,42 @@ pub struct SampleArgs {
     pub out: PathBuf,
 }
 
+/// Flags for `tga eval subsample`.
+#[derive(Args, Debug)]
+pub struct SubsampleArgs {
+    /// sample.jsonl written by `tga eval sample`.
+    #[arg(long)]
+    pub from: PathBuf,
+    /// strata.json of that sample; defaults to the one next to it.
+    #[arg(long)]
+    pub strata: Option<PathBuf>,
+    /// Rows in the subset (at most the source's rows).
+    #[arg(long)]
+    pub size: usize,
+    /// RNG seed; the same seed on the same sample draws the same subset.
+    #[arg(long)]
+    pub seed: u64,
+    /// Output directory (private, outside any repository); must not already
+    /// hold sample.jsonl, labels.csv or strata.json. Required.
+    #[arg(long)]
+    pub out: PathBuf,
+}
+
 /// Flags for `tga eval score`.
 #[derive(Args, Debug)]
 pub struct ScoreArgs {
     /// sample.jsonl written by `tga eval sample`.
     #[arg(long)]
     pub sample: PathBuf,
-    /// Rater label file (labels.csv with the `label` column filled). Repeat once
-    /// for a second rater; Cohen's kappa is then reported.
+    /// Rater label file (labels.csv with the `label` column filled; a blank
+    /// label is unlabelled). The first file is the scored rater: precision
+    /// and coverage use its labels over its rows. Repeat once for a second
+    /// rater, whose rows may differ; Cohen's kappa is then reported over the
+    /// SHAs both labelled.
     #[arg(long, required = true, num_args = 1)]
     pub labels: Vec<PathBuf>,
-    /// Adjudicated labels (same format); they settle rater disagreements.
+    /// Adjudicated labels (same format); they replace the first rater's label
+    /// on the rows they name, which that rater must have labelled.
     #[arg(long)]
     pub adjudicated: Option<PathBuf>,
     /// strata.json; defaults to the one next to the sample.
@@ -121,6 +154,7 @@ pub fn run(
 ) -> Result<()> {
     match args.step {
         EvalSubcommand::Sample(a) => run_sample(a, config, config_path),
+        EvalSubcommand::Subsample(a) => run_subsample(a),
         EvalSubcommand::Score(a) => run_score(a, config, config_explicit),
     }
 }
@@ -199,6 +233,41 @@ fn run_sample(a: SampleArgs, config: Config, config_path: &Path) -> Result<()> {
         );
     }
     println!("Valid labels: {}, unclear, mixed", s.categories.join(", "));
+    println!("{PRIVACY}");
+    Ok(())
+}
+
+fn run_subsample(a: SubsampleArgs) -> Result<()> {
+    warn_if_in_repo(&a.out);
+    let summary = eval::run_subsample(&SubsampleParams {
+        from: a.from,
+        strata: a.strata,
+        size: a.size,
+        seed: a.seed,
+        out: a.out,
+    })
+    .context("tga eval subsample")?;
+    let s = &summary.strata;
+    let origin = s.subsample.clone().unwrap_or_default();
+    println!(
+        "Subset of {} rows from {}, seed {}",
+        origin.size, origin.source_size, origin.seed
+    );
+    println!("{:<14} {:>10} {:>8}", "stratum", "population", "subset");
+    for stratum in Stratum::ALL {
+        let c = s.strata.get(stratum.as_str()).cloned().unwrap_or_default();
+        if c.sampled > 0 {
+            println!(
+                "{:<14} {:>10} {:>8}",
+                stratum.as_str(),
+                c.population,
+                c.sampled
+            );
+        }
+    }
+    for f in &summary.files {
+        println!("wrote {}", f.display());
+    }
     println!("{PRIVACY}");
     Ok(())
 }
