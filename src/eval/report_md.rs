@@ -47,14 +47,34 @@ pub(crate) fn render(report: &ScoreReport, strata: &StrataSummary) -> String {
     out.push_str("> Contains commit-derived text. Store privately, outside any repository.\n\n");
     let _ = writeln!(
         out,
-        "Window {} → {} ({} weeks), population {}, seed {}, cap {}.\n",
+        "Window {} → {} ({} weeks), population {}{}, seed {}, cap {}.\n",
         strata.window_start,
         strata.window_end,
         strata.weeks,
         strata.population,
+        if report.window_merges_estimated > 0 {
+            " (estimated, merges removed)"
+        } else {
+            ""
+        },
         strata.seed,
         strata.cap
     );
+    // #111: populations adjusted by a merge-share estimate say so.
+    if report.window_merges_estimated > 0 {
+        let exact = report
+            .window_merges_exact
+            .map_or_else(|| "— (pass --db)".to_string(), |n| n.to_string());
+        let _ = writeln!(
+            out,
+            "Stratum populations are estimated: {} merge commits were removed by each \
+             stratum's merge share in the sample. Merges in the window, exact from the \
+             database: {exact}.\n",
+            report.window_merges_estimated
+        );
+    } else if let Some(n) = report.window_merges_exact {
+        let _ = writeln!(out, "Merges in the window, exact from the database: {n}.\n");
+    }
     // #111: no-answer counts per label, so release_merge shows on its own.
     let _ = writeln!(
         out,

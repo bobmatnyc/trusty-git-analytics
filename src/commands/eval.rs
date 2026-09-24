@@ -328,6 +328,15 @@ fn run_score(a: ScoreArgs, config: Config, config_explicit: bool) -> Result<()> 
     );
     // #111: merges are excluded from the eval; say how many.
     println!("{} rows excluded as merges", report.merges_excluded);
+    if report.window_merges_estimated > 0 || report.window_merges_exact.is_some() {
+        println!(
+            "Window merges: {} estimated from the sample's strata, {} exact from --db",
+            report.window_merges_estimated,
+            report
+                .window_merges_exact
+                .map_or_else(|| "—".to_string(), |n| n.to_string())
+        );
+    }
     if let Some(w) = &report.weighted_accuracy {
         println!(
             "Stratum-weighted accuracy {:.1}% [{:.1}%, {:.1}%]",

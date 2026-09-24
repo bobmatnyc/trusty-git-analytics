@@ -57,6 +57,13 @@ stratum with `m` merge rows among its `n` sample rows loses
 and `merges_excluded` move by the same total. Weighted accuracy, the
 coverage curve and the abstention share all use the adjusted populations. A
 sample drawn after this change holds no merges, so nothing is adjusted.
+The estimate assumes merges are sampled in proportion, but the draw's
+per-repo and per-author caps under-sample integrators who make most merges.
+With `--db`, `report.md` therefore marks the populations "estimated" and
+prints the exact merge count in the window (`window_start`..`window_end`,
+every repository) beside the estimate; `report.json` carries both as
+`window_merges_estimated` and `window_merges_exact`. Strata are not
+recomputed, because they come from the rules in force at sampling time.
 
 A label is correct when it equals the predicted category,
 ignoring case; synonyms (`bug` vs `bugfix`) count as different, so raters

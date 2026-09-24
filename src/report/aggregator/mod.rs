@@ -316,11 +316,13 @@ impl Aggregator {
     /// signal. This is distinct from `unresolved_authors` (configured-alias
     /// membership): an `author_id IS NULL` commit means identity resolution
     /// never ran for it, so it is silently treated as its own developer.
+    /// #111: merges (2+ parents) are excluded, like every other commit count.
+    /// Test: `report::tests::aggregator_excludes_merge_commits_from_metrics`.
     fn count_unresolved_author_commits(db: &Database) -> Result<usize> {
         let conn = db.connection();
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM commits WHERE author_id IS NULL",
+                "SELECT COUNT(*) FROM commits WHERE author_id IS NULL AND is_merge = 0",
                 [],
                 |r| r.get(0),
             )

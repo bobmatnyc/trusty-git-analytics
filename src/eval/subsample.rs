@@ -128,7 +128,7 @@ pub fn run_subsample(params: &SubsampleParams) -> Result<SubsampleSummary> {
             .join("strata.json")
     });
     let mut source_strata = read_strata(&strata_path)?;
-    scale_out_merges(&mut source_strata, &all, &merge_flags);
+    let _estimated = scale_out_merges(&mut source_strata, &all, &merge_flags);
     let source: Vec<SampleRecord> = all
         .into_iter()
         .zip(merge_flags)

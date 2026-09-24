@@ -126,6 +126,14 @@ pub struct ScoreReport {
     /// #111: final label `release_merge`, scored as no answer.
     #[serde(default)]
     pub release_merge: u64,
+    /// #111: merges estimated out of the stratum populations from each
+    /// stratum's merge share in the sample; 0 when the sample has none.
+    #[serde(default)]
+    pub window_merges_estimated: u64,
+    /// #111: merges in the sampling window counted exactly from `--db`;
+    /// `None` without a database.
+    #[serde(default)]
+    pub window_merges_exact: Option<u64>,
     /// Two raters disagreed and no adjudication resolved it; the scored
     /// rater's label is still the one scored.
     pub unresolved_disagreements: u64,
@@ -273,7 +281,13 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
     });
     let mut strata = read_strata(&strata_path)?;
     // #111: stratum weights must not count merges either.
-    super::merges::scale_out_merges(&mut strata, &sample, &merge_flags);
+    let window_merges_estimated =
+        super::merges::scale_out_merges(&mut strata, &sample, &merge_flags);
+    let window_merges_exact = params
+        .db
+        .as_deref()
+        .map(|db| super::merges::count_window_merges(db, &strata))
+        .transpose()?;
 
     let mut valid: BTreeSet<String> = params
         .categories
@@ -425,6 +439,8 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
         unclear: count(&|l| l == UNCLEAR),
         mixed: count(&|l| l == MIXED),
         release_merge: count(&|l| l == RELEASE_MERGE),
+        window_merges_estimated,
+        window_merges_exact,
         unresolved_disagreements: unresolved,
         per_rule,
         per_method,

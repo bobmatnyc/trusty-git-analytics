@@ -74,14 +74,18 @@ pub(crate) fn resolve_merges(sample: &[SampleRecord], db: Option<&Path>) -> Resu
 /// so the merge count is estimated from the sample.
 /// What: for each stratum with `m` merge rows among its `n` sample rows, the
 /// population drops by `round(population · m / n)`; `population` falls and
-/// `merges_excluded` rises by the same total. A sample without merges leaves
-/// `strata` unchanged.
+/// `merges_excluded` rises by the same total, which is returned. A sample
+/// without merges leaves `strata` unchanged. The estimate assumes merges are
+/// spread across the sample as in the window; the draw's per-repo and
+/// per-author caps can under-sample merge-heavy integrators, so
+/// [`count_window_merges`] reports the exact total beside it.
 /// Test: `tests/eval_harness.rs::score_weights_strata_without_their_merges`.
 pub(crate) fn scale_out_merges(
     strata: &mut StrataSummary,
     sample: &[SampleRecord],
     merges: &[bool],
-) {
+) -> u64 {
+    let mut total = 0;
     let mut rows: BTreeMap<Stratum, (u64, u64)> = BTreeMap::new();
     for (r, &m) in sample.iter().zip(merges) {
         let e = rows.entry(r.stratum).or_default();
@@ -100,7 +104,41 @@ pub(crate) fn scale_out_merges(
         counts.population -= removed;
         strata.population = strata.population.saturating_sub(removed);
         strata.merges_excluded += removed;
+        total += removed;
     }
+    total
+}
+
+/// Merge commits in the sampling window, counted exactly from the database.
+///
+/// Why: #111 — the per-stratum merge estimate is biased by the draw's caps;
+/// the report shows the exact window total next to it. Strata are not
+/// recomputed: they come from the rules at sampling time.
+/// What: counts `commits.is_merge = 1` rows whose timestamp parses into
+/// `[window_start, window_end]` over every repository, the same scope
+/// `tga eval sample` builds its population from.
+/// Test: `tests/eval_harness.rs::score_reports_exact_window_merges`.
+///
+/// # Errors
+///
+/// [`EvalError::Invalid`] for an unparseable window bound; database errors.
+pub(crate) fn count_window_merges(db: &Path, strata: &StrataSummary) -> Result<u64> {
+    let bound = |s: &str| {
+        super::population::parse_ts(s).ok_or_else(|| {
+            EvalError::Invalid(format!("strata.json window bound {s:?} is not a timestamp"))
+        })
+    };
+    let (start, end) = (bound(&strata.window_start)?, bound(&strata.window_end)?);
+    let conn = open_eval_db(db)?;
+    let mut stmt = conn.prepare("SELECT timestamp FROM commits WHERE is_merge = 1")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut n = 0;
+    for ts in rows {
+        if super::population::parse_ts(&ts?).is_some_and(|t| t >= start && t <= end) {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// `commits.is_merge` for the wanted SHAs that the database holds.

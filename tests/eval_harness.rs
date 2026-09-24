@@ -807,7 +807,8 @@ fn legacy_sample_and_db(dir: &Path, shas: &[&str], in_db: &[(&str, bool)]) {
         .collect();
     fs::write(dir.join("sample.jsonl"), lines.join("\n") + "\n").expect("sample");
     let strata = serde_json::json!({
-        "seed": 1, "weeks": 26, "window_start": "a", "window_end": "b",
+        "seed": 1, "weeks": 26, "window_start": "2025-01-01T00:00:00+00:00",
+        "window_end": "2025-06-01T00:00:00+00:00",
         "requested_size": shas.len(), "cap": 5, "population": 30,
         "strata": {"exact": {"population": 30, "sampled": shas.len()}},
         "categories": ["feature", "bugfix"]
@@ -1047,4 +1048,54 @@ fn subsample_drops_merges_resolved_from_the_db() {
     assert!(err.to_string().contains("non-merge rows"), "{err}");
     let err = eval::run_subsample(&params(3, None, "nodb")).expect_err("unknown status drawn");
     assert!(err.to_string().contains("--db"), "{err}");
+}
+
+/// Why: #111 — the per-stratum merge estimate is biased by the draw's caps,
+/// so with `--db` the report gives the window's exact merge count beside it.
+/// What: a legacy four-row sample with one merge (`m1`) scales the stratum
+/// by 30 · 1/4 → 8 estimated merges. The database holds `m1`, a second merge
+/// in the window and one before it: the exact count is 2, and report.md
+/// labels the population estimated and prints both numbers.
+/// Test: this function.
+#[test]
+fn score_reports_exact_window_merges() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let flags = [
+        ("m1", true),
+        ("q1", false),
+        ("n1", false),
+        ("p1", false),
+        ("m2", true),
+    ];
+    legacy_sample_and_db(d, &["m1", "q1", "n1", "p1"], &flags);
+    Database::open(&d.join("tga.db"))
+        .expect("open db")
+        .connection()
+        .execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+             repository, is_merge) VALUES ('m0', 'n', 'a@example.com', \
+             '2024-06-01T00:00:00Z', 'm', 'r', 1)",
+            [],
+        )
+        .expect("insert out-of-window merge");
+    write_labels(&d.join("rater.csv"), &[("q1", "feature")]);
+    let r = eval::run_score(&ScoreParams {
+        sample: d.join("sample.jsonl"),
+        strata: None,
+        labels: vec![d.join("rater.csv")],
+        adjudicated: None,
+        categories: None,
+        db: Some(d.join("tga.db")),
+        out: d.join("report"),
+    })
+    .expect("score");
+    assert_eq!(r.window_merges_estimated, 8);
+    assert_eq!(r.window_merges_exact, Some(2));
+    let md = fs::read_to_string(d.join("report/report.md")).expect("md");
+    assert!(
+        md.contains("population 22 (estimated, merges removed)"),
+        "{md}"
+    );
+    assert!(md.contains("exact from the database: 2"), "{md}");
 }
