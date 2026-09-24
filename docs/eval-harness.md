@@ -5,7 +5,7 @@
 > text or is derived from it: subjects, bodies, changed paths, PR titles and
 > ticket ids. Store the output directory privately, outside any repository,
 > and delete it when the evaluation is done. The harness has no default
-> output location; `--out` is required on both steps, and it warns when the
+> output location; `--out` is required on every step, and it warns when the
 > directory sits inside a git work tree. The rater sheet `labels.csv` drops
 > identity trailers (`Co-authored-by:`, `Signed-off-by:`, `Reviewed-by:` and
 > similar) and replaces e-mail addresses with `<email>`; `sample.jsonl` keeps
@@ -25,14 +25,15 @@ harness measures how often that category is right, as judged by people:
 - **Stratum-weighted accuracy** — Σ W_h · p_h, where W_h is the stratum's
   share of the population, with a normal-approximation 95% interval. It
   estimates accuracy over the whole window, not over the sample.
-- **Coverage at precision** — for each confidence value in the sample, the
-  weighted share of the population at or above it and the precision there.
-  Use it to pick a confidence floor.
+- **Coverage at precision** — for each confidence value among the labelled
+  rows, the weighted share of the population at or above it and the
+  precision there. Use it to pick a confidence floor.
 - **Confusion matrix** — predicted category × rater label.
 - **Abstention share** — (catch_all + uncategorized/Unknown population) ÷
   window population, from `strata.json`.
 - **Cohen's kappa** — agreement between two raters on the commits both
-  labelled, corrected for chance.
+  labelled, corrected for chance, with that overlap reported as `n`. The two
+  sheets may cover different rows.
 
 Labels `unclear` and `mixed` are counted and reported but left out of
 precision. A label is correct when it equals the predicted category,
@@ -64,7 +65,10 @@ should use the vocabulary `tga eval sample` prints.
    seed-derived stream after sorting by SHA, so the same seed on the same
    database draws the same sample, and a different seed draws another.
 7. **Weights.** Each sampled commit carries weight = stratum population ÷
-   stratum sample size; the scorer uses the stratum populations to weight.
+   stratum sample size. The scorer does not use that stored value: it weights
+   each labelled row by stratum population ÷ rows labelled in that stratum,
+   so a subset or a partly filled sheet is weighted by the rows it actually
+   has.
 
 Author e-mails never leave the database: `author_hash` is a salted BLAKE3
 hash. Without `--salt` a salt is generated and saved as `salt.txt`.
@@ -98,10 +102,34 @@ sample goes to the others.
 2. **Label.** Give each rater a copy of `labels.csv`. It hides the predicted
    category and orders rows by a salted hash, so the stratum cannot be read
    off the order. Raters fill `label` with one category name, `unclear` or
-   `mixed`, and may use `note`. Two raters give a kappa; disagreements can be
-   settled in an adjudication file with the same columns.
+   `mixed`, and may use `note`. A row left blank counts as unlabelled, not as
+   an error, so a sheet can be scored while it is only partly filled. Two
+   raters give a kappa; disagreements can be settled in an adjudication file
+   with the same columns.
 
-3. **Score.**
+3. **Subsample (optional).** When one rater labels the whole sample and
+   another only part of it, draw that part as a subset:
+
+   ```bash
+   tga eval subsample --from ~/private/eval/sample.jsonl --size 100 \
+       --seed 20260924 --out ~/private/eval/rater1-100
+   ```
+
+   Each stratum gets a share of `--size` proportional to its share of the
+   source rows, by largest remainder, so the counts add up to exactly
+   `--size`: 212/85/37/66 of 400 becomes 53/21/9/17 of 100. Within a stratum
+   the rows are sorted by SHA and shuffled with a stream derived from
+   `--seed`, so the same seed on the same sample draws the same subset. No
+   label file is read. The output is the subset's `sample.jsonl` (each row's
+   `weight` rescaled to population ÷ subset rows), a `labels.csv` with the
+   same columns, redaction and salted-hash row order as `tga eval sample`
+   writes, and a `strata.json` whose `sampled` counts are the subset's and
+   whose `subsample` block records the seed and sizes. On Unix the created
+   directory is mode 0700 and the files 0600. The command refuses to
+   overwrite an existing `sample.jsonl`, `labels.csv` or `strata.json`, so a
+   rerun cannot erase a sheet being filled in.
+
+4. **Score.**
 
    ```bash
    tga eval score --sample ~/private/eval/sample.jsonl \
@@ -109,9 +137,28 @@ sample goes to the others.
        --adjudicated ~/private/eval/adjudicated.csv --out ~/private/eval/report
    ```
 
-   The final label of a commit is the adjudicated one, else the single
-   rater's, else the label both raters agree on; an unsettled disagreement
-   is not scored and is counted. Valid labels come from `--config` when it is
-   passed, otherwise from the categories recorded in `strata.json`; the
-   sample's predicted categories are always valid. An unknown label stops the
-   run with the offending SHA. Output: `report.md` and `report.json`.
+   **The first `--labels` file is the scored rater.** Precision, weighted
+   accuracy and coverage use its labels over the rows it labelled; the
+   adjudication file replaces its label on the rows it names, and naming a
+   row the first rater left blank is an error. The second file only feeds
+   Cohen's kappa, over the SHAs both files labelled, and may cover different
+   rows. A disagreement no adjudication settles is counted as unresolved,
+   but the row is still scored with the first rater's label.
+
+   To score a subset rater against a full-sample rater, pass the subset's
+   sheet first and the source sample, whose rows hold both raters' SHAs:
+
+   ```bash
+   tga eval score --sample ~/private/eval/sample.jsonl \
+       --labels ~/private/eval/rater1-100/labels.csv \
+       --labels ~/private/eval/rater2-full.csv --out ~/private/eval/report-100
+   ```
+
+   Kappa then reports `n = 100` and precision covers those 100 rows, each
+   weighted by its stratum population ÷ labelled rows in the stratum.
+
+   Valid labels come from `--config` when it is passed, otherwise from the
+   categories recorded in `strata.json`; the sample's predicted categories
+   are always valid. An unknown label, or a label for a SHA outside
+   `--sample`, stops the run with the offending SHA. Output: `report.md` and
+   `report.json`.

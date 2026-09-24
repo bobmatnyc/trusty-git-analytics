@@ -173,6 +173,21 @@ pub struct StrataSummary {
     pub strata: BTreeMap<String, StratumCounts>,
     /// Valid rater labels other than `unclear` and `mixed`.
     pub categories: Vec<String>,
+    /// Set when this file describes a `tga eval subsample` subset; `sampled`
+    /// then counts the subset's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsample: Option<SubsampleOrigin>,
+}
+
+/// How a subset was drawn from a source sample (#111).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubsampleOrigin {
+    /// Seed the subset was drawn with.
+    pub seed: u64,
+    /// Rows in the subset.
+    pub size: u64,
+    /// Rows in the source `sample.jsonl`.
+    pub source_size: u64,
 }
 
 impl StrataSummary {
