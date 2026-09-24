@@ -46,12 +46,21 @@ fn name_to_email_map(data: &ReportData) -> HashMap<String, String> {
         .collect()
 }
 
-/// Unix-epoch seconds for "now", used as `computed_at` in fact rows.
-/// `fact_weekly_engineer.formula_version` written by this build.
-///
-/// #111: `v2` excludes merge commits (2+ parents) from `net_commits`; `v1`
-/// counted them.
+/// `fact_weekly_engineer.formula_version` written by this build (#111: `v2` excludes merges).
 pub const ENGINEER_FORMULA_VERSION: &str = "v2";
+
+/// Which rows a persist run is allowed to prune (#111).
+///
+/// The caller states it; it is never inferred from the data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistScope {
+    /// Every commit was aggregated: rows of an older formula are removed for
+    /// every author, and each written author's rows the run did not produce.
+    Full,
+    /// An `--author`-scoped report: only the authors the run wrote are
+    /// pruned; every other author's rows, of any formula, are kept.
+    Authors,
+}
 
 /// Grain key shared by both weekly fact tables:
 /// `(author_email, iso_year, iso_week, repository)`.
@@ -63,29 +72,34 @@ type GrainKey = (String, i64, i64, String);
 /// `INSERT OR REPLACE` only rewrites the grain keys a run produces. A week
 /// whose only commits were merges produces no row, so its old
 /// merge-inclusive row would otherwise stay forever.
-/// What: deletes every row whose `formula_version` is not `version`, then,
-/// for each author the run wrote, every row whose grain key the run did not
-/// produce. The aggregator reads every commit, so a run reproduces each
-/// written author's whole history; authors the run did not write (an
-/// `--author`-scoped report) keep their current-formula rows.
+/// What: on a [`PersistScope::Full`] run, deletes every row whose
+/// `formula_version` is not `version`. On any run, then deletes, for each
+/// author the run wrote, every row whose grain key the run did not produce;
+/// the aggregator reads each written author's whole history, so those rows
+/// are stale. An [`PersistScope::Authors`] run touches no other author.
 /// Test: `report::tests::persist_weekly_engineer_drops_stale_merge_only_rows`,
-/// `report::tests::persist_weekly_quality_drops_stale_merge_only_rows`.
+/// `report::tests::persist_weekly_quality_drops_stale_merge_only_rows`,
+/// `report::tests::scoped_persist_keeps_other_authors_old_rows`.
 fn prune_stale(
     db: &Database,
     table: &'static str,
     version: &str,
     written: &HashSet<GrainKey>,
+    scope: PersistScope,
 ) -> Result<usize> {
     let conn = db.connection();
     let tx = conn
         .unchecked_transaction()
         .map_err(crate::core::TgaError::from)?;
-    let mut removed = tx
-        .execute(
-            &format!("DELETE FROM {table} WHERE formula_version != ?1"),
-            [version],
-        )
-        .map_err(crate::core::TgaError::from)?;
+    let mut removed = 0;
+    if scope == PersistScope::Full {
+        removed += tx
+            .execute(
+                &format!("DELETE FROM {table} WHERE formula_version != ?1"),
+                [version],
+            )
+            .map_err(crate::core::TgaError::from)?;
+    }
     let authors: HashSet<&str> = written.iter().map(|k| k.0.as_str()).collect();
     let stale: Vec<GrainKey> = {
         let mut stmt = tx
@@ -120,6 +134,7 @@ fn prune_stale(
     Ok(removed)
 }
 
+/// Unix-epoch seconds for "now", used as `computed_at` in fact rows.
 fn computed_at_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -151,7 +166,11 @@ fn computed_at_secs() -> i64 {
 /// # Errors
 ///
 /// Returns [`ReportError::Core`](crate::report::ReportError::Core)(crate::report::ReportError::Core) if any SQLite operation fails.
-pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize> {
+pub fn persist_weekly_quality(
+    db: &Database,
+    data: &ReportData,
+    scope: PersistScope,
+) -> Result<usize> {
     if data.weekly_activity.is_empty() {
         return Ok(0);
     }
@@ -254,7 +273,13 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
         tx.commit().map_err(crate::core::TgaError::from)?;
     }
     // #111: merges left the counts; drop rows this run did not rewrite.
-    prune_stale(db, "fact_weekly_quality", QUALITY_FORMULA_VERSION, &keys)?;
+    prune_stale(
+        db,
+        "fact_weekly_quality",
+        QUALITY_FORMULA_VERSION,
+        &keys,
+        scope,
+    )?;
     Ok(written)
 }
 
@@ -294,7 +319,11 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
 /// # Errors
 ///
 /// Returns [`ReportError::Core`](crate::report::ReportError::Core)(crate::report::ReportError::Core) if any SQLite operation fails.
-pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize> {
+pub fn persist_weekly_engineer(
+    db: &Database,
+    data: &ReportData,
+    scope: PersistScope,
+) -> Result<usize> {
     if data.weekly_activity.is_empty() {
         return Ok(0);
     }
@@ -392,6 +421,12 @@ pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize
         tx.commit().map_err(crate::core::TgaError::from)?;
     }
     // #111: merges left `net_commits`; drop rows this run did not rewrite.
-    prune_stale(db, "fact_weekly_engineer", ENGINEER_FORMULA_VERSION, &keys)?;
+    prune_stale(
+        db,
+        "fact_weekly_engineer",
+        ENGINEER_FORMULA_VERSION,
+        &keys,
+        scope,
+    )?;
     Ok(written)
 }

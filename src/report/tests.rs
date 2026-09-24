@@ -16,6 +16,7 @@ use crate::core::db::Database;
 
 use super::aggregator::Aggregator;
 use super::formatters::{csv as csv_fmt, json as json_fmt, markdown as md_fmt};
+use super::persist::PersistScope;
 use super::pipeline::ReportPipeline;
 
 /// Seed an in-memory DB with two authors, two commits, and one classification.
@@ -873,7 +874,7 @@ fn persist_weekly_quality_upserts_rows_and_is_idempotent() {
     assert_eq!(cc, wa.commit_count as i64);
 
     // Idempotency: call persist again; row count must still be 1.
-    Aggregator::persist_weekly_quality(&db, &data).expect("second persist");
+    Aggregator::persist_weekly_quality(&db, &data, PersistScope::Full).expect("second persist");
     let count: i64 = db
         .connection()
         .query_row(
@@ -1337,7 +1338,8 @@ fn persist_weekly_engineer_upserts_rows() {
 
     // UPSERT, not INSERT: persisting the same data again must not duplicate a
     // grain key or change a value.
-    let written = Aggregator::persist_weekly_engineer(&db, &data).expect("second persist");
+    let written = Aggregator::persist_weekly_engineer(&db, &data, PersistScope::Full)
+        .expect("second persist");
     assert_eq!(written, 2, "one row per author-week");
     let total: i64 = db
         .connection()
@@ -1796,4 +1798,96 @@ fn persist_weekly_quality_drops_stale_merge_only_rows() {
             ("bob@example.com".to_string(), 9, "v2".to_string()),
         ]
     );
+}
+
+/// Insert one row into `fact_weekly_engineer` or `fact_weekly_quality` for
+/// `(email, 2024, week, 'repo-a')` with the given `formula_version`.
+fn seed_fact_row(db: &Database, table: &str, email: &str, week: i64, version: &str) {
+    let sql = if table == "fact_weekly_engineer" {
+        "INSERT INTO fact_weekly_engineer (author_email, iso_year, iso_week, repository, \
+         net_commits, agentic_count, ide_assisted_count, agentic_pct, formula_version, \
+         computed_at) VALUES (?1, 2024, ?2, 'repo-a', 1, 0, 0, 0.0, ?3, 0)"
+    } else {
+        "INSERT INTO fact_weekly_quality (author_email, iso_year, iso_week, repository, \
+         quality_score, quality_tshirt, revert_count, bugfix_count, ticketed_count, \
+         commit_count, formula_version, computed_at) \
+         VALUES (?1, 2024, ?2, 'repo-a', 0.5, 3, 0, 0, 0, 1, ?3, 0)"
+    };
+    db.connection()
+        .execute(sql, rusqlite::params![email, week, version])
+        .expect("seed fact row");
+}
+
+const FACT_TABLES: [&str; 2] = ["fact_weekly_engineer", "fact_weekly_quality"];
+
+/// Persist `data` into both weekly fact tables with `scope`.
+fn persist_both(db: &Database, data: &crate::report::ReportData, scope: PersistScope) {
+    Aggregator::persist_weekly_engineer(db, data, scope).expect("persist engineer");
+    Aggregator::persist_weekly_quality(db, data, scope).expect("persist quality");
+}
+
+/// Why: #111 — pruning must never empty the fact tables when a run has
+/// nothing to write.
+/// What: both tables hold a current-formula row; persisting an empty
+/// `ReportData` with `PersistScope::Full` writes nothing and keeps it.
+/// Test: this test itself.
+#[test]
+fn persist_of_an_empty_report_keeps_existing_rows() {
+    let db = Database::open_in_memory().expect("open db");
+    for table in FACT_TABLES {
+        seed_fact_row(&db, table, "alice@example.com", 3, "v2");
+    }
+    persist_both(
+        &db,
+        &crate::report::ReportData::empty(String::new()),
+        PersistScope::Full,
+    );
+    for table in FACT_TABLES {
+        assert_eq!(
+            fact_rows(&db, table),
+            vec![("alice@example.com".to_string(), 3, "v2".to_string())],
+            "{table}"
+        );
+    }
+}
+
+/// Why: #111 review — an `--author`-scoped run must not delete other
+/// engineers' rows, even of an older formula; `fact_weekly_engineer` has no
+/// backfill to restore them.
+/// What: Alice's report data is persisted with `PersistScope::Authors` while
+/// Bob holds `v1` rows; Bob's rows survive in both tables. A `Full` persist
+/// of the same data then removes them.
+/// Test: this test itself.
+#[test]
+fn scoped_persist_keeps_other_authors_old_rows() {
+    let db = Database::open_in_memory().expect("open db");
+    db.connection()
+        .execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+             repository, files_changed, insertions, deletions, is_merge) \
+             VALUES ('f1', 'Alice', 'alice@example.com', '2024-01-15T10:00:00+00:00', \
+             'feat: add export', 'repo-a', 1, 5, 1, 0)",
+            [],
+        )
+        .expect("insert commit");
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    for table in FACT_TABLES {
+        seed_fact_row(&db, table, "bob@example.com", 9, "v1");
+    }
+    let alice = ("alice@example.com".to_string(), 3, "v2".to_string());
+    let bob = ("bob@example.com".to_string(), 9, "v1".to_string());
+
+    persist_both(&db, &data, PersistScope::Authors);
+    for table in FACT_TABLES {
+        assert_eq!(
+            fact_rows(&db, table),
+            vec![alice.clone(), bob.clone()],
+            "{table}"
+        );
+    }
+
+    persist_both(&db, &data, PersistScope::Full);
+    for table in FACT_TABLES {
+        assert_eq!(fact_rows(&db, table), vec![alice.clone()], "{table}");
+    }
 }

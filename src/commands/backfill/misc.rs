@@ -10,6 +10,7 @@ use tga::collect::git::scan_and_persist;
 use tga::core::config::{expand_path, Config};
 use tga::core::db::{CheckpointMode, Database};
 use tga::report::aggregator::Aggregator;
+use tga::report::persist::PersistScope;
 
 use super::types::ComplexityBackfillArgs;
 
@@ -284,7 +285,8 @@ pub(super) fn backfill_quality(db: &mut Database, dry_run: bool) -> anyhow::Resu
     let data =
         Aggregator::build(db, &config).map_err(|e| anyhow::anyhow!("aggregation failed: {e}"))?;
 
-    let written = Aggregator::persist_weekly_quality(db, &data)
+    // #111: `Aggregator::build` read every commit, so this is a full run.
+    let written = Aggregator::persist_weekly_quality(db, &data, PersistScope::Full)
         .map_err(|e| anyhow::anyhow!("quality persist failed: {e}"))?;
 
     println!("Backfilled fact_weekly_quality: {written} row(s) written (UPSERT semantics).");

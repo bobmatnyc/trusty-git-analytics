@@ -23,6 +23,7 @@ use crate::core::config::Config;
 use crate::core::db::Database;
 use crate::report::errors::{ReportError, Result};
 use crate::report::models::{ActivityWeights, ReportData, VelocitySummary};
+use crate::report::persist::PersistScope;
 
 /// Helper that walks the database and assembles [`ReportData`].
 ///
@@ -267,7 +268,13 @@ impl Aggregator {
         // re-running the aggregator. Non-fatal: a persistence failure is
         // logged but does not abort report generation (the in-memory data is
         // still complete and formatters will still write their files).
-        match Self::persist_weekly_quality(db, &data) {
+        // #111: only a full run may prune other authors' older-formula rows.
+        let scope = if canonical_email.is_none() {
+            PersistScope::Full
+        } else {
+            PersistScope::Authors
+        };
+        match Self::persist_weekly_quality(db, &data, scope) {
             Ok(n) => {
                 tracing::debug!(
                     rows = n,
@@ -285,7 +292,7 @@ impl Aggregator {
 
         // Issue #1113: persist per-engineer-per-week agentic counts to
         // `fact_weekly_engineer`. Same non-fatal pattern as quality above.
-        match Self::persist_weekly_engineer(db, &data) {
+        match Self::persist_weekly_engineer(db, &data, scope) {
             Ok(n) => {
                 tracing::debug!(
                     rows = n,
@@ -725,8 +732,12 @@ impl Aggregator {
     /// within the 500-line cap.
     /// What: delegates to [`crate::report::persist::persist_weekly_quality`].
     /// Test: `report::tests::persist_weekly_quality_upserts_rows_and_is_idempotent`.
-    pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize> {
-        crate::report::persist::persist_weekly_quality(db, data)
+    pub fn persist_weekly_quality(
+        db: &Database,
+        data: &ReportData,
+        scope: PersistScope,
+    ) -> Result<usize> {
+        crate::report::persist::persist_weekly_quality(db, data, scope)
     }
 
     /// Persist per-engineer-per-week agentic counts to `fact_weekly_engineer`.
@@ -736,8 +747,12 @@ impl Aggregator {
     /// within the 500-line cap.
     /// What: delegates to [`crate::report::persist::persist_weekly_engineer`].
     /// Test: `report::tests::persist_weekly_engineer_upserts_rows`.
-    pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize> {
-        crate::report::persist::persist_weekly_engineer(db, data)
+    pub fn persist_weekly_engineer(
+        db: &Database,
+        data: &ReportData,
+        scope: PersistScope,
+    ) -> Result<usize> {
+        crate::report::persist::persist_weekly_engineer(db, data, scope)
     }
 }
 
