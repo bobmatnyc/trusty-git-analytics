@@ -3,7 +3,8 @@
 //! Why: measure how often the classification cascade is right, per rule and
 //! per method, from a human-labelled stratified sample.
 //! What: `sample` draws the sample from a read-only database copy; `subsample`
-//! draws a proportional subset of a sample; `score`
+//! draws a proportional subset of a sample; `repredict` re-derives a sample's
+//! predictions under another config (#111); `score`
 //! turns rater labels into a precision report. The library side lives in
 //! [`tga::eval`]; this module only parses flags and prints summaries.
 //! Test: `tests/eval_harness.rs`.
@@ -14,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 
 use tga::core::config::Config;
-use tga::eval::{self, SampleParams, ScoreParams, Stratum, SubsampleParams};
+use tga::eval::{self, RepredictParams, SampleParams, ScoreParams, Stratum, SubsampleParams};
 
 const PRIVACY: &str = "PRIVACY: every file this command writes contains commit text \
 (subjects, bodies, paths, PR titles). Store the output directory privately, outside any \
@@ -30,7 +31,7 @@ pub struct EvalArgs {
     pub step: EvalSubcommand,
 }
 
-/// The two harness steps.
+/// The harness steps.
 #[derive(Subcommand, Debug)]
 pub enum EvalSubcommand {
     /// Draw a stratified, capped, seeded sample of classified commits for labelling.
@@ -43,6 +44,15 @@ pub enum EvalSubcommand {
     /// the full sample with `score --sample <source sample.jsonl>`.
     #[command(after_help = PRIVACY)]
     Subsample(SubsampleArgs),
+    /// Re-derive an existing sample's predictions under the rules of --config.
+    ///
+    /// Keeps every row, its order and its stratum; replaces predicted_category,
+    /// method, rule_id and confidence with what the config's rules give for
+    /// that commit in --db. Writes <out>.jsonl and <out>.provenance.json (config
+    /// and rules-file BLAKE3 hashes, tga version). A row whose commit is not in
+    /// --db is an error. Requires an explicit --config.
+    #[command(after_help = PRIVACY)]
+    Repredict(RepredictArgs),
     /// Score rater labels against a sample: precision per rule, method and stratum.
     ///
     /// Valid labels are the categories recorded in strata.json, or the taxonomy
@@ -108,6 +118,21 @@ pub struct SubsampleArgs {
     pub out: PathBuf,
 }
 
+/// Flags for `tga eval repredict`. The rules come from the global `--config`.
+#[derive(Args, Debug)]
+pub struct RepredictArgs {
+    /// sample.jsonl whose predictions are re-derived.
+    #[arg(long)]
+    pub sample: PathBuf,
+    /// A COPY of the tga database the sample was drawn from; opened read-only.
+    #[arg(long)]
+    pub db: PathBuf,
+    /// Output .jsonl (private, outside any repository); it and its
+    /// .provenance.json must not exist. Required.
+    #[arg(long)]
+    pub out: PathBuf,
+}
+
 /// Flags for `tga eval score`.
 #[derive(Args, Debug)]
 pub struct ScoreArgs {
@@ -168,6 +193,7 @@ pub fn run(
     match args.step {
         EvalSubcommand::Sample(a) => run_sample(a, config, config_path),
         EvalSubcommand::Subsample(a) => run_subsample(a),
+        EvalSubcommand::Repredict(a) => run_repredict(a, config, config_path, config_explicit),
         EvalSubcommand::Score(a) => run_score(a, config, config_explicit),
     }
 }
@@ -291,6 +317,51 @@ fn run_subsample(a: SubsampleArgs) -> Result<()> {
     for f in &summary.files {
         println!("wrote {}", f.display());
     }
+    println!("{PRIVACY}");
+    Ok(())
+}
+
+/// #111: re-predict a sample under an explicitly named config.
+fn run_repredict(
+    a: RepredictArgs,
+    config: Config,
+    config_path: &Path,
+    config_explicit: bool,
+) -> Result<()> {
+    if !config_explicit || !config_path.exists() {
+        bail!(
+            "`tga eval repredict` applies a config's rules; name an existing config file with --config"
+        );
+    }
+    warn_if_in_repo(&a.out);
+    let summary = eval::run_repredict(&RepredictParams {
+        sample: a.sample,
+        db: a.db,
+        config,
+        config_path: config_path.to_path_buf(),
+        out: a.out,
+    })
+    .context("tga eval repredict")?;
+    let p = &summary.provenance;
+    println!(
+        "Re-predicted {} rows under {} (blake3 {}): {} changed, {} abstain, {} carried from the \
+         database {:?}, {} stored verdicts superseded",
+        p.rows,
+        p.config.path,
+        &p.config.blake3[..16],
+        p.changed,
+        p.abstentions,
+        p.carried.values().sum::<u64>(),
+        p.carried,
+        p.superseded
+    );
+    for f in &summary.files {
+        println!("wrote {}", f.display());
+    }
+    println!(
+        "Score it with `tga eval score --sample {} --strata <the source strata.json> --config <config>`.",
+        summary.files[0].display()
+    );
     println!("{PRIVACY}");
     Ok(())
 }

@@ -232,7 +232,7 @@ pub fn run_subsample(params: &SubsampleParams) -> Result<SubsampleSummary> {
 }
 
 /// Create `dir` (mode 0700 on Unix) unless it already exists.
-fn create_private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     if dir.exists() {
         return Ok(());
     }
@@ -245,7 +245,7 @@ fn create_private_dir(dir: &Path) -> Result<()> {
 
 /// Create an empty `path` (mode 0600 on Unix), refusing an existing file so a
 /// rerun never overwrites a sheet a rater is filling in.
-fn create_private_file(path: &Path) -> Result<()> {
+pub(crate) fn create_private_file(path: &Path) -> Result<()> {
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]

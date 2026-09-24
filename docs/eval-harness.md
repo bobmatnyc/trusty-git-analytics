@@ -76,8 +76,11 @@ should use the vocabulary `tga eval sample` prints.
    same copy sees the same window.
 2. **Re-classification.** The window is re-classified in memory with the
    config's rules (`build_rule_engine`, no LLM) and rule tracing on. Verdicts
-   made outside the rule engine — manual overrides, external ticket sources,
-   LLM fallbacks, repo fallbacks — are taken from the stored `method`. The
+   made outside the rule engine are taken from the stored `method` only when
+   the config still reaches that tier: manual overrides always; LLM fallbacks
+   when the config enables the LLM tier and the re-derived confidence is at
+   or below `llm_fallback_threshold`; external-source verdicts when an
+   external source is configured; repo fallbacks never (#111). The
    database is opened read-only; the harness refuses a writable handle.
 3. **Strata.** `exact`; `regex_high` (regex, confidence ≥ 0.9); `regex_mid`
    (regex, 0.55–0.7); `regex_other` (other regex bands); `weighted_sum`;
@@ -191,3 +194,59 @@ sample goes to the others.
    are always valid. An unknown label, or a label for a SHA outside
    `--sample`, stops the run with the offending SHA. Output: `report.md` and
    `report.json`.
+
+## Re-scoring an existing sample under new rules
+
+`tga eval score` scores the `predicted_category` stored in `sample.jsonl`,
+which the rules of the draw produced. To score a labelled sample against a
+different rules file, re-derive its predictions first (#111):
+
+```bash
+tga eval repredict --config ~/private/eval/config-v2.yaml \
+    --sample ~/private/eval/sample.jsonl --db ~/private/eval/tga-copy.db \
+    --out ~/private/eval/sample.v2.jsonl
+tga eval score --config ~/private/eval/config-v2.yaml \
+    --sample ~/private/eval/sample.v2.jsonl \
+    --labels ~/private/eval/rater-a.csv --out ~/private/eval/report-v2
+```
+
+- **What changes.** Each row's `predicted_category`, `method`, `rule_id` and
+  `confidence` become what the config's rules give for that commit. The
+  commit is looked up by SHA and repository in `--db`, and classified from
+  its message and merge flag, the inputs `tga classify` gives the cascade.
+  No LLM or network tier is called. A stored verdict from a tier that is not
+  re-run is carried only when the config's cascade would still reach that
+  tier, the same rule `tga eval sample` applies: a manual override always;
+  an LLM verdict only when the config enables the LLM tier and the
+  re-derived confidence is at or below `llm_fallback_threshold`; an
+  external-source verdict only when the config still enables an external
+  source. A stored repo fallback is never carried, because `tga classify`
+  never applies one. Otherwise the re-derived verdict replaces it.
+- **What stays.** The row set, the row order, each row's `stratum` and
+  `weight`, and every commit field. Strata and weights describe the original
+  draw, so `strata.json` still applies: write the output next to the source
+  `sample.jsonl`, as above, or pass `--strata` to `score`.
+- **Abstentions.** A row no tier matches becomes `uncategorized` with method
+  `unclassified`, exactly as `tga eval sample` writes one. `score` treats it
+  as it treats any such row: a prediction that a real label marks wrong.
+- **Fail-closed.** A row whose commit is not in `--db` stops the run; no row
+  is skipped or left with its old prediction. `--db` is opened read-only.
+  `--config` must be passed explicitly. An existing `--out` or provenance
+  file is never overwritten.
+- **Provenance.** `sample.v2.provenance.json` records the tga version, the
+  config file and each rules file with its BLAKE3 hash, the source sample
+  and its hash, the database path, how many rows changed or abstain, the
+  carried rows by method, and how many stored verdicts were superseded.
+
+A relative `rules_file` in the config is resolved against the config
+file's directory, as `database:` is, so `--config /abs/path/config.yaml`
+works from any directory. `output.directory`, `cache.directory` and
+`dora.datadog_dir` follow the same rule; use an absolute path to keep a
+working-directory-relative one. Repository paths still resolve from the
+working directory.
+
+With `extend_defaults: false` the fuzzy tier is off, but the weighted-sum
+tier still names its own categories (`feature`, `bugfix`, `chore`,
+`integration`, `platform`, `docs`, `refactor`, `merge`). The only config
+control over that tier today is `classification.weighted_sum.enabled:
+false`, which turns it off; the commits it would have named then abstain.

@@ -1099,3 +1099,416 @@ fn score_reports_exact_window_merges() {
     );
     assert!(md.contains("exact from the database: 2"), "{md}");
 }
+
+/// Write a scheme-v2-style `rules.yaml` (`extend_defaults: false`, one rule
+/// sending `fix:` to `defect`) into `dir`, and a `config.yaml` beside it that
+/// names the rules file by a RELATIVE path and turns the weighted-sum tier off.
+fn v2_config(dir: &Path) -> std::path::PathBuf {
+    fs::write(
+        dir.join("rules.yaml"),
+        "extend_defaults: false\nrules:\n  - id: v2-defect\n    category: defect\n    \
+         keywords: [\"fix:\"]\n",
+    )
+    .expect("rules");
+    let cfg = dir.join("config.yaml");
+    fs::write(
+        &cfg,
+        "classification:\n  rules_file: rules.yaml\n  weighted_sum:\n    enabled: false\n",
+    )
+    .expect("config");
+    cfg
+}
+
+fn blake3_of(path: &Path) -> String {
+    blake3::hash(&fs::read(path).expect("read"))
+        .to_hex()
+        .to_string()
+}
+
+/// Why: #111 — a sample labelled under old rules must be scorable under new
+/// rules without redrawing it.
+/// What: draws a sample under the built-in rules, re-predicts it under a v2
+/// config. Every row keeps its SHA, order, stratum, weight and text; `fix:`
+/// rows now predict `defect` by the exact tier, the rest abstain
+/// (`uncategorized`/`unclassified`) and are counted as abstentions. The
+/// database file is byte-identical afterwards. The provenance names the tga
+/// version and the config and rules-file BLAKE3 hashes. Scoring the result
+/// treats an abstaining row as `tga eval score` always has: a wrong
+/// prediction. A second run into the same --out is refused.
+/// Test: this function.
+#[test]
+fn repredict_keeps_rows_and_follows_the_new_rules() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let db = d.join("tga.db");
+    seed_db(&db);
+    let a = d.join("a");
+    eval::run_sample(&sample_params(&db, &a, 11)).expect("sample");
+    let before = read_sample(&a.join("sample.jsonl"));
+    let cfg_path = v2_config(d);
+    let config = Config::load(&cfg_path).expect("load config");
+    let db_bytes = fs::read(&db).expect("db bytes");
+    let out = a.join("sample.v2.jsonl");
+    let params = eval::RepredictParams {
+        sample: a.join("sample.jsonl"),
+        db: db.clone(),
+        config: config.clone(),
+        config_path: cfg_path.clone(),
+        out: out.clone(),
+    };
+    let summary = eval::run_repredict(&params).expect("repredict");
+    assert_eq!(fs::read(&db).expect("db bytes"), db_bytes, "db was written");
+
+    let after = read_sample(&out);
+    assert_eq!(after.len(), before.len());
+    let mut fixes = 0;
+    for (b, r) in before.iter().zip(&after) {
+        assert_eq!(
+            (&r.sha, r.stratum, r.weight, &r.subject, &r.paths),
+            (&b.sha, b.stratum, b.weight, &b.subject, &b.paths)
+        );
+        let got = (r.predicted_category.as_str(), r.method.as_str());
+        if r.subject.starts_with("fix:") {
+            fixes += 1;
+            assert_eq!(got, ("defect", "exact"), "{}", r.subject);
+        } else {
+            assert_eq!(got, ("uncategorized", "unclassified"), "{}", r.subject);
+        }
+    }
+    assert!(fixes > 0 && fixes < after.len(), "sample lacks a fix row");
+    let p = &summary.provenance;
+    let changed = before
+        .iter()
+        .zip(&after)
+        .filter(|(b, r)| b.predicted_category != r.predicted_category)
+        .count();
+    assert_eq!(p.changed as usize, changed);
+    assert!(changed > 0);
+    assert_eq!(p.abstentions as usize, after.len() - fixes);
+
+    let prov: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(a.join("sample.v2.provenance.json")).expect("provenance"),
+    )
+    .expect("provenance json");
+    assert_eq!(prov["tga_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(prov["config"]["blake3"], blake3_of(&cfg_path));
+    assert_eq!(
+        prov["rules_files"][0]["blake3"],
+        blake3_of(&d.join("rules.yaml"))
+    );
+    assert_eq!(prov["rows"], after.len());
+
+    let rater = a.join("v2.csv");
+    let labels: Vec<(&str, &str)> = after.iter().map(|r| (r.sha.as_str(), "defect")).collect();
+    write_labels(&rater, &labels);
+    let report = eval::run_score(&ScoreParams {
+        sample: out.clone(),
+        strata: None,
+        labels: vec![rater],
+        adjudicated: None,
+        categories: Some(eval::config_categories(&config).expect("categories")),
+        db: None,
+        out: a.join("report-v2"),
+    })
+    .expect("score the re-predicted sample");
+    assert_eq!(report.scored as usize, after.len());
+    let method = |m: &str| report.per_method.iter().find(|row| row.key == m).cloned();
+    let exact = method("exact").expect("exact row");
+    assert_eq!((exact.n, exact.correct), (fixes as u64, fixes as u64));
+    let abstain = method("unclassified").expect("unclassified row");
+    assert_eq!(abstain.correct, 0);
+
+    let again = eval::run_repredict(&params).expect_err("overwrote --out");
+    assert!(again.to_string().contains("already exists"), "{again}");
+}
+
+/// Why: #111 fail-closed rule — a row that cannot be re-derived must stop the
+/// run, never be skipped or keep its old prediction.
+/// What: a sample of `m1` (in the database) and `x9` (not) is refused with an
+/// error naming `x9`, and neither output file is written.
+/// Test: this function.
+#[test]
+fn repredict_refuses_a_sha_missing_from_the_db() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    legacy_sample_and_db(d, &["m1", "x9"], &[("m1", false)]);
+    let cfg_path = v2_config(d);
+    let out = d.join("v2").join("sample.jsonl");
+    let err = eval::run_repredict(&eval::RepredictParams {
+        sample: d.join("sample.jsonl"),
+        db: d.join("tga.db"),
+        config: Config::load(&cfg_path).expect("load config"),
+        config_path: cfg_path,
+        out: out.clone(),
+    })
+    .expect_err("a missing SHA was skipped");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("1 sample rows are not in") && msg.contains("x9"),
+        "{msg}"
+    );
+    assert!(!out.exists());
+    assert!(!eval::repredict::provenance_path(&out).exists());
+}
+
+/// Why: #111 review — a stored LLM, external or repo-fallback verdict may be
+/// carried only when the new config's cascade would still reach that tier;
+/// otherwise the rows measure the old classifier, not the new rules.
+/// What: `l1` (`fix: x`, stored LLM `feature`) re-derives as `defect` under v2
+/// with or without the LLM tier, since the exact rule's 0.85 is above the
+/// 0.65 fallback threshold. `u1` (`b`, stored LLM) abstains without the LLM
+/// tier and keeps its LLM verdict with it. `m1`'s manual override is always
+/// carried. `r1`'s stored repo fallback is never carried, since `tga classify`
+/// never applies one: it abstains. Provenance counts carried rows by method
+/// and superseded ones.
+/// Fails on 7abf001, which carried both LLM rows unconditionally.
+/// Test: this function.
+#[test]
+fn repredict_carries_a_stored_verdict_only_when_its_tier_is_reached() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let rows = [
+        ("l1", "fix: x", "feature", 0.9, "llm_fallback"),
+        ("u1", "b", "feature", 0.8, "llm_fallback"),
+        ("m1", "fix: y", "chore", 1.0, "manual"),
+        ("r1", "c", "platform", 0.7, "repo_category_fallback"),
+    ];
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|(sha, ..)| record(sha, "other", "llm", "feature", 0.9, 1.0))
+        .collect();
+    fs::write(d.join("sample.jsonl"), lines.join("\n") + "\n").expect("sample");
+    let db = Database::open(&d.join("tga.db")).expect("open db");
+    for (sha, message, category, confidence, method) in rows {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO classifications (category, confidence, method) VALUES (?1, ?2, ?3)",
+            params![category, confidence, method],
+        )
+        .expect("classification");
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+             repository, is_merge, classification_id) VALUES (?1, 'n', 'a@example.com', \
+             '2025-03-01T00:00:00Z', ?2, 'r', 0, ?3)",
+            params![sha, message, conn.last_insert_rowid()],
+        )
+        .expect("commit");
+    }
+    drop(db);
+
+    let run = |cfg_dir: &Path, use_llm: bool| {
+        fs::create_dir_all(cfg_dir).expect("mkdir");
+        let cfg = v2_config(cfg_dir);
+        if use_llm {
+            let text = fs::read_to_string(&cfg).expect("config");
+            fs::write(&cfg, text + "  use_llm: true\n").expect("config");
+        }
+        let out = cfg_dir.join("sample.jsonl");
+        let summary = eval::run_repredict(&eval::RepredictParams {
+            sample: d.join("sample.jsonl"),
+            db: d.join("tga.db"),
+            config: Config::load(&cfg).expect("load config"),
+            config_path: cfg,
+            out: out.clone(),
+        })
+        .expect("repredict");
+        let got: Vec<(String, String)> = read_sample(&out)
+            .into_iter()
+            .map(|r| (r.predicted_category, r.method))
+            .collect();
+        (got, summary.provenance)
+    };
+    let pair = |c: &str, m: &str| (c.to_string(), m.to_string());
+
+    let (got, p) = run(&d.join("no-llm"), false);
+    assert_eq!(
+        got,
+        vec![
+            pair("defect", "exact"),
+            pair("uncategorized", "unclassified"),
+            pair("chore", "manual"),
+            pair("uncategorized", "unclassified"),
+        ]
+    );
+    assert_eq!(p.carried, [("manual".to_string(), 1)].into());
+    assert_eq!(p.superseded, 3);
+
+    let (got, p) = run(&d.join("llm"), true);
+    assert_eq!(
+        got,
+        vec![
+            pair("defect", "exact"),
+            pair("feature", "llm"),
+            pair("chore", "manual"),
+            pair("uncategorized", "unclassified"),
+        ]
+    );
+    assert_eq!(
+        p.carried,
+        [("llm".to_string(), 1), ("manual".to_string(), 1)].into()
+    );
+    assert_eq!(p.superseded, 2);
+}
+
+/// Why: #111 review — `tga eval sample` now carries a stored LLM verdict
+/// only when the sampling config enables the LLM tier, so the same database
+/// and seed can stratify differently than before.
+/// What: six commits the built-in catch-all (confidence 0.3) matches, each
+/// stored as `llm_fallback` `feature`. Under a config without `llm:` every
+/// sampled row is re-derived into `catch_all`; with an `llm:` section every
+/// row keeps its LLM verdict in stratum `other`.
+/// Test: this function.
+#[test]
+fn sample_carries_stored_llm_verdicts_only_with_an_llm_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let db = Database::open(&d.join("tga.db")).expect("open db");
+    for i in 0..6 {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO classifications (category, confidence, method) \
+             VALUES ('feature', 0.9, 'llm_fallback')",
+            [],
+        )
+        .expect("classification");
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+             repository, is_merge, classification_id) VALUES (?1, 'n', ?2, \
+             '2025-03-01T00:00:00Z', ?3, 'r', 0, ?4)",
+            params![
+                format!("s{i}"),
+                format!("dev{i}@example.com"),
+                format!("zzqx {i}"),
+                conn.last_insert_rowid()
+            ],
+        )
+        .expect("commit");
+    }
+    drop(db);
+
+    let draw = |config: Config, out: &str| {
+        eval::run_sample(&SampleParams {
+            config,
+            cap: 10,
+            ..sample_params(&d.join("tga.db"), &d.join(out), 3)
+        })
+        .expect("sample");
+        read_sample(&d.join(out).join("sample.jsonl"))
+            .into_iter()
+            .map(|r| (r.stratum, r.method, r.predicted_category))
+            .collect::<Vec<_>>()
+    };
+
+    let rows = draw(Config::default(), "no-llm");
+    assert_eq!(rows.len(), 6);
+    for (stratum, method, _) in &rows {
+        assert_eq!(
+            (*stratum, method.as_str()),
+            (eval::Stratum::CatchAll, "catch_all")
+        );
+    }
+
+    let with_llm: Config =
+        serde_yaml::from_str("llm:\n  api_key_env: TGA_TEST_UNSET_KEY\n").expect("llm config");
+    let rows = draw(with_llm, "llm");
+    assert_eq!(rows.len(), 6);
+    for (stratum, method, category) in &rows {
+        assert_eq!(
+            (*stratum, method.as_str(), category.as_str()),
+            (eval::Stratum::Other, "llm", "feature")
+        );
+    }
+}
+
+/// Insert commits `(sha, message)` into a fresh database in repo `r`.
+fn db_with(path: &Path, rows: &[(&str, &str)]) {
+    let db = Database::open(path).expect("open db");
+    for (sha, message) in rows {
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, is_merge) VALUES (?1, 'n', 'a@example.com', \
+                 '2025-03-01T00:00:00Z', ?2, 'r', 0)",
+                params![sha, message],
+            )
+            .expect("insert");
+    }
+}
+
+/// Why: #111 — `classification.rules_file` resolved against the process CWD
+/// while `database:` resolved against the config's directory, so
+/// `--config /abs/config.yaml` from another directory failed with an I/O
+/// error. The `eval score` half fails on a96727c.
+/// What: runs the binary from an unrelated CWD with a config naming
+/// `rules.yaml` relatively. `eval score --config` accepts the label `defect`,
+/// which only that rules file names; `eval repredict` re-predicts the
+/// `fix:` row as `defect`, and without an explicit --config is refused.
+/// Test: this function.
+#[test]
+fn rules_file_resolves_from_another_cwd() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let cfg_dir = d.join("cfg");
+    fs::create_dir_all(&cfg_dir).expect("mkdir");
+    let cfg = v2_config(&cfg_dir);
+    let rows = write_source(d, &[("exact", 2, 20, "feature", 0.9)]);
+    write_labels(
+        &d.join("rater.csv"),
+        &[
+            (rows[0].0.as_str(), "defect"),
+            (rows[1].0.as_str(), "feature"),
+        ],
+    );
+    let elsewhere = d.join("elsewhere");
+    fs::create_dir_all(&elsewhere).expect("mkdir");
+    let tga = || {
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_tga"));
+        c.current_dir(&elsewhere);
+        c
+    };
+
+    let out = tga()
+        .arg("--config")
+        .arg(&cfg)
+        .args(["eval", "score", "--sample"])
+        .arg(d.join("sample.jsonl"))
+        .arg("--labels")
+        .arg(d.join("rater.csv"))
+        .arg("--out")
+        .arg(d.join("report"))
+        .output()
+        .expect("run tga");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "score failed: {stderr}");
+
+    db_with(
+        &d.join("tga.db"),
+        &[(rows[0].0.as_str(), "fix: a"), (rows[1].0.as_str(), "b")],
+    );
+    let repredict = |with_config: bool, out_path: &Path| {
+        let mut c = tga();
+        if with_config {
+            c.arg("--config").arg(&cfg);
+        }
+        c.args(["eval", "repredict", "--sample"])
+            .arg(d.join("sample.jsonl"))
+            .arg("--db")
+            .arg(d.join("tga.db"))
+            .arg("--out")
+            .arg(out_path)
+            .output()
+            .expect("run tga")
+    };
+    let v2 = d.join("v2").join("sample.jsonl");
+    let out = repredict(true, &v2);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "repredict failed: {stderr}");
+    let after = read_sample(&v2);
+    assert_eq!(after[0].predicted_category, "defect");
+    assert_eq!(after[1].predicted_category, "uncategorized");
+
+    let out = repredict(false, &d.join("v3").join("sample.jsonl"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "ran without --config");
+    assert!(stderr.contains("--config"), "{stderr}");
+}
