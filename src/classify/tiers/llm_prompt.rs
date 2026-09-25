@@ -73,18 +73,34 @@ pub struct LlmCall {
     pub outcome: LlmOutcome,
 }
 
+// #137: `LlmCall` is `#[non_exhaustive]`. One named constructor per outcome,
+// so a caller outside the crate cannot pair a verdict with a non-`Answered`
+// outcome.
 impl LlmCall {
-    /// A call result from its three parts (#137: `LlmCall` is
-    /// `#[non_exhaustive]`, so this is the constructor outside this crate).
-    pub fn new(
-        verdict: Option<ClassificationResult>,
-        usage: Option<LlmUsage>,
-        outcome: LlmOutcome,
-    ) -> Self {
+    /// A call whose `verdict` the pipeline may adopt.
+    pub fn answered(verdict: ClassificationResult, usage: Option<LlmUsage>) -> Self {
         Self {
-            verdict,
+            verdict: Some(verdict),
             usage,
-            outcome,
+            outcome: LlmOutcome::Answered,
+        }
+    }
+
+    /// A call where the model chose the abstain label.
+    pub fn abstained(usage: Option<LlmUsage>) -> Self {
+        Self {
+            verdict: None,
+            usage,
+            outcome: LlmOutcome::Abstained,
+        }
+    }
+
+    /// A call where the model named a category outside the configured set.
+    pub fn out_of_set(usage: Option<LlmUsage>) -> Self {
+        Self {
+            verdict: None,
+            usage,
+            outcome: LlmOutcome::OutOfSet,
         }
     }
 
@@ -181,11 +197,7 @@ pub fn resolve(
     let mut subcategory = verdict.subcategory;
     if let Some(allowed) = allowed {
         if category.eq_ignore_ascii_case(ABSTAIN_LABEL) {
-            return LlmCall {
-                verdict: None,
-                usage,
-                outcome: LlmOutcome::Abstained,
-            };
+            return LlmCall::abstained(usage);
         }
         match allowed
             .iter()
@@ -199,16 +211,12 @@ pub fn resolve(
             }
             None => {
                 warn!(category = %category, "LLM category outside the configured set; abstaining");
-                return LlmCall {
-                    verdict: None,
-                    usage,
-                    outcome: LlmOutcome::OutOfSet,
-                };
+                return LlmCall::out_of_set(usage);
             }
         }
     }
-    LlmCall {
-        verdict: Some(ClassificationResult {
+    LlmCall::answered(
+        ClassificationResult {
             category,
             subcategory,
             top_level: None, // resolved by ClassificationEngine via the taxonomy registry
@@ -216,8 +224,7 @@ pub fn resolve(
             method: ClassificationMethod::LlmFallback,
             ticket_id: None,
             complexity: verdict.complexity.map(|v| v.clamp(1, 5)),
-        }),
+        },
         usage,
-        outcome: LlmOutcome::Answered,
-    }
+    )
 }

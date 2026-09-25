@@ -169,7 +169,9 @@ fn default_rule_priority() -> i32 {
 ///
 /// `deny_unknown_fields` prevents silent YAML typos from going unnoticed.
 /// `#[non_exhaustive]` (#137): outside this crate, start from
-/// [`RuleSet::default`] (an empty, non-extending set).
+/// [`RuleSet::default`]. That is an empty, non-extending set with no rules —
+/// NOT the built-in rules, which come from
+/// [`crate::classify::rules::loader::default_rules`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
