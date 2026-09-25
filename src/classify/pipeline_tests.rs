@@ -483,6 +483,61 @@ async fn backfill_complexity_updates_only_null_rows() {
     assert_eq!(unchanged, Some(3), "already-scored row must be unchanged");
 }
 
+/// Why: #111. Merge commits never reach the LLM tier, so the complexity
+/// backfill (`tga backfill complexity`, `classify --backfill-complexity`)
+/// must not send one either.
+/// What: seed two NULL-complexity `regex_rule` rows, one linked to a merge
+/// and one to a regular commit; run the backfill against a mock LLM; assert
+/// exactly one LLM request, and that only the non-merge row is scored.
+/// Test: in-memory DB + wiremock.
+#[tokio::test]
+async fn backfill_complexity_never_sends_a_merge_to_the_llm() {
+    let server = mock_llm_server("feature", 0.9, 4).await;
+    let endpoint = format!("{}/v1/chat/completions", server.uri());
+    let mut db = Database::open_in_memory().expect("db");
+
+    let seed = |sha: &str, is_merge: i64| -> i64 {
+        db.connection()
+            .execute(
+                "INSERT INTO classifications (category, confidence, method, complexity) \
+                 VALUES ('feature', 0.5, 'regex_rule', NULL)",
+                [],
+            )
+            .expect("insert classification");
+        let cl = db.connection().last_insert_rowid();
+        let c = insert_commit(&db, sha, "add the widget");
+        db.connection()
+            .execute(
+                "UPDATE commits SET classification_id = ?1, is_merge = ?2 WHERE id = ?3",
+                params![cl, is_merge, c],
+            )
+            .expect("link commit");
+        cl
+    };
+    let merge_cl = seed("sha-merge", 1);
+    let regular_cl = seed("sha-regular", 0);
+
+    let engine = engine_with_mock_llm(&endpoint);
+    let updated = ClassificationPipeline::backfill_complexity_with_engine(&mut db, &engine)
+        .await
+        .expect("backfill");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 1, "exactly one LLM request: the non-merge");
+    assert_eq!(updated, 1, "only the non-merge row is scored");
+    let complexity = |id: i64| -> Option<i64> {
+        db.connection()
+            .query_row(
+                "SELECT complexity FROM classifications WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("query complexity")
+    };
+    assert_eq!(complexity(regular_cl), Some(4));
+    assert_eq!(complexity(merge_cl), None, "merge row must stay NULL");
+}
+
 /// Why: regression guard for issue #2719. The Tier-0.5 external-source pass now
 /// runs with bounded concurrency instead of a serial per-commit loop; the
 /// dedupe-before-spawn step must still fetch each referenced ticket exactly once

@@ -473,6 +473,7 @@ pub struct ClassifyArgs {
     ///
     /// Only rows with `complexity IS NULL` and a non-`exact_rule` method
     /// are updated; category, confidence, and method are left untouched.
+    /// Merge commits are skipped; they never reach the LLM.
     #[arg(long)]
     pub backfill_complexity: bool,
     /// Re-classify commits that already have a `classification_id`.

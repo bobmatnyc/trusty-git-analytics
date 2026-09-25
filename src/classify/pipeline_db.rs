@@ -27,20 +27,25 @@ pub(super) struct ComplexityBackfillCandidate {
 /// Read classification rows lacking a complexity score.
 ///
 /// Why: the backfill must target only LLM-eligible rows; `exact_rule`
-/// verdicts never carried complexity, so they are excluded.
+/// verdicts never carried complexity, so they are excluded. Merge commits
+/// never reach the LLM tier (#111), so the backfill must not send them either.
 /// What: joins `classifications` to `commits` via `classification_id` and
-/// returns rows where `complexity IS NULL` and `method != 'exact_rule'`.
-/// Test: covered by the backfill integration test.
+/// returns rows where `complexity IS NULL`, `method != 'exact_rule'` and the
+/// commit is not a merge.
+/// Test: `backfill_complexity_updates_only_null_rows`,
+/// `backfill_complexity_never_sends_a_merge_to_the_llm`.
 pub(super) fn read_complexity_backfill_candidates(
     db: &Database,
 ) -> Result<Vec<ComplexityBackfillCandidate>> {
+    // #111: `c.is_merge = 0` keeps merges out of the LLM, matching the tier.
     let mut stmt = db
         .connection()
         .prepare(
             "SELECT cl.id, c.sha, c.message \
              FROM classifications cl \
              JOIN commits c ON c.classification_id = cl.id \
-             WHERE cl.complexity IS NULL AND cl.method != 'exact_rule'",
+             WHERE cl.complexity IS NULL AND cl.method != 'exact_rule' \
+             AND c.is_merge = 0",
         )
         .map_err(crate::core::TgaError::from)?;
     let rows = stmt
