@@ -39,6 +39,8 @@ fn eq<T: PartialEq + std::fmt::Debug>(built: T, parsed: T) -> Option<String> {
 
 /// Compare derived `Debug` output, for types without `PartialEq`. A derived
 /// `Debug` prints every field, so a field added later is still compared.
+/// Sound only for a non-redacting `Debug`, or a hand-written one that names
+/// every field; a masked field needs its own equality check.
 fn debug_eq<T: std::fmt::Debug>(built: T, parsed: T) -> Option<String> {
     let (b, p) = (format!("{built:?}"), format!("{parsed:?}"));
     (b != p).then(|| format!("built {b}\n  != yaml {p}"))
@@ -106,30 +108,21 @@ const ROWS: &[Row] = &[
         debug_eq(FailureSignal::default(), parse("{}"))
     }),
     ("AzureDevOpsConfig::new", || {
-        // Field by field: `Debug` is hand-written and redacts `pat` (#5770).
+        // The hand-written `Debug` (#5770) destructures every field but masks
+        // `pat`, so `pat` gets its own check.
         let b = AzureDevOpsConfig::new("https://dev.azure.com/acme", "pat-value");
         let p: AzureDevOpsConfig =
             parse("organization_url: https://dev.azure.com/acme\npat: pat-value");
-        let same = b.organization_url == p.organization_url
-            && b.pat == p.pat
-            && b.project == p.project
-            && b.projects == p.projects
-            && b.ticket_regex == p.ticket_regex
-            && b.team_keys == p.team_keys
-            && b.fetch_on_reference == p.fetch_on_reference
-            && b.fetch_prs == p.fetch_prs;
-        (!same).then(|| "AzureDevOpsConfig fields differ".to_string())
+        if b.pat != p.pat {
+            return Some("pat differs".to_string());
+        }
+        debug_eq(b, p)
     }),
     ("DeveloperAliasEntry::new", || {
-        let b = DeveloperAliasEntry::new("John Doe", "john@acme.com");
-        let p: DeveloperAliasEntry = parse("name: John Doe\nprimary_email: john@acme.com");
-        let same = b.name == p.name
-            && b.primary_email == p.primary_email
-            && b.aliases == p.aliases
-            && b.github_username == p.github_username
-            && b.confidence == p.confidence
-            && b.reasoning == p.reasoning;
-        (!same).then(|| format!("built {b:?}\n  != yaml {p:?}"))
+        debug_eq(
+            DeveloperAliasEntry::new("John Doe", "john@acme.com"),
+            parse("name: John Doe\nprimary_email: john@acme.com"),
+        )
     }),
 ];
 

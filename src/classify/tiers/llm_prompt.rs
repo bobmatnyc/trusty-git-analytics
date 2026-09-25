@@ -74,8 +74,8 @@ pub struct LlmCall {
 }
 
 // #137: `LlmCall` is `#[non_exhaustive]`. One named constructor per outcome,
-// so a caller outside the crate cannot pair a verdict with a non-`Answered`
-// outcome.
+// and none pairs a verdict with a non-`Answered` outcome. The fields stay
+// `pub`, so a caller who mutates them owns that invariant.
 impl LlmCall {
     /// A call whose `verdict` the pipeline may adopt.
     pub fn answered(verdict: ClassificationResult, usage: Option<LlmUsage>) -> Self {
