@@ -155,6 +155,35 @@ async fn backfill_complexity_dry_run_reports_candidates_without_writing() {
     assert_eq!(null_count, 1, "dry-run must not write complexity scores");
 }
 
+/// Why: #111 review — the `tga backfill complexity --dry-run` count must match
+/// the rows the real backfill sends, and the real backfill skips merges.
+/// What: seed two NULL-complexity `regex_rule` rows, each linked to a commit,
+/// one of them a merge; the dry-run count is 1.
+/// Test: in-memory DB; no LLM.
+#[test]
+fn complexity_dry_run_count_excludes_merges() {
+    let db = Database::open_in_memory().expect("open");
+    for (sha, is_merge) in [("m", 1), ("n", 0)] {
+        seed(&db, sha, "add the widget");
+        db.connection()
+            .execute(
+                "INSERT INTO classifications (category, confidence, method, complexity) \
+                 VALUES ('feature', 0.5, 'regex_rule', NULL)",
+                [],
+            )
+            .expect("insert classification");
+        db.connection()
+            .execute(
+                "UPDATE commits SET classification_id = ?1, is_merge = ?2 WHERE sha = ?3",
+                params![db.connection().last_insert_rowid(), is_merge, sha],
+            )
+            .expect("link commit");
+    }
+    let count = tga::classify::ClassificationPipeline::count_complexity_backfill_candidates(&db)
+        .expect("count");
+    assert_eq!(count, 1, "the merge is not a candidate");
+}
+
 // ── effort backfill tests ─────────────────────────────────────────────────
 
 /// Why: verify the schema migration and UPSERT INSERT path work end-to-end.

@@ -38,18 +38,8 @@ pub(super) async fn backfill_complexity(
 ) -> anyhow::Result<()> {
     if dry_run {
         // Count candidate rows without invoking the LLM or writing anything.
-        // #111: same filter as the real backfill, which skips merge commits.
-        let candidates: i64 = db
-            .connection()
-            .query_row(
-                "SELECT COUNT(*) FROM classifications cl \
-                 JOIN commits c ON c.classification_id = cl.id \
-                 WHERE cl.complexity IS NULL AND cl.method != 'exact_rule' \
-                 AND c.is_merge = 0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
+        // #111: the real backfill's own reader, so merges are skipped here too.
+        let candidates = ClassificationPipeline::count_complexity_backfill_candidates(db)?;
         println!(
             "Dry run — would request complexity scores for {candidates} classification(s) \
              (complexity IS NULL, method != 'exact_rule', not a merge). No changes written."

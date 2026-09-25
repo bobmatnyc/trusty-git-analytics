@@ -64,6 +64,23 @@ pub(super) fn read_complexity_backfill_candidates(
     Ok(out)
 }
 
+impl super::pipeline::ClassificationPipeline {
+    /// Count the rows a complexity backfill would send to the LLM.
+    ///
+    /// Why: #111 review — the `--dry-run` count must use the same reader as
+    /// the real backfill, or the two drift (the inline copy missed the merge
+    /// filter and printed 0 on a SQL error).
+    /// What: the length of [`read_complexity_backfill_candidates`].
+    /// Test: `commands::backfill::tests::complexity_dry_run_count_excludes_merges`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the candidate query fails.
+    pub(crate) fn count_complexity_backfill_candidates(db: &Database) -> Result<usize> {
+        Ok(read_complexity_backfill_candidates(db)?.len())
+    }
+}
+
 /// Look up manual classification overrides for the given commits.
 ///
 /// Returns a map keyed by commit row id; only commits with a hit are
