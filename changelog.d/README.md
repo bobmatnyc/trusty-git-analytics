@@ -25,11 +25,11 @@ numbers are unique per repo); the slug keeps two fragments for one number
 distinct. The file must sit directly in this directory — a nested one is
 rejected.
 
-Preview what the next release will say:
-
-    bash scripts/assemble-changelog.sh <crate> --stdout
-
-`scripts/assemble-changelog.sh <crate> <version>` folds these into `CHANGELOG.md`
-at release time and deletes them in the same operation. This README is a tracked
+There is no assembly script. At release time, the release PR folds these
+fragments into `CHANGELOG.md` by hand: add a new `## [<version>] — <date>`
+section above the previous release, in category order (`Breaking | Added |
+Fixed | Performance | Changed | Removed | Security | Documentation`), copying
+each fragment's body under a `###` heading for its line-1 category — then
+delete the fragment files in the same commit. This README is a tracked
 placeholder that keeps the directory present between releases; it is never
 treated as a fragment.
