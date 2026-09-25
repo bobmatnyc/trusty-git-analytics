@@ -104,6 +104,10 @@ the config file. Requires:
   Claude models are not invocable on demand by their bare `anthropic.…` id.
   To use Claude Sonnet 5, set `model` to its `us.anthropic.` inference-profile
   id as listed in the Bedrock console for your account and region.
+- The default `model` is the `us.` Haiku 4.5 profile, which works only when
+  `region` is a US source region. Outside the US, set `model` to the `eu.`,
+  `apac.` or `global.` Haiku 4.5 inference-profile id, as listed in the
+  Bedrock console for your account and region.
 - Bedrock requests never carry `temperature`, for any model (#111). Claude
   Sonnet 5 rejects a request that sets it; other models run at the
   provider's default.

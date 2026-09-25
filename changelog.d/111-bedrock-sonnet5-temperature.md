@@ -12,4 +12,6 @@ Fixed
 - The default Bedrock model is now `us.anthropic.claude-haiku-4-5-20251001-v1:0`
   (#111). The old default, `anthropic.claude-3-haiku-20240307-v1:0`, was not
   invocable in us-east-1; current Claude models on Bedrock need a
-  cross-region inference-profile id.
+  cross-region inference-profile id. The `us.` profile works only from a US
+  source region. Outside the US, set `llm.model` to the `eu.`, `apac.` or
+  `global.` Haiku 4.5 inference-profile id.

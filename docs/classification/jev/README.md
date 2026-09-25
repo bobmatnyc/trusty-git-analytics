@@ -75,7 +75,7 @@ Tool weighted accuracy against rater 1, with 95% confidence intervals:
 | v2 rules, weighted-sum tier **off** | 31.0% [18.5, 43.6] | Same result with the tier disabled ([#131](https://github.com/bobmatnyc/trusty-git-analytics/issues/131)); the tier is now off by default |
 | v2 rules + new precision rules (`data_science`, `internal_tooling`, `upkeep`) | 32.9% [20.3, 45.6] | Rules built without seeing the 100 labelled commits; each spot-checked ≥17/20 correct on other commits. 30/80 rows left unanswered; precision on answered rows ≈41% (19/46) |
 | Rules + LLM tier on unanswered rows only, Bedrock Claude Haiku 4.5 | **45.9% [32.8, 58.9]** | 4/80 rows still unanswered; LLM precision on its own rows 73% (19/26); 48 LLM calls, 24,171 input / 1,736 output tokens |
-| Rules + LLM tier, Bedrock Claude Sonnet 5 | NOT YET MEASURED | A `temperature` parameter tga sends is rejected by Sonnet 5; fix in progress |
+| Rules + LLM tier, Bedrock Claude Sonnet 5 | NOT YET MEASURED | Sonnet 5 rejected the `temperature` parameter tga sent; tga 9.0.1 no longer sends it on Bedrock ([#111](https://github.com/bobmatnyc/trusty-git-analytics/issues/111)). A Sonnet 5 re-measurement is pending |
 | Rules + Jev (TypeSafe's hosted decision model) | NOT YET MEASURED | Needs an API key and the owner's go-ahead |
 
 The 45.9% row is the best measured result and is not directly comparable to
