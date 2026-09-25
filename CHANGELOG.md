@@ -6,6 +6,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [9.0.1] — 2026-09-24
+
+### Fixed
+
+- The Bedrock LLM tier no longer sends `temperature` (#111). Claude Sonnet 5
+  on Bedrock rejected every classification call because tga sent
+  `temperature: 0.0`. No Bedrock request carries a temperature now, for any
+  model, so Sonnet 5 works by setting `llm.model` to its `us.anthropic.`
+  inference-profile id. Other models run at the provider's default
+  temperature.
+- `tga profile` no longer sends `temperature` to a `bedrock/…` model (#111),
+  in either the period review or the narrative pass, so
+  `--model bedrock/<Sonnet 5 inference-profile id>` works. Other providers
+  keep the passes' fixed temperatures (0.2 and 0.3).
+- The default Bedrock model is now `us.anthropic.claude-haiku-4-5-20251001-v1:0`
+  (#111). The old default, `anthropic.claude-3-haiku-20240307-v1:0`, was not
+  invocable in us-east-1; current Claude models on Bedrock need a
+  cross-region inference-profile id. The `us.` profile works only from a US
+  source region. Outside the US, set `llm.model` to the `eu.`, `apac.` or
+  `global.` Haiku 4.5 inference-profile id.
+
+### Changed
+
+- The LLM tier never sends a merge commit to the LLM, under either
+  `llm_fallback_scope` (#111). Merges keep their rule verdict and write no
+  `llm_usage` row; the number skipped is logged at `info` level.
+  Under a custom-only ruleset (`extend_defaults: false`), a merge the rules
+  leave uncategorized now stays uncategorized instead of getting an LLM
+  label. Those merges count against the classify summary's `coverage_pct`,
+  `repository_analysis_status.classification_coverage_pct`, and the
+  `min_coverage_pct` warning, so coverage can drop after upgrading.
+- `tga backfill complexity` and `tga classify --backfill-complexity` skip
+  merge commits too (#111). A merge's `complexity` stays NULL, and the
+  `--dry-run` candidate count no longer includes merges.
+- `tga eval repredict` no longer carries a stored LLM verdict on a merge
+  commit (#111), because `tga classify` would not produce one. The row is
+  re-derived and counted as superseded.
+
+### Documentation
+
+- Published the scheme v2 classification accuracy report and a cost-benefit
+  analysis of the LLM tiers (Bedrock Haiku 4.5, Bedrock Sonnet 5, and a
+  planned Jev option) at `docs/classification/jev/`, linked from
+  `docs/requirements/classification.md` and `docs/eval-harness.md` (#111).
+
 ## [9.0.0] — 2026-09-24
 
 ### Breaking
