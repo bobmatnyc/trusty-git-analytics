@@ -11,10 +11,28 @@
 //! What: [`deliver_schema`] picks one delivery per call — the real field when
 //! the adapter supports structured output, the prose fallback when it does not
 //! — so exactly one copy of the schema reaches the model either way.
+//! [`sampling_temperature`] is the other per-provider fork both passes share:
+//! whether the request may carry a `temperature` at all (#111).
 //! Test: `schema_delivery_tests.rs`.
 
 use serde_json::Value;
-use trusty_common::inference::StructuredOutput;
+use trusty_common::inference::{ProviderId, StructuredOutput};
+
+/// The `temperature` one profiling pass may send to `model`.
+///
+/// Why (#111): Claude Sonnet 5 on Bedrock rejects any request that sets
+/// `temperature`, so no `bedrock/…` request carries one, whatever the model.
+/// Other providers keep the pass's fixed temperature.
+/// What: `None` when `model` routes to Bedrock, by the same
+/// [`ProviderId::from_slug_prefix`] rule `provider_for` routes on (Bedrock
+/// always resolves at that stage); `Some(temperature)` otherwise.
+/// Test: `bedrock_slugs_get_no_temperature`.
+pub(crate) fn sampling_temperature(model: &str, temperature: f32) -> Option<f32> {
+    match ProviderId::from_slug_prefix(model) {
+        Some(ProviderId::Bedrock) => None,
+        _ => Some(temperature),
+    }
+}
 
 /// Choose how one pass's schema reaches the model.
 ///

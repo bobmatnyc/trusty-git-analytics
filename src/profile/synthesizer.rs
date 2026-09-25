@@ -30,7 +30,7 @@ use trusty_common::inference::{
     InferenceError,
 };
 
-use super::schema_delivery::deliver_schema;
+use super::schema_delivery::{deliver_schema, sampling_temperature};
 use super::types::{
     ContributorProfile, LongitudinalFinding, PeriodBatch, TokenCostSummary, Trajectory, TrendTag,
 };
@@ -414,8 +414,10 @@ pub fn build_synthesizer_user_message(profile: &ContributorProfile) -> String {
 /// sending adapter's `supports_structured_output` — see
 /// [`super::schema_delivery::deliver_schema`] for why the fallback exists rather
 /// than a refusal. `model` passes through unchanged so the commons' prefix
-/// routing keeps working.
+/// routing keeps working. `temperature` is [`SYNTHESIZER_TEMPERATURE`], or
+/// unset for a `bedrock/…` model (#111).
 /// Test: `synthesis_request_preserves_routing_prefix_and_sampling`,
+/// `synthesis_request_keeps_temperature_off_bedrock`,
 /// `synthesis_request_sends_the_schema_through_response_schema`,
 /// `synthesis_request_falls_back_to_prose_without_the_capability`.
 pub fn build_synthesis_request(
@@ -438,7 +440,8 @@ pub fn build_synthesis_request(
             ChatMessage::user(build_synthesizer_user_message(profile)),
         ],
     );
-    req.temperature = Some(SYNTHESIZER_TEMPERATURE);
+    // #111: none on Bedrock (Sonnet 5 rejects it).
+    req.temperature = sampling_temperature(model, SYNTHESIZER_TEMPERATURE);
     req.max_tokens = Some(SYNTHESIZER_MAX_TOKENS);
     req.response_schema = response_schema;
     req

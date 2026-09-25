@@ -5,6 +5,10 @@ Fixed
   model, so Sonnet 5 works by setting `llm.model` to its `us.anthropic.`
   inference-profile id. Other models run at the provider's default
   temperature.
+- `tga profile` no longer sends `temperature` to a `bedrock/…` model (#111),
+  in either the period review or the narrative pass, so
+  `--model bedrock/<Sonnet 5 inference-profile id>` works. Other providers
+  keep the passes' fixed temperatures (0.2 and 0.3).
 - The default Bedrock model is now `us.anthropic.claude-haiku-4-5-20251001-v1:0`
   (#111). The old default, `anthropic.claude-3-haiku-20240307-v1:0`, was not
   invocable in us-east-1; current Claude models on Bedrock need a
