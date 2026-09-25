@@ -396,12 +396,14 @@ async fn shas_outside_the_filter_fail_before_any_write() {
 /// What: two merge commits (`is_merge = 1`) — one no rule answers, one weak
 /// rule hit — beside the usual fixture; under both scopes neither merge
 /// reaches the mock, each keeps its rule verdict and has no `llm_usage` row.
+/// The skip keys on the flag, not the text: one merge's message lacks
+/// "merge", and a non-merge whose message says "merge" does reach the mock.
 /// Test: this test.
 #[tokio::test]
 async fn merge_commits_never_reach_the_llm() {
     for (scope, sent) in [
-        (LlmFallbackScope::Unanswered, 1),
-        (LlmFallbackScope::LowConfidence, 2),
+        (LlmFallbackScope::Unanswered, 2),
+        (LlmFallbackScope::LowConfidence, 3),
     ] {
         let rules = rules_file(RULES);
         let pipeline = ClassificationPipeline::new(config(rules.path(), scope));
@@ -409,8 +411,11 @@ async fn merge_commits_never_reach_the_llm() {
         let mut db = Database::open_in_memory().expect("db");
         insert_commit(&db, "sha-weak", "infra: bump the cluster size");
         insert_commit(&db, "sha-none", "zzz qqq vvv www yyy uuu");
-        insert_commit(&db, "sha-merge-none", "zzz qqq vvv merged");
+        // #111: a merge whose text never says "merge", and a regular commit
+        // whose text does, so a message-text skip fails this test.
+        insert_commit(&db, "sha-merge-none", "zzz qqq vvv combined");
         insert_commit(&db, "sha-merge-weak", "infra: merge release branch");
+        insert_commit(&db, "sha-text-merge", "zzz qqq merge sort rewrite");
         db.connection()
             .execute(
                 "UPDATE commits SET is_merge = 1 WHERE sha LIKE 'sha-merge-%'",
@@ -424,12 +429,23 @@ async fn merge_commits_never_reach_the_llm() {
 
         let requests = server.received_requests().await.expect("rec");
         assert_eq!(requests.len(), sent, "{scope:?}");
+        let bodies: Vec<String> = requests
+            .iter()
+            .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+            .collect();
         assert!(
-            requests.iter().all(|r| {
-                let body = String::from_utf8_lossy(&r.body);
-                !body.contains("vvv merged") && !body.contains("merge release branch")
-            }),
+            bodies
+                .iter()
+                .all(|b| !b.contains("vvv combined") && !b.contains("merge release branch")),
             "{scope:?}: a merge commit reached the LLM"
+        );
+        assert!(
+            bodies.iter().any(|b| b.contains("merge sort rewrite")),
+            "{scope:?}: a non-merge that mentions \"merge\" must reach the LLM"
+        );
+        assert_eq!(
+            category_of(&db, "sha-text-merge").as_deref(),
+            Some("enablement")
         );
         assert_eq!(stats.llm_usage.calls, sent, "{scope:?}");
         assert_eq!(
