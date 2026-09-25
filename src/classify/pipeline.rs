@@ -56,6 +56,7 @@ fn configured_categories(
 /// Test: covered by `tests::pipeline_runs_against_in_memory_db` and
 /// `pipeline_force_reclassifies_rows`.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ClassificationStats {
     /// Total commits processed.
     pub total_commits: usize,
@@ -84,6 +85,7 @@ pub struct ClassificationStats {
 /// What: total commits, classified count, and percentage (0–100).
 /// Test: covered by classification pipeline integration tests.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RepoCoverage {
     /// Total commits seen for this repository.
     pub total: usize,

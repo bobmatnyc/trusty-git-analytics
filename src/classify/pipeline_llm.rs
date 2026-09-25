@@ -50,6 +50,7 @@ pub(crate) fn llm_eligible(
 
 /// Totals for one run's LLM calls (#111).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LlmUsageTotals {
     /// LLM calls made.
     pub calls: usize,

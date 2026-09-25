@@ -41,7 +41,8 @@ pub struct SubsampleParams {
 }
 
 /// What [`run_subsample`] wrote.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct SubsampleSummary {
     /// Contents of the subset's `strata.json`.
     pub strata: StrataSummary,

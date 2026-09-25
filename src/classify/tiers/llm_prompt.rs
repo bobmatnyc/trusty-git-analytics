@@ -27,6 +27,7 @@ const COMPLEXITY_GUIDE: &str = "Complexity 1-5: \
 
 /// What happened on one LLM call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LlmOutcome {
     /// A verdict the pipeline may adopt.
     Answered,
@@ -52,6 +53,7 @@ impl LlmOutcome {
 
 /// Token usage the provider reported for one call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LlmUsage {
     /// Prompt tokens billed.
     pub input_tokens: u64,
@@ -61,6 +63,7 @@ pub struct LlmUsage {
 
 /// One LLM call's result.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct LlmCall {
     /// `Some` only when `outcome == Answered`.
     pub verdict: Option<ClassificationResult>,
@@ -71,6 +74,20 @@ pub struct LlmCall {
 }
 
 impl LlmCall {
+    /// A call result from its three parts (#137: `LlmCall` is
+    /// `#[non_exhaustive]`, so this is the constructor outside this crate).
+    pub fn new(
+        verdict: Option<ClassificationResult>,
+        usage: Option<LlmUsage>,
+        outcome: LlmOutcome,
+    ) -> Self {
+        Self {
+            verdict,
+            usage,
+            outcome,
+        }
+    }
+
     /// A call that produced nothing usable.
     pub fn failed(usage: Option<LlmUsage>) -> Self {
         Self {

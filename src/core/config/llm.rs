@@ -17,8 +17,11 @@ use serde::{Deserialize, Serialize};
 /// Serde renames map to lowercase kebab-case strings matching the YAML schema.
 /// Test: deserialization is covered by `llm_config_*` unit tests in this
 /// module. Provider-specific behaviour is covered by `classify::tiers::llm`.
+// #137: `#[non_exhaustive]` so a new provider variant is additive; a
+// downstream `match` needs a wildcard arm.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum LlmSource {
     /// Route through the OpenRouter API (OpenAI-compatible schema).
     ///
@@ -53,6 +56,7 @@ pub enum LlmSource {
 /// Test: `core::config::llm::tests::fallback_scope_and_effort_parse`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum LlmEffort {
     /// Least thinking; cheapest.
     Low,
@@ -93,6 +97,7 @@ impl LlmEffort {
 /// `classify::pipeline_llm_tests::merge_commits_never_reach_the_llm`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LlmFallbackScope {
     /// Every verdict with `confidence <= llm_fallback_threshold`.
     #[default]
@@ -114,7 +119,11 @@ pub enum LlmFallbackScope {
 /// The section is optional; when absent the pipeline falls back to legacy
 /// `classification.*` fields.
 /// Test: `llm_config_parses_from_yaml` and `llm_source_defaults_to_openrouter`.
+///
+/// `#[non_exhaustive]` (#137): outside this crate, start from
+/// [`LlmConfig::default`] and assign fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LlmConfig {
     /// LLM provider to use.
     ///

@@ -46,6 +46,7 @@ use super::{expand_path, BitbucketConfig, ClassificationConfig, Config, GithubCo
 /// route specific failure modes (e.g. CI may tolerate a missing GitHub
 /// token but not a missing repo path).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// A configured repository path does not exist on disk.
     #[error("Repository path does not exist: {path}")]

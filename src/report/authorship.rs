@@ -160,6 +160,7 @@ const RISK_RESOLVE_COMMAND: &str = "tga aliases suggest";
 
 /// One month's active-author/commit-volume figures.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[non_exhaustive]
 pub struct MonthlyActivity {
     /// `YYYY-MM`.
     pub month: String,

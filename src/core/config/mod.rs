@@ -8,6 +8,11 @@
 //!
 //! Paths support tilde-expansion (`~`, `~/foo`) via [`expand_path`].
 //!
+//! Every config struct and enum here is `#[non_exhaustive]` (#137), so a new
+//! key is an additive change. Outside this crate a struct literal (even with
+//! `..Default::default()`) does not compile: start from `Default::default()`
+//! and assign the public fields, or deserialize the YAML.
+//!
 //! # Example
 //!
 //! `no_run`: type-checks the real API without requiring a `config.yaml` on
@@ -54,6 +59,7 @@ pub use validator::{ConfigError, ConfigValidator};
 /// sections are optional except `repositories`, which must contain at
 /// least one entry to be useful.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Config {
     /// Repositories to analyze.
     #[serde(default)]
@@ -243,6 +249,7 @@ pub struct AuditConfig {
 
 /// Analysis pipeline configuration (forward-compat with Python schema).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AnalysisConfig {
     /// ML-based commit categorization settings.
     #[serde(default)]
@@ -251,6 +258,7 @@ pub struct AnalysisConfig {
 
 /// ML categorization toggle and model selection.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MlCategorizationConfig {
     /// Whether ML categorization is enabled.
     #[serde(default)]
@@ -263,6 +271,7 @@ pub struct MlCategorizationConfig {
 
 /// Cache layer configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CacheConfig {
     /// Filesystem directory used for cached artifacts. Supports `~` expansion.
     #[serde(default)]
@@ -271,6 +280,7 @@ pub struct CacheConfig {
 
 /// A single repository to collect commits from.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RepositoryConfig {
     /// Local filesystem path to the repository (supports `~` expansion).
     pub path: PathBuf,
@@ -329,8 +339,19 @@ pub struct RepositoryConfig {
     pub fetch_timeout_secs: Option<u64>,
 }
 
+impl RepositoryConfig {
+    /// A repository at `path` with every other key at its YAML default.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            ..Self::default()
+        }
+    }
+}
+
 /// Team roster and identity aliases.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TeamConfig {
     /// Canonical team members.
     #[serde(default)]
@@ -359,6 +380,7 @@ pub struct TeamConfig {
 
 /// A canonical team member with optional alias list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TeamMember {
     /// Canonical display name.
     pub name: String,
@@ -402,6 +424,7 @@ fn team_member_alias_list(member: &TeamMember) -> Vec<String> {
 
 /// Output / reporting configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OutputConfig {
     /// Single output format identifier (`csv`, `json`, `markdown`).
     ///
@@ -445,6 +468,7 @@ pub struct OutputConfig {
 // field, which `Config` likewise wrote out in the clear.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ClassificationConfig {
     /// Supplemental rule files to load and merge in order (#445 batch C).
     ///
@@ -753,6 +777,7 @@ fn default_true() -> bool {
 /// Test: loaded from YAML alongside the top-level Config; consumed by
 /// `collect::git::reachability::scan_and_persist`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ReachabilityConfig {
     /// If `true`, walk all git tags and populate `on_any_tag` /
     /// `reachable_from_tags`. Defaults to `true`.
@@ -796,6 +821,7 @@ impl Default for ReachabilityConfig {
 // #5775: `Serialize` is hand-written in `credential_serialize` for the same
 // field.
 #[derive(Clone, Default, Deserialize)]
+#[non_exhaustive]
 pub struct LinearConfig {
     /// Linear API key (personal or workspace).
     ///
@@ -834,6 +860,7 @@ pub struct LinearConfig {
 /// dual-stack). Each member is independently optional; presence of the `pm`
 /// block does not require any specific integration to be configured.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct PmConfig {
     /// Azure DevOps integration (Phase 1: config + stub client).
     #[serde(default)]
@@ -852,6 +879,7 @@ pub struct PmConfig {
 ///
 /// `Default` is hand-written rather than derived — see the `impl` below.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DoraConfig {
     /// Source for deployment ingestion.
     ///
@@ -937,6 +965,7 @@ fn default_production_branch() -> String {
 /// Test: parsed alongside `DoraConfig` and consumed by
 /// `commands::dora`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FailureSignal {
     /// Match classification `category` (case-sensitive). `None` = match
     /// any classification.
@@ -973,8 +1002,8 @@ fn default_failure_window_hours() -> u32 {
 ///
 /// `#[non_exhaustive]` since #5219, which added `fetch_on_reference`. A config
 /// section grows a knob whenever a provider learns an option, and every
-/// addition is otherwise a SemVer-major break for a published crate — build one
-/// with `..Default::default()`.
+/// addition is otherwise a SemVer-major break for a published crate — outside
+/// this crate, start from [`GithubConfig::default`] and assign fields.
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `token` in the clear.
 // #5775: `Serialize` is hand-written in `credential_serialize` for the same
@@ -1140,7 +1169,10 @@ fn default_review_fetch_concurrency() -> u32 {
 // and a private field trades it for `constructible_struct_adds_private_field`.
 // The crate already owes a major bump for the same lint (#6744, InstallArgs),
 // and this field rides that bump rather than causing one.
+// #137: `#[non_exhaustive]` now, with every other config section, so the next
+// field is additive.
 #[derive(Clone, Default, Deserialize)]
+#[non_exhaustive]
 pub struct BitbucketConfig {
     /// Bitbucket account / workspace member username (required for Basic auth).
     #[serde(default)]

@@ -37,6 +37,7 @@ use crate::core::models::ClassificationMethod;
 // derived — the derived one printed this struct's clone of
 // `ClassificationConfig::openrouter_api_key` in the clear.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ClassificationEngineConfig {
     /// Whether to engage the LLM tier when tiers 1–3 fail.
     pub use_llm: bool,

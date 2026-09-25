@@ -454,6 +454,7 @@ fn has_jira_style_prefix(message: &str) -> bool {
 /// `WeightedSumClassifier::classify` must always return `None`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct WeightedSumConfig {
     /// Whether the weighted-sum tier is active.
     ///

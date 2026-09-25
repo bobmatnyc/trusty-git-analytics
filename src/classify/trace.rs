@@ -37,6 +37,7 @@ pub const UNKNOWN_SOURCE: &str = "ruleset";
 /// store `external_source`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TraceTier {
     /// Tier 0: a manual override row.
     Manual,

@@ -26,7 +26,8 @@ use crate::report::errors::{ReportError, Result};
 /// and the total commits for the author in the window (including unscored ones)
 /// so the formatter can render the "N / M commits scored" coverage fraction.
 /// Test: see `tests::effort_histogram_counts`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct EffortHistogram {
     /// Bucket → commit count (only buckets with at least one commit present).
     pub histogram: HashMap<String, u32>,
@@ -120,7 +121,8 @@ pub fn query_effort_histogram(
 /// What: total/merged counts plus optional cycle-time statistics (omitted
 /// when no merged PRs are present, or when the sample is too small for p95).
 /// Test: see `tests::pr_metrics_basic` and `tests::pr_metrics_no_prs`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct PrMetrics {
     /// Total PRs authored (all states).
     pub total: u64,
@@ -292,7 +294,8 @@ pub fn query_pr_metrics(
 /// What: runs two queries — one for aggregate counts (total, ticketed, ins,
 /// del, first, last timestamp) and one for the distinct repository list.
 /// Test: see `tests::commit_summary_basic`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct CommitSummary {
     /// Total commits in the window.
     pub total_commits: u64,

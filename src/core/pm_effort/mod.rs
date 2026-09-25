@@ -262,6 +262,7 @@ impl fmt::Display for ScoreStatus {
 /// Separate from [`PmEffortInput`] so the persistence layer can carry the
 /// inputs and the score together without restating each field.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[non_exhaustive]
 pub struct EffortCounts {
     /// `work_items` rows naming this ticket as their parent.
     pub epic_children: u32,

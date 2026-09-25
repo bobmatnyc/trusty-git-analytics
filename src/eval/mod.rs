@@ -51,6 +51,7 @@ pub use subsample::{run_subsample, SubsampleParams, SubsampleSummary};
 
 /// Errors raised by the eval harness.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EvalError {
     /// The database could not be opened or queried.
     #[error("database error: {0}")]

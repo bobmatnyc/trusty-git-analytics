@@ -28,7 +28,8 @@ pub fn wilson_interval(successes: u64, n: u64, z: f64) -> Option<(f64, f64)> {
 }
 
 /// Cohen's kappa for two raters over the same items.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Kappa {
     /// Items both raters labelled.
     pub n: u64,

@@ -34,15 +34,10 @@ async fn collect_integration_repo() {
         .and_then(|n| n.to_str())
         .unwrap_or("integration-repo")
         .to_string();
-    let config = Config {
-        repositories: vec![RepositoryConfig {
-            path: repo_path.clone(),
-            name: Some(repo_name),
-            branch: None,
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    let mut repo = RepositoryConfig::new(repo_path.clone());
+    repo.name = Some(repo_name);
+    let mut config = Config::default();
+    config.repositories = vec![repo];
 
     // Open an in-memory DB for this test — nothing is written to disk.
     let mut db = Database::open_in_memory().expect("db open");

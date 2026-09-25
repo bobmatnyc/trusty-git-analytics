@@ -37,7 +37,8 @@ pub struct ReportPipeline {
 /// What: counters plus the absolute paths of every emitted file.
 /// Test: covered by `report::tests::pipeline_runs_all_formats_when_unspecified`
 /// (asserts 14 files written: 9 CSV + 4 JSON + 1 Markdown).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ReportStats {
     /// Total commits that appeared in the report.
     pub total_commits: usize,

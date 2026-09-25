@@ -26,11 +26,15 @@ use crate::core::errors::TgaError;
 ///
 /// On-premises ADO Server (TFS) is not supported in Phase 1. Config validation
 /// rejects non-cloud URLs at load time. Phase 2 will add OAuth and work-item fetching.
+///
+/// `#[non_exhaustive]` (#137): outside this crate, build one with
+/// [`AzureDevOpsConfig::new`].
 // #5770: `Debug` is hand-written in `super::credential_debug`, not derived —
 // the derived one printed `pat` in the clear.
 // #5775: `Serialize` is hand-written in `super::credential_serialize` for the
 // same field.
 #[derive(Clone, Deserialize)]
+#[non_exhaustive]
 pub struct AzureDevOpsConfig {
     /// Azure DevOps organisation URL. Must be `https://dev.azure.com/{org}` or
     /// `https://{org}.visualstudio.com`. On-prem TFS/ADO Server URLs are rejected.
@@ -84,6 +88,23 @@ pub struct AzureDevOpsConfig {
     /// (no PR HTTP traffic) for users that haven't opted in.
     #[serde(default)]
     pub fetch_prs: bool,
+}
+
+impl AzureDevOpsConfig {
+    /// A config for `organization_url` authenticated by `pat`, with every
+    /// optional key at the value an omitted YAML key deserializes to.
+    pub fn new(organization_url: impl Into<String>, pat: impl Into<String>) -> Self {
+        Self {
+            organization_url: organization_url.into(),
+            pat: pat.into(),
+            project: None,
+            projects: Vec::new(),
+            ticket_regex: default_ticket_regex(),
+            team_keys: Vec::new(),
+            fetch_on_reference: default_true(),
+            fetch_prs: false,
+        }
+    }
 }
 
 fn default_ticket_regex() -> String {

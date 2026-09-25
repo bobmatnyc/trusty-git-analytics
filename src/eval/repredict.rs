@@ -46,7 +46,8 @@ pub struct RepredictParams {
 }
 
 /// A file named in the provenance, with the BLAKE3 hash of its bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct HashedFile {
     /// Absolute path when it could be resolved, else as given.
     pub path: String,
@@ -55,7 +56,8 @@ pub struct HashedFile {
 }
 
 /// Contents of the provenance file written beside the output.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Provenance {
     /// `tga` version that re-derived the predictions.
     pub tga_version: String,
@@ -84,7 +86,8 @@ pub struct Provenance {
 }
 
 /// What [`run_repredict`] wrote.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RepredictSummary {
     /// Contents of the provenance file.
     pub provenance: Provenance,

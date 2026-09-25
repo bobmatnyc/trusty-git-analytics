@@ -45,7 +45,8 @@ pub struct ScoreParams {
 }
 
 /// Precision of one group (rule, method or stratum).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PrecisionRow {
     /// Group key.
     pub key: String,
@@ -64,7 +65,8 @@ pub struct PrecisionRow {
 }
 
 /// One point of the coverage-at-precision curve.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CoveragePoint {
     /// Minimum confidence kept.
     pub threshold: f64,
@@ -77,7 +79,8 @@ pub struct CoveragePoint {
 }
 
 /// Stratum-weighted accuracy with a normal-approximation 95% interval.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct WeightedAccuracy {
     /// Σ W_h · p_h over strata with scored labels.
     pub estimate: f64,
@@ -90,7 +93,8 @@ pub struct WeightedAccuracy {
 }
 
 /// Share of the population the cascade abstains on.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Abstention {
     /// Catch-all population.
     pub catch_all: u64,
@@ -103,7 +107,8 @@ pub struct Abstention {
 }
 
 /// Everything `report.json` holds.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ScoreReport {
     /// File name of the first `--labels` file, the rater whose labels (with
     /// adjudication) are scored; a second rater only feeds `kappa`.
