@@ -130,7 +130,7 @@ name = "tga"
 # gaining a required `scope: PersistScope` parameter, and the merge-commit
 # exclusion changing every reported total. Post-1.0, a break sits in the
 # MAJOR position; see CHANGELOG.md.
-version = "9.0.0"
+version = "9.0.1"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
