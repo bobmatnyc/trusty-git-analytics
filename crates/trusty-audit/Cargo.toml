@@ -32,7 +32,17 @@ name = "trusty-audit"
 # 0.14.7 -> 0.15.0: MINOR under Cargo's 0.x rule. The `Public API / SemVer`
 # gate on PR #7308 reports a breaking public-API change already on main since
 # 0.14.x, so a 0.y breaking change bumps the y (MINOR), not the z (PATCH).
-version = "0.15.0"
+# 0.15.0 -> 0.15.1 (owner-authorized release, 2026-09-25): PATCH. Refreshes the
+# `[tools]` pin in `templates/engagement.template.toml` (tga 9.0.0 -> 10.0.0,
+# carrying forward the #136 refresh of trusty-review to 0.36.0 that already
+# shipped in 0.15.0). `cargo-semver-checks check-release -p trusty-audit
+# --baseline-version 0.15.0` reports "no semver update required" — the
+# template is `include_str!`-ed data, not a Rust API item, and tga 10.0.0's
+# break is confined to its library API (`#[non_exhaustive]` on public types);
+# this crate has no `tga` Cargo dependency and imports no `tga::` item, it only
+# downloads and shells out to the `tga` binary by pinned version, whose CLI
+# surface is unchanged. No public API change.
+version = "0.15.1"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://trustytools.dev"
