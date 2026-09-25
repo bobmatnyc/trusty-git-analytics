@@ -1356,6 +1356,65 @@ fn repredict_carries_a_stored_verdict_only_when_its_tier_is_reached() {
     assert_eq!(p.superseded, 3, "l1, r1 and the out-of-set u2");
 }
 
+/// Why: #111 — `tga classify` never sends a merge to the LLM, so a stored LLM
+/// verdict on a merge is one the current cascade cannot produce. Repredict
+/// must supersede it, or it measures a different classifier than classify.
+/// What: two commits with the same unanswered message and a stored LLM
+/// `defect`; `g1` is a merge, `u1` is not. Under a config with the LLM tier,
+/// `u1` keeps its LLM verdict and `g1` is re-derived and counted superseded.
+/// Test: this function.
+#[test]
+fn repredict_never_carries_an_llm_verdict_for_a_merge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let d = dir.path();
+    let rows = [("u1", 0), ("g1", 1)];
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|(sha, _)| record(sha, "other", "llm", "defect", 0.8, 1.0))
+        .collect();
+    fs::write(d.join("sample.jsonl"), lines.join("\n") + "\n").expect("sample");
+    let db = Database::open(&d.join("tga.db")).expect("open db");
+    for (sha, is_merge) in rows {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO classifications (category, confidence, method) \
+             VALUES ('defect', 0.8, 'llm_fallback')",
+            [],
+        )
+        .expect("classification");
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+             repository, is_merge, classification_id) VALUES (?1, 'n', 'a@example.com', \
+             '2025-03-01T00:00:00Z', 'b', 'r', ?2, ?3)",
+            params![sha, is_merge, conn.last_insert_rowid()],
+        )
+        .expect("commit");
+    }
+    drop(db);
+
+    let cfg_dir = d.join("llm");
+    fs::create_dir_all(&cfg_dir).expect("mkdir");
+    let cfg = v2_config(&cfg_dir);
+    let text = fs::read_to_string(&cfg).expect("config");
+    fs::write(&cfg, text + "  use_llm: true\n").expect("config");
+    let out = cfg_dir.join("sample.jsonl");
+    let summary = eval::run_repredict(&eval::RepredictParams {
+        sample: d.join("sample.jsonl"),
+        db: d.join("tga.db"),
+        config: Config::load(&cfg).expect("load config"),
+        config_path: cfg,
+        out: out.clone(),
+    })
+    .expect("repredict");
+
+    let methods: Vec<String> = read_sample(&out).into_iter().map(|r| r.method).collect();
+    assert_eq!(methods[0], "llm", "the non-merge keeps its LLM verdict");
+    assert_ne!(methods[1], "llm", "the merge's LLM verdict is not carried");
+    let p = summary.provenance;
+    assert_eq!(p.carried, [("llm".to_string(), 1)].into());
+    assert_eq!(p.superseded, 1, "the merge g1");
+}
+
 /// Why: #111 review — `tga eval sample` now carries a stored LLM verdict
 /// only when the sampling config enables the LLM tier, so the same database
 /// and seed can stratify differently than before.
