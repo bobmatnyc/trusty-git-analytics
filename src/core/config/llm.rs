@@ -146,7 +146,9 @@ pub struct LlmConfig {
     ///
     /// Examples:
     /// - OpenRouter: `"gpt-4o-mini"`, `"anthropic/claude-3-5-sonnet"`
-    /// - Bedrock: `"anthropic.claude-3-5-sonnet-20241022-v2:0"`
+    /// - Bedrock: an inference-profile id,
+    ///   `"us.anthropic.claude-haiku-4-5-20251001-v1:0"` (a bare `anthropic.`
+    ///   id fails for current Claude models)
     /// - Anthropic API: `"claude-haiku-4-5-20251001"`, `"claude-sonnet-5"`
     ///
     /// When absent, a provider-appropriate default is used.

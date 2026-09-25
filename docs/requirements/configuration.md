@@ -100,12 +100,19 @@ the config file. Requires:
   `AWS_SECRET_ACCESS_KEY` env vars, `~/.aws/credentials` profile, EC2
   instance metadata, ECS task role, or AWS SSO.
 - `api_key_env` is ignored for this source.
+- `model` is a cross-region inference-profile id (`us.anthropic.…`). Current
+  Claude models are not invocable on demand by their bare `anthropic.…` id.
+  To use Claude Sonnet 5, set `model` to its `us.anthropic.` inference-profile
+  id as listed in the Bedrock console for your account and region.
+- Bedrock requests never carry `temperature`, for any model (#111). Claude
+  Sonnet 5 rejects a request that sets it; other models run at the
+  provider's default.
 
 ```yaml
 llm:
   source: bedrock
   region: us-east-1                  # optional; falls back to AWS SDK defaults
-  model: anthropic.claude-3-5-sonnet-20241022-v2:0
+  model: us.anthropic.claude-haiku-4-5-20251001-v1:0   # the default when omitted
 ```
 
 **`anthropic-api`**
@@ -151,7 +158,7 @@ comment out the `llm:` block.
 | Source | Default model |
 |--------|---------------|
 | `openrouter` | `gpt-4o-mini` |
-| `bedrock` | `anthropic.claude-3-haiku-20240307-v1:0` |
+| `bedrock` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `anthropic-api` | `claude-3-5-haiku-latest` |
 
 #### Security note
