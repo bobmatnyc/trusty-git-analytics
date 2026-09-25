@@ -257,3 +257,7 @@ tier still names its own categories (`feature`, `bugfix`, `chore`,
 `integration`, `platform`, `docs`, `refactor`, `merge`). The only config
 control over that tier today is `classification.weighted_sum.enabled:
 false`, which turns it off; the commits it would have named then abstain.
+
+For a worked example of this harness — a 400-commit sample, a 100-commit
+rater subsample, and a cost-benefit analysis of the LLM tiers it scored —
+see [`docs/classification/jev/`](classification/jev/README.md).

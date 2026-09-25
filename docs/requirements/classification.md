@@ -125,6 +125,10 @@ file emits `upkeep`. `tga eval score
 `unclear`, `mixed` and `release_merge` are always valid, are counted per
 label, and score as no answer. See `docs/eval-harness.md`.
 
+The scheme v2 accuracy measurement and a cost-benefit analysis of the LLM
+tiers (Bedrock Haiku 4.5, Bedrock Sonnet 5, and the planned Jev option) are
+published in [`docs/classification/jev/`](../classification/jev/README.md).
+
 ---
 
 ## Work Type Taxonomy Mapping
