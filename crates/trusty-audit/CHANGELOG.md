@@ -10,6 +10,18 @@ edit this file by hand (see
 
 ---
 
+## [0.15.1] — 2026-09-25
+
+### Changed
+
+- Refreshed the `[tools]` pin in `templates/engagement.template.toml`: `tga`
+  9.0.0 -> 10.0.0, carrying forward the #136 refresh that already pinned
+  `trusty-review` to 0.36.0. `trusty-search` and `trusty-analyze` were already
+  current. tga 10.0.0's library-API break (`#[non_exhaustive]` on public
+  config/stats/summary types) does not reach this crate — trusty-audit takes
+  no `tga` Cargo dependency and imports no `tga::` item, only downloading and
+  running the pinned `tga` binary, whose CLI surface is unchanged.
+
 ## [0.15.0] — 2026-09-23
 
 ### Added
