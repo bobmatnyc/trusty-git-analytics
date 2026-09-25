@@ -23,9 +23,9 @@ and what the operator needs to decide.
 "Jev" is TypeSafe's hosted commit-classification model, proposed as a fourth
 `llm.source` alongside `openrouter`, `bedrock` and `anthropic-api`. This
 report measures the options that exist today (rules, rules + Bedrock Haiku
-4.5) and prices the two that do not yet have a measurement (Bedrock Sonnet 5,
-Jev). Adding Jev as a wired `llm.source` is a separate engineering task; §5
-below describes it as planned only.
+4.5, rules + Bedrock Sonnet 5) and prices the one that does not yet have a
+measurement (Jev). Adding Jev as a wired `llm.source` is a separate
+engineering task; §5 below describes it as planned only.
 
 ## 2. Method
 
@@ -75,12 +75,26 @@ Tool weighted accuracy against rater 1, with 95% confidence intervals:
 | v2 rules, weighted-sum tier **off** | 31.0% [18.5, 43.6] | Same result with the tier disabled ([#131](https://github.com/bobmatnyc/trusty-git-analytics/issues/131)); the tier is now off by default |
 | v2 rules + new precision rules (`data_science`, `internal_tooling`, `upkeep`) | 32.9% [20.3, 45.6] | Rules built without seeing the 100 labelled commits; each spot-checked ≥17/20 correct on other commits. 30/80 rows left unanswered; precision on answered rows ≈41% (19/46) |
 | Rules + LLM tier on unanswered rows only, Bedrock Claude Haiku 4.5 | **45.9% [32.8, 58.9]** | 4/80 rows still unanswered; LLM precision on its own rows 73% (19/26); 48 LLM calls, 24,171 input / 1,736 output tokens |
-| Rules + LLM tier, Bedrock Claude Sonnet 5 | NOT YET MEASURED | Sonnet 5 rejected the `temperature` parameter tga sent; tga 9.0.1 no longer sends it on Bedrock ([#111](https://github.com/bobmatnyc/trusty-git-analytics/issues/111)). A Sonnet 5 re-measurement is pending |
+| Rules + LLM tier on unanswered rows only, Bedrock Claude Sonnet 5 | **47.1% [34.1, 60.1]** | 4/80 rows still unanswered; 32 LLM calls (28 adopted, 4 abstained, 0 out-of-set, 0 failed), 23,321 input / 1,197 output tokens |
 | Rules + Jev (TypeSafe's hosted decision model) | NOT YET MEASURED | Needs an API key and the owner's go-ahead |
 
-The 45.9% row is the best measured result and is not directly comparable to
-the 32.9% row on precision-per-answered-row, because the LLM tier only sees
-the 30 rows the rules left unanswered — a harder subset than the full 80.
+The 45.9% and 47.1% rows are the two measured LLM configurations. Both leave
+the same 4/80 rows unanswered, and both confidence intervals overlap each
+other's as well as the 32.9% rules-only row's — so neither the Haiku-over-rules
+gain nor the Sonnet-over-Haiku gain is statistically clear at this sample
+size. Sonnet 5 costs roughly 3x Haiku 4.5 per LLM call (see
+[`cost-benefit.md`](cost-benefit.md)) for no statistically clear accuracy
+gain on this sample, so Haiku 4.5 remains the default recommendation.
+Neither is directly comparable to the 32.9% row on precision-per-answered-row,
+because the LLM tier only sees the 30 rows the rules left unanswered — a
+harder subset than the full 80.
+
+**Method note.** The Sonnet 5 run used tga at the
+[#140](https://github.com/bobmatnyc/trusty-git-analytics/pull/140) merge
+commit, which also keeps merge commits out of the LLM tier entirely. Its
+LLM-eligible population is therefore slightly smaller than the Haiku run's
+(32 vs 48 calls), so the per-call figures in `cost-benefit.md` compare more
+directly than the raw call counts.
 
 **Whole-history coverage.** Reclassifying all commits stored in the
 operator's database with the v2 rules (no LLM) covers 51.4% of them — i.e.
@@ -148,3 +162,7 @@ only measures the cost of doing so (§4) once that key exists.
   100-commit subsample. Nothing has been measured, or should run, against
   the full window or full history without the owner's separate go-ahead
   (see [`cost-benefit.md`](cost-benefit.md) §5).
+- **Sonnet 5's LLM-eligible population is smaller than Haiku's.** The Sonnet
+  5 run excludes merge commits from the LLM tier entirely (32 calls vs
+  Haiku's 48); see the method note in §3. The per-call token and cost
+  figures still compare directly.
