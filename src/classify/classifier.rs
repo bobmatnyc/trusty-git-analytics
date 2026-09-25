@@ -565,13 +565,17 @@ impl ClassificationEngine {
     }
 
     /// Run the full four-tier cascade including the optional LLM fallback.
+    ///
+    /// A merge commit never reaches the LLM (#111).
     pub async fn classify(&self, message: &str, is_merge: bool) -> ClassificationResult {
         if let Some(r) = self.classify_sync(message, is_merge) {
             return r;
         }
 
-        if let Some(r) = self.llm_classify_only(message).await {
-            return r;
+        if !is_merge {
+            if let Some(r) = self.llm_classify_only(message).await {
+                return r;
+            }
         }
 
         let mut fallback = ClassificationResult::unclassified();

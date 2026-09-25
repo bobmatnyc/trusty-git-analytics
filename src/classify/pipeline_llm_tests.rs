@@ -390,3 +390,79 @@ async fn shas_outside_the_filter_fail_before_any_write() {
     assert!(err.to_string().contains("sha-a"), "{err}");
     assert_eq!(category_of(&db, "sha-a"), None);
 }
+
+/// Why (#111): merges are excluded from metrics and the eval, so an LLM call
+/// on one is wasted spend (20 merges in a 100-row sample drew 48 calls).
+/// What: two merge commits (`is_merge = 1`) — one no rule answers, one weak
+/// rule hit — beside the usual fixture; under both scopes neither merge
+/// reaches the mock, each keeps its rule verdict and has no `llm_usage` row.
+/// Test: this test.
+#[tokio::test]
+async fn merge_commits_never_reach_the_llm() {
+    for (scope, sent) in [
+        (LlmFallbackScope::Unanswered, 1),
+        (LlmFallbackScope::LowConfidence, 2),
+    ] {
+        let rules = rules_file(RULES);
+        let pipeline = ClassificationPipeline::new(config(rules.path(), scope));
+        let server = mock_llm(reply("enablement", 0.9)).await;
+        let mut db = Database::open_in_memory().expect("db");
+        insert_commit(&db, "sha-weak", "infra: bump the cluster size");
+        insert_commit(&db, "sha-none", "zzz qqq vvv www yyy uuu");
+        insert_commit(&db, "sha-merge-none", "zzz qqq vvv merged");
+        insert_commit(&db, "sha-merge-weak", "infra: merge release branch");
+        db.connection()
+            .execute(
+                "UPDATE commits SET is_merge = 1 WHERE sha LIKE 'sha-merge-%'",
+                [],
+            )
+            .expect("mark merges");
+        let stats = pipeline
+            .run_with_engine(&mut db, engine(&pipeline, &server))
+            .await
+            .expect("run");
+
+        let requests = server.received_requests().await.expect("rec");
+        assert_eq!(requests.len(), sent, "{scope:?}");
+        assert!(
+            requests.iter().all(|r| {
+                let body = String::from_utf8_lossy(&r.body);
+                !body.contains("vvv merged") && !body.contains("merge release branch")
+            }),
+            "{scope:?}: a merge commit reached the LLM"
+        );
+        assert_eq!(stats.llm_usage.calls, sent, "{scope:?}");
+        assert_eq!(
+            category_of(&db, "sha-merge-none").as_deref(),
+            Some("uncategorized")
+        );
+        assert_eq!(
+            category_of(&db, "sha-merge-weak").as_deref(),
+            Some("platform")
+        );
+        assert!(usage_rows(&db)
+            .iter()
+            .all(|(sha, _, _)| !sha.starts_with("sha-merge")));
+    }
+}
+
+/// Why (#111): `ClassificationEngine::classify` is the other LLM entry point;
+/// it must not send a merge either.
+/// What: a message no rule answers, classified once as a merge (no request)
+/// and once as a normal commit (one request).
+/// Test: this test.
+#[tokio::test]
+async fn engine_classify_skips_the_llm_for_a_merge() {
+    let rules = rules_file(RULES);
+    let pipeline = ClassificationPipeline::new(config(rules.path(), LlmFallbackScope::default()));
+    let server = mock_llm(reply("enablement", 0.9)).await;
+    let engine = engine(&pipeline, &server);
+
+    let merge = engine.classify("zzz qqq vvv merged", true).await;
+    assert_eq!(server.received_requests().await.expect("rec").len(), 0);
+    assert_eq!(merge.category, "uncategorized");
+
+    let normal = engine.classify("zzz qqq vvv merged", false).await;
+    assert_eq!(server.received_requests().await.expect("rec").len(), 1);
+    assert_eq!(normal.category, "enablement");
+}
