@@ -583,6 +583,7 @@ pub struct ClassificationConfig {
     /// Which verdicts the LLM fallback may revisit (#111): `low_confidence`
     /// (default, uses [`Self::llm_fallback_threshold`]) or `unanswered`
     /// (only commits the rules left uncategorized; the threshold is ignored).
+    /// Merge commits are never sent to the LLM, under either scope.
     /// See [`LlmFallbackScope`].
     #[serde(default)]
     pub llm_fallback_scope: LlmFallbackScope,

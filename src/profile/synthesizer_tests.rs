@@ -644,15 +644,38 @@ async fn synthesizer_transport_falls_back_and_reports_the_failure() {
 /// Why: the routing prefix is what `provider_for` dispatches on; stripping it
 /// here would silently send every narrative call to the default provider.
 /// What: asserts the slug passes through unchanged and the sampling parameters
-/// are attached.
+/// are attached — `max_tokens` always, `temperature` never on Bedrock (#111:
+/// Claude Sonnet 5 there rejects any request that sets it).
 /// Test: this test itself.
 #[test]
 fn synthesis_request_preserves_routing_prefix_and_sampling() {
     let req = build_synthesis_request(&profile_with_trend(), "bedrock/us.anthropic.claude", false);
     assert_eq!(req.model, "bedrock/us.anthropic.claude");
-    assert_eq!(req.temperature, Some(SYNTHESIZER_TEMPERATURE));
+    assert_eq!(req.temperature, None, "no temperature on a bedrock/ model");
     assert_eq!(req.max_tokens, Some(SYNTHESIZER_MAX_TOKENS));
     assert_eq!(req.messages.len(), 2, "one system turn and one user turn");
+}
+
+/// Why (#111): the Bedrock exemption must not leak to other providers, and
+/// must hold for every Bedrock model, not only Sonnet 5.
+/// What: a Sonnet 5 and a Haiku 4.5 `bedrock/` slug serialize with no
+/// `temperature` key; an `openrouter/` and a bare slug keep
+/// [`SYNTHESIZER_TEMPERATURE`].
+/// Test: this test itself.
+#[test]
+fn synthesis_request_keeps_temperature_off_bedrock() {
+    for model in [
+        "bedrock/us.anthropic.claude-sonnet-5",
+        "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    ] {
+        let req = build_synthesis_request(&profile_with_trend(), model, false);
+        let json = serde_json::to_value(&req).expect("serialize");
+        assert!(json.get("temperature").is_none(), "{model}: {json}");
+    }
+    for model in ["openrouter/openai/gpt-5.4-mini", "gpt-4o-mini"] {
+        let req = build_synthesis_request(&profile_with_trend(), model, true);
+        assert_eq!(req.temperature, Some(SYNTHESIZER_TEMPERATURE), "{model}");
+    }
 }
 
 /// Why: the builder can be given either delivery, so what has to be pinned at

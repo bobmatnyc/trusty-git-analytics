@@ -199,7 +199,7 @@ llm:
 | Source | Auth | Default model | Availability |
 |---|---|---|---|
 | `openrouter` (default) | key from `api_key_env` (OpenAI-compatible schema) | `gpt-4o-mini` | default build |
-| `bedrock` | AWS IAM credential chain (no stored secret) | `anthropic.claude-3-haiku-20240307-v1:0` | requires `--features bedrock` |
+| `bedrock` | AWS IAM credential chain (no stored secret) | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | requires `--features bedrock` |
 | `anthropic-api` | `x-api-key` from `api_key_env`, `anthropic-version: 2023-06-01` | `claude-3-5-haiku-latest` | default build |
 
 Behavioral rules (#405/#407):

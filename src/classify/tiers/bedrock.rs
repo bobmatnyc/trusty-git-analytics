@@ -22,6 +22,7 @@
 #[cfg(all(test, not(feature = "bedrock")))]
 use crate::classify::tiers::llm::SYSTEM_PROMPT;
 use crate::classify::tiers::llm_prompt::LlmUsage;
+use trusty_common::inference::{ChatMessage, ChatRequest};
 
 /// AWS Bedrock-backed LLM classifier targeting Anthropic Claude on Bedrock.
 ///
@@ -29,7 +30,7 @@ use crate::classify::tiers::llm_prompt::LlmUsage;
 /// SSO, IMDS, etc.), resolved lazily by the shared
 /// `trusty_common::inference::bedrock::BedrockAdapter` on the first call.
 pub struct BedrockClassifier {
-    /// Bedrock model id (e.g. `anthropic.claude-3-haiku-20240307-v1:0`).
+    /// Bedrock model id (e.g. `us.anthropic.claude-haiku-4-5-20251001-v1:0`).
     #[allow(dead_code)] // only read under the `bedrock` feature.
     pub(crate) model: String,
     /// Shared Converse adapter (owns region + lazily-built AWS client).
@@ -38,7 +39,35 @@ pub struct BedrockClassifier {
 }
 
 /// Default Bedrock model id when the caller doesn't override it.
-pub const DEFAULT_BEDROCK_MODEL: &str = "anthropic.claude-3-haiku-20240307-v1:0";
+///
+/// Why (#111): current Claude models on Bedrock are invoked on demand only
+/// through a cross-region inference profile (`us.` prefix); the bare
+/// `anthropic.` id fails. The previous default, Claude 3 Haiku, was not
+/// invocable in us-east-1.
+/// Test: `request_tests::default_model_is_a_us_inference_profile`.
+pub const DEFAULT_BEDROCK_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+/// Build the Converse request for one commit message.
+///
+/// Why (#111): Claude Sonnet 5 on Bedrock rejects any request that sets
+/// `temperature`, so no Bedrock request carries one, whatever the model.
+/// What: system prompt, the shared user message, `max_tokens` 256, and
+/// `temperature` left unset. The shared adapter maps an unset temperature to
+/// an omitted `inferenceConfig.temperature`.
+/// Test: `request_tests::sonnet5_request_has_no_temperature`,
+/// `request_tests::default_model_request_has_no_temperature`.
+#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
+pub(crate) fn converse_request(model: &str, system: &str, message: &str) -> ChatRequest {
+    let mut req = ChatRequest::new(
+        model.to_string(),
+        vec![
+            ChatMessage::system(system),
+            ChatMessage::user(format!("Classify this commit message:\n\n{message}")),
+        ],
+    );
+    req.max_tokens = Some(256);
+    req
+}
 
 impl BedrockClassifier {
     /// Construct a new Bedrock classifier.
@@ -108,11 +137,12 @@ impl BedrockClassifier {
     ///
     /// Why (#131): verdict parsing, category validation and token accounting
     /// live in `llm_prompt` so the HTTP and Bedrock paths cannot drift.
-    /// What: Converse call with `system`, the shared user message,
-    /// temperature 0.0 and max_tokens 256; a transport error yields
-    /// `(None, None)` (best-effort, never crashes the batch).
-    /// Test: integration path requires live AWS credentials; the stub path
-    /// is `bedrock_stub_returns_error_without_feature`.
+    /// What: Converse call built by [`converse_request`] (no `temperature`);
+    /// a transport error yields `(None, None)` (best-effort, never crashes
+    /// the batch).
+    /// Test: the request shape is `request_tests::sonnet5_request_has_no_temperature`;
+    /// the call itself needs live AWS credentials. The stub path is
+    /// `bedrock_stub_returns_error_without_feature`.
     #[cfg(feature = "bedrock")]
     pub async fn complete(
         &self,
@@ -120,18 +150,9 @@ impl BedrockClassifier {
         message: &str,
     ) -> (Option<String>, Option<LlmUsage>) {
         use tracing::warn;
-        use trusty_common::inference::{ChatMessage, ChatRequest, InferenceAdapter};
+        use trusty_common::inference::InferenceAdapter;
 
-        let mut req = ChatRequest::new(
-            self.model.clone(),
-            vec![
-                ChatMessage::system(system),
-                ChatMessage::user(format!("Classify this commit message:\n\n{message}")),
-            ],
-        );
-        req.temperature = Some(0.0);
-        req.max_tokens = Some(256);
-
+        let req = converse_request(&self.model, system, message);
         match self.inner.chat(&req).await {
             Ok(resp) => {
                 let usage = LlmUsage {
@@ -172,7 +193,7 @@ mod tests {
     /// Test: assert the string starts with "bedrock feature not compiled".
     #[tokio::test]
     async fn bedrock_stub_returns_error_without_feature() {
-        let result = BedrockClassifier::new("anthropic.claude-3-haiku-20240307-v1:0").await;
+        let result = BedrockClassifier::new(DEFAULT_BEDROCK_MODEL).await;
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("must error without feature"),
@@ -191,6 +212,62 @@ mod tests {
         assert!(
             SYSTEM_PROMPT.contains("complexity"),
             "shared SYSTEM_PROMPT must instruct the model to return a complexity score"
+        );
+    }
+}
+
+/// #111: the Converse request shape, built without any AWS call.
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    /// A Claude Sonnet 5 inference-profile id, as a user would set it in
+    /// `llm.model`. The builder does not branch on the id.
+    const SONNET_5: &str = "us.anthropic.claude-sonnet-5";
+
+    /// Serialize the request `model` would send and return it as JSON.
+    fn request_json(model: &str) -> serde_json::Value {
+        let req = converse_request(model, "sys", "fix: null check");
+        serde_json::to_value(&req).expect("serialize ChatRequest")
+    }
+
+    /// Why (#111): Sonnet 5 on Bedrock rejects any request that sets
+    /// `temperature`.
+    /// What: serializes the Sonnet 5 request and asserts no `temperature` key.
+    /// Test: this test.
+    #[test]
+    fn sonnet5_request_has_no_temperature() {
+        let json = request_json(SONNET_5);
+        assert!(json.get("temperature").is_none(), "{json}");
+        assert_eq!(json["model"], SONNET_5);
+        assert_eq!(json["max_tokens"], 256);
+    }
+
+    /// Why (#111): no temperature is sent for any model, so a model-name
+    /// allowlist that keeps it for Haiku fails here.
+    /// What: serializes the default-model request and asserts no
+    /// `temperature` key.
+    /// Test: this test.
+    #[test]
+    fn default_model_request_has_no_temperature() {
+        let json = request_json(DEFAULT_BEDROCK_MODEL);
+        assert!(json.get("temperature").is_none(), "{json}");
+        assert_eq!(json["model"], DEFAULT_BEDROCK_MODEL);
+    }
+
+    /// Why (#111): a bare `anthropic.` id of a current Claude model fails
+    /// on-demand invocation; the default must be a `us.` inference profile.
+    /// What: checks the prefix and that the default is Haiku 4.5.
+    /// Test: this test.
+    #[test]
+    fn default_model_is_a_us_inference_profile() {
+        assert!(
+            DEFAULT_BEDROCK_MODEL.starts_with("us.anthropic."),
+            "{DEFAULT_BEDROCK_MODEL}"
+        );
+        assert!(
+            DEFAULT_BEDROCK_MODEL.contains("claude-haiku-4-5"),
+            "{DEFAULT_BEDROCK_MODEL}"
         );
     }
 }

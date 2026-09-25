@@ -87,8 +87,10 @@ impl LlmEffort {
 /// unanswered.
 /// What: `low_confidence` (default) keeps the threshold rule; `unanswered`
 /// sends only verdicts with no category — the `uncategorized` placeholder
-/// or the built-in `catch-all` rule — and ignores the threshold.
-/// Test: `classify::pipeline_llm_tests::unanswered_scope_sends_only_abstentions`.
+/// or the built-in `catch-all` rule — and ignores the threshold. Under
+/// either scope a merge commit is never sent.
+/// Test: `classify::pipeline_llm_tests::unanswered_scope_sends_only_abstentions`,
+/// `classify::pipeline_llm_tests::merge_commits_never_reach_the_llm`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmFallbackScope {
@@ -146,7 +148,9 @@ pub struct LlmConfig {
     ///
     /// Examples:
     /// - OpenRouter: `"gpt-4o-mini"`, `"anthropic/claude-3-5-sonnet"`
-    /// - Bedrock: `"anthropic.claude-3-5-sonnet-20241022-v2:0"`
+    /// - Bedrock: an inference-profile id,
+    ///   `"us.anthropic.claude-haiku-4-5-20251001-v1:0"` (a bare `anthropic.`
+    ///   id fails for current Claude models)
     /// - Anthropic API: `"claude-haiku-4-5-20251001"`, `"claude-sonnet-5"`
     ///
     /// When absent, a provider-appropriate default is used.

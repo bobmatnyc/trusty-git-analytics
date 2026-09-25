@@ -106,12 +106,14 @@ pub(super) struct UsageRow {
 /// Run the LLM on every eligible verdict and fold adopted answers back in.
 ///
 /// Why: see the module doc; fan-out is bounded by `concurrency`.
-/// What: selects indices with [`llm_eligible`], calls
+/// What: selects indices with [`llm_eligible`], skips merge commits (#111:
+/// they keep their rule verdict; the count is logged), calls
 /// [`ClassificationEngine::llm_classify_detailed`] through
 /// `buffer_unordered`, and replaces `results[idx]` only when the LLM answered
 /// with strictly higher confidence than the rule verdict. Abstentions,
 /// out-of-set replies and failures keep the rule verdict.
-/// Test: `pipeline_llm_tests::unanswered_scope_sends_only_abstentions`.
+/// Test: `pipeline_llm_tests::unanswered_scope_sends_only_abstentions`,
+/// `pipeline_llm_tests::merge_commits_never_reach_the_llm`.
 pub(super) async fn run_llm_fallback(
     engine: &ClassificationEngine,
     commits: &[CommitRow],
@@ -120,13 +122,28 @@ pub(super) async fn run_llm_fallback(
     threshold: f64,
     concurrency: usize,
 ) -> (LlmUsageTotals, Vec<UsageRow>) {
-    let pending: Vec<(usize, &str)> = commits
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| llm_eligible(scope, &results[*idx], threshold))
-        .map(|(idx, c)| (idx, c.message.as_str()))
-        .collect();
-    info!(pending = pending.len(), scope = ?scope, "LLM fallback selection");
+    let mut skipped_merges = 0_usize;
+    let mut pending: Vec<(usize, &str)> = Vec::new();
+    for (idx, c) in commits.iter().enumerate() {
+        if !llm_eligible(scope, &results[idx], threshold) {
+            continue;
+        }
+        // #111: merges are excluded from metrics and the eval, so an LLM call
+        // on one is spend with no use. The count goes to the log only:
+        // `LlmUsageTotals` is a public struct literal and cannot gain a field
+        // in 9.x (#137).
+        if c.is_merge {
+            skipped_merges += 1;
+        } else {
+            pending.push((idx, c.message.as_str()));
+        }
+    }
+    info!(
+        pending = pending.len(),
+        skipped_merges,
+        scope = ?scope,
+        "LLM fallback selection"
+    );
 
     let pb = super::pipeline_db::make_progress(pending.len() as u64, "LLM fallback");
     let pb_ref = &pb;

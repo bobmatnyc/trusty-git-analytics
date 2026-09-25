@@ -29,7 +29,7 @@ use trusty_common::inference::{
     InferenceError,
 };
 
-use super::schema_delivery::deliver_schema;
+use super::schema_delivery::{deliver_schema, sampling_temperature};
 use super::types::{Effort, Finding, LongitudinalFinding, PeriodBatch, TokenCostSummary};
 
 // ─── Request parameters ───────────────────────────────────────────────────────
@@ -222,8 +222,10 @@ pub fn build_period_user_message(batch: &PeriodBatch) -> String {
 /// [`super::schema_delivery::deliver_schema`] for why the fallback exists rather
 /// than a refusal. `model` is passed through UNCHANGED: a `bedrock/` or
 /// `openrouter/` prefix is what `provider_for` routes on, and the adapter strips
-/// it for the wire in `ProviderId::wire_model_id`.
+/// it for the wire in `ProviderId::wire_model_id`. `temperature` is
+/// [`PERIOD_REVIEWER_TEMPERATURE`], or unset for a `bedrock/…` model (#111).
 /// Test: `period_request_preserves_routing_prefix`,
+/// `period_request_sends_no_temperature_to_bedrock`,
 /// `period_request_sends_the_schema_through_response_schema`,
 /// `period_request_falls_back_to_prose_without_the_capability`.
 pub fn build_period_request(
@@ -246,7 +248,8 @@ pub fn build_period_request(
             ChatMessage::user(build_period_user_message(batch)),
         ],
     );
-    req.temperature = Some(PERIOD_REVIEWER_TEMPERATURE);
+    // #111: none on Bedrock (Sonnet 5 rejects it).
+    req.temperature = sampling_temperature(model, PERIOD_REVIEWER_TEMPERATURE);
     req.max_tokens = Some(PERIOD_REVIEWER_MAX_TOKENS);
     req.response_schema = response_schema;
     req

@@ -334,6 +334,34 @@ fn period_request_preserves_routing_prefix() {
     assert_eq!(req.model, "openrouter/openai/gpt-5.4-mini");
 }
 
+/// Why (#111): Claude Sonnet 5 on Bedrock rejects any request that sets
+/// `temperature`, so no `bedrock/…` period request carries one, for any model;
+/// other providers keep [`PERIOD_REVIEWER_TEMPERATURE`].
+/// What: Sonnet 5 and Haiku 4.5 `bedrock/` slugs (and an upper-case prefix,
+/// which the commons also routes to Bedrock) serialize with no `temperature`
+/// key; an `openrouter/` and a bare slug keep the temperature.
+/// Test: this test itself.
+#[test]
+fn period_request_sends_no_temperature_to_bedrock() {
+    for model in [
+        "bedrock/us.anthropic.claude-sonnet-5",
+        "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "Bedrock/us.anthropic.claude-sonnet-5",
+    ] {
+        let req = build_period_request(&make_batch(), model, false);
+        let json = serde_json::to_value(&req).expect("serialize");
+        assert!(json.get("temperature").is_none(), "{model}: {json}");
+    }
+    for model in ["openrouter/openai/gpt-5.4-mini", "gpt-4o-mini"] {
+        let req = build_period_request(&make_batch(), model, true);
+        assert_eq!(
+            req.temperature,
+            Some(PERIOD_REVIEWER_TEMPERATURE),
+            "{model}"
+        );
+    }
+}
+
 /// Why: this is #5588's closure condition for the period pass — a schema
 /// described in prose is a suggestion the model may drift from, and the drift is
 /// what leaves `parse_period_findings` with nothing to parse. Low temperature is

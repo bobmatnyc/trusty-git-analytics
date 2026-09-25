@@ -9,7 +9,27 @@
 
 use serde_json::json;
 
-use super::deliver_schema;
+use super::{deliver_schema, sampling_temperature};
+
+/// Why (#111): Claude Sonnet 5 on Bedrock rejects any request that sets
+/// `temperature`; only a slug that routes to Bedrock loses it.
+/// What: `bedrock/` in any case → `None`; `openrouter/`, `anthropic/`, a bare
+/// slug, and a slug that merely contains "bedrock" → the given temperature.
+/// Test: this test itself.
+#[test]
+fn bedrock_slugs_get_no_temperature() {
+    for model in ["bedrock/us.anthropic.claude-sonnet-5", "BEDROCK/x"] {
+        assert_eq!(sampling_temperature(model, 0.2), None, "{model}");
+    }
+    for model in [
+        "openrouter/anthropic/claude-sonnet-5",
+        "anthropic/claude-sonnet-5",
+        "gpt-4o-mini",
+        "my-bedrock-proxy/model",
+    ] {
+        assert_eq!(sampling_temperature(model, 0.2), Some(0.2), "{model}");
+    }
+}
 
 fn schema() -> serde_json::Value {
     json!({"type": "object", "properties": {"findings": {"type": "array"}}})

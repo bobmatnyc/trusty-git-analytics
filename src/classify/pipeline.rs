@@ -811,8 +811,9 @@ impl ClassificationPipeline {
     /// existing category/confidence/method verdict, so a corpus can gain
     /// complexity scores incrementally.
     /// What: selects `classifications` rows where `complexity IS NULL` and
-    /// `method != 'exact_rule'`, asks the LLM for a complexity score per
-    /// commit, and writes only the `complexity` column back.
+    /// `method != 'exact_rule'`, skipping merge commits (#111), asks the LLM
+    /// for a complexity score per commit, and writes only the `complexity`
+    /// column back.
     /// Test: see `tests/` — pre-seed a NULL row and a scored row, run this,
     /// assert the NULL row is filled and the scored row is unchanged.
     ///
@@ -838,8 +839,8 @@ impl ClassificationPipeline {
         db: &mut Database,
         engine: &ClassificationEngine,
     ) -> Result<usize> {
-        // Collect candidate rows. Rows produced by
-        // the `exact_rule` tier are excluded — they were never LLM-eligible.
+        // Collect candidate rows. Rows produced by the `exact_rule` tier and
+        // merge commits are excluded — neither is LLM-eligible (#111).
         let candidates = super::pipeline_db::read_complexity_backfill_candidates(db)?;
         let total = candidates.len();
         info!(total, "starting complexity backfill");

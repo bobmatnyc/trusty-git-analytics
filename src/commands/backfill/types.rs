@@ -112,7 +112,7 @@ pub enum BackfillSubcommand {
     /// therefore keep `complexity = NULL`. This subcommand asks the LLM for a
     /// 1–5 complexity score for every classification with `complexity IS NULL`
     /// and a non-`exact_rule` method, leaving category/confidence/method
-    /// untouched. Requires `use_llm: true` (or `--use-llm`) and an LLM API key.
+    /// untouched. Merge commits are skipped; they never reach the LLM. Requires `use_llm: true` (or `--use-llm`) and an LLM API key.
     ///
     /// Equivalent to `tga classify --backfill-complexity`; exposed here so the
     /// operation is discoverable under `tga backfill` (issue #397, bug 2).

@@ -12,7 +12,8 @@
 //! verdict wins and the stored one counts as superseded.
 //! Test: `tests/eval_harness.rs::sample_then_score_end_to_end`,
 //! `tests/eval_harness.rs::repredict_keeps_rows_and_follows_the_new_rules`,
-//! `tests/eval_harness.rs::repredict_carries_a_stored_verdict_only_when_its_tier_is_reached`.
+//! `tests/eval_harness.rs::repredict_carries_a_stored_verdict_only_when_its_tier_is_reached`,
+//! `tests/eval_harness.rs::repredict_never_carries_an_llm_verdict_for_a_merge`.
 
 use super::population::CommitRow;
 use crate::classify::{ClassificationEngine, TraceTier, TracedVerdict};
@@ -38,12 +39,14 @@ pub(crate) struct Resolved {
 /// `ClassificationPipeline`: the LLM tier runs when an `llm:` section exists or
 /// `classification.use_llm` is set, on the verdicts `llm_fallback_scope`
 /// selects (#111: at or below `llm_fallback_threshold`, or only unanswered
-/// ones), and only for a stored category inside a custom-only rules set
-/// (#131); external sources run when any is configured and
+/// ones), never for a merge commit (#111), and only for a stored category
+/// inside a custom-only rules set (#131); external sources run when any is
+/// configured and
 /// `no_external` is off. The stored verdict does not say which source produced
 /// it, so any configured source keeps it. A stored repo fallback is never
 /// carried: `tga classify` never applies one.
-/// Test: `tests/eval_harness.rs::repredict_carries_a_stored_verdict_only_when_its_tier_is_reached`.
+/// Test: `tests/eval_harness.rs::repredict_carries_a_stored_verdict_only_when_its_tier_is_reached`,
+/// `tests/eval_harness.rs::repredict_never_carries_an_llm_verdict_for_a_merge`.
 pub(crate) struct CarryPolicy {
     use_llm: bool,
     llm_threshold: f64,
@@ -73,10 +76,19 @@ impl CarryPolicy {
         })
     }
 
-    /// Whether the cascade reaches `stored` given the re-derived verdict `t`.
-    fn reaches(&self, stored: TraceTier, stored_category: &str, t: &TracedVerdict) -> bool {
+    /// Whether the cascade reaches `stored` given the re-derived verdict `t`
+    /// for a commit whose merge flag is `is_merge`.
+    fn reaches(
+        &self,
+        stored: TraceTier,
+        stored_category: &str,
+        t: &TracedVerdict,
+        is_merge: bool,
+    ) -> bool {
         match stored {
             TraceTier::Manual => true,
+            // #111: `tga classify` never sends a merge to the LLM.
+            TraceTier::Llm if is_merge => false,
             // #111: the same predicate `tga classify` routes with.
             TraceTier::Llm => {
                 // #131: `tga classify` now drops an LLM answer outside the
@@ -146,7 +158,7 @@ pub(crate) fn resolve_verdicts(
             if let Some((cat, conf, method)) = &c.stored {
                 match stored_override(method, t.trace.tier) {
                     // #111: carry only a tier the config's cascade reaches.
-                    Some((tier, rule)) if policy.reaches(tier, cat, &t) => {
+                    Some((tier, rule)) if policy.reaches(tier, cat, &t, c.is_merge) => {
                         return Resolved {
                             tier,
                             rule_id: rule.to_string(),
