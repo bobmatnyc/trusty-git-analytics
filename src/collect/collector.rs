@@ -80,6 +80,7 @@ pub struct PerRepoFetch {
 /// Test: covered by `tests::collect_integration_repo` (integration test
 /// that runs the pipeline against a fixture repo).
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct CollectionStats {
     /// Number of new commit rows written across all repositories.
     pub commits_collected: usize,

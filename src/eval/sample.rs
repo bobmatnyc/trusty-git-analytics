@@ -45,7 +45,8 @@ pub struct SampleParams {
 }
 
 /// What [`run_sample`] wrote.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct SampleSummary {
     /// Contents of `strata.json`.
     pub strata: StrataSummary,

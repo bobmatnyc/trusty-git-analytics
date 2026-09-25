@@ -37,6 +37,7 @@ pub const DEFAULT_MAX_DIFFS: usize = 5;
 /// an explicit `repo_paths` entry, or `repos_root` joined with the name.
 /// Test: `config_repo_path_resolution`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DiffSamplerConfig {
     /// Maximum diffs sampled per period. Defaults to [`DEFAULT_MAX_DIFFS`].
     pub max_diffs: usize,

@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 /// PR metrics, category breakdown — plus header metadata for the report.
 /// Test: see `tests::format_markdown_contains_headers` and
 /// `tests::format_json_parses`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuthorDrilldownData {
     /// ISO 8601 UTC timestamp at which the report was generated.
     pub generated_at: String,
@@ -40,7 +41,8 @@ pub struct AuthorDrilldownData {
 }
 
 /// Date window for the report.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ReportPeriod {
     /// Lower bound (ISO 8601 date or timestamp), `None` = all history.
     pub since: Option<String>,
@@ -49,7 +51,8 @@ pub struct ReportPeriod {
 }
 
 /// Commit-level aggregate section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CommitSection {
     /// Total commits in the window.
     pub total: u64,
@@ -70,7 +73,8 @@ pub struct CommitSection {
 }
 
 /// Effort histogram section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EffortSection {
     /// Commits that have a row in `fact_commit_effort`.
     pub scored_commits: u64,
@@ -81,7 +85,8 @@ pub struct EffortSection {
 }
 
 /// Pull-request metrics section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PrSection {
     /// Total PRs (all states) matching any of the engineer's provider logins.
     pub total: u64,

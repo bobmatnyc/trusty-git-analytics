@@ -125,7 +125,8 @@ pub struct DdManifestOptions {
 /// What: the `[report]` section plus one `[[repositories]]` entry per configured
 /// repository, in config order.
 /// Test: `super::dd_manifest_tests::round_trips_through_the_review_schema`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct DdManifest {
     /// The `[report]` metadata section.
     pub report: DdReportSection,
@@ -134,7 +135,8 @@ pub struct DdManifest {
 }
 
 /// The `[report]` section of a DD manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct DdReportSection {
     /// Report title (also the output slug seed).
     pub title: String,
@@ -174,7 +176,8 @@ pub struct DdReportSection {
 /// fetch is not blocked by a declared file.
 /// What: the name and the checkout path, and nothing else.
 /// Test: `super::dd_manifest_tests::names_fall_back_to_the_directory_basename`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct DdRepositoryEntry {
     /// Display name for the application section.
     pub name: String,

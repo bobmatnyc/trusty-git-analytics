@@ -38,6 +38,7 @@ pub const PROFILE_ISSUE_LABEL: &str = "dev-profile";
 /// What: owner, repo, and the label the thread carries.
 /// Test: `github_issue_config_parses_a_slug`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GithubIssueConfig {
     /// Repository owner (user or org).
     pub owner: String,

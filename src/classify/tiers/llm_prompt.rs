@@ -27,6 +27,7 @@ const COMPLEXITY_GUIDE: &str = "Complexity 1-5: \
 
 /// What happened on one LLM call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LlmOutcome {
     /// A verdict the pipeline may adopt.
     Answered,
@@ -52,6 +53,7 @@ impl LlmOutcome {
 
 /// Token usage the provider reported for one call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LlmUsage {
     /// Prompt tokens billed.
     pub input_tokens: u64,
@@ -61,6 +63,7 @@ pub struct LlmUsage {
 
 /// One LLM call's result.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct LlmCall {
     /// `Some` only when `outcome == Answered`.
     pub verdict: Option<ClassificationResult>,
@@ -70,7 +73,37 @@ pub struct LlmCall {
     pub outcome: LlmOutcome,
 }
 
+// #137: `LlmCall` is `#[non_exhaustive]`. One named constructor per outcome,
+// and none pairs a verdict with a non-`Answered` outcome. The fields stay
+// `pub`, so a caller who mutates them owns that invariant.
 impl LlmCall {
+    /// A call whose `verdict` the pipeline may adopt.
+    pub fn answered(verdict: ClassificationResult, usage: Option<LlmUsage>) -> Self {
+        Self {
+            verdict: Some(verdict),
+            usage,
+            outcome: LlmOutcome::Answered,
+        }
+    }
+
+    /// A call where the model chose the abstain label.
+    pub fn abstained(usage: Option<LlmUsage>) -> Self {
+        Self {
+            verdict: None,
+            usage,
+            outcome: LlmOutcome::Abstained,
+        }
+    }
+
+    /// A call where the model named a category outside the configured set.
+    pub fn out_of_set(usage: Option<LlmUsage>) -> Self {
+        Self {
+            verdict: None,
+            usage,
+            outcome: LlmOutcome::OutOfSet,
+        }
+    }
+
     /// A call that produced nothing usable.
     pub fn failed(usage: Option<LlmUsage>) -> Self {
         Self {
@@ -164,11 +197,7 @@ pub fn resolve(
     let mut subcategory = verdict.subcategory;
     if let Some(allowed) = allowed {
         if category.eq_ignore_ascii_case(ABSTAIN_LABEL) {
-            return LlmCall {
-                verdict: None,
-                usage,
-                outcome: LlmOutcome::Abstained,
-            };
+            return LlmCall::abstained(usage);
         }
         match allowed
             .iter()
@@ -182,16 +211,12 @@ pub fn resolve(
             }
             None => {
                 warn!(category = %category, "LLM category outside the configured set; abstaining");
-                return LlmCall {
-                    verdict: None,
-                    usage,
-                    outcome: LlmOutcome::OutOfSet,
-                };
+                return LlmCall::out_of_set(usage);
             }
         }
     }
-    LlmCall {
-        verdict: Some(ClassificationResult {
+    LlmCall::answered(
+        ClassificationResult {
             category,
             subcategory,
             top_level: None, // resolved by ClassificationEngine via the taxonomy registry
@@ -199,8 +224,7 @@ pub fn resolve(
             method: ClassificationMethod::LlmFallback,
             ticket_id: None,
             complexity: verdict.complexity.map(|v| v.clamp(1, 5)),
-        }),
+        },
         usage,
-        outcome: LlmOutcome::Answered,
-    }
+    )
 }

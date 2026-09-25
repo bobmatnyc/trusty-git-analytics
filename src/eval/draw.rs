@@ -39,6 +39,7 @@ pub struct DrawParams {
 
 /// Outcome of [`draw`].
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Draw {
     /// Indices into the candidate slice, grouped by stratum in
     /// [`Stratum::ALL`] order, each group in draw order.

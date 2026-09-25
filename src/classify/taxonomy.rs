@@ -141,6 +141,7 @@ impl TopLevelCategory {
 /// User-defined entries are loaded from YAML config and merged on top of the
 /// built-in defaults. Names are compared case-insensitively.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SubcategoryDef {
     /// Subcategory name (e.g. `"feature"`, `"security"`, `"payments"`).
     pub name: String,

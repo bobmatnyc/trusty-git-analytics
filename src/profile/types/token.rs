@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Populated by the narrative pass; all-zero on a deterministic-only run.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TokenCostSummary {
     /// Total input tokens across all calls.
     pub input_tokens: u64,

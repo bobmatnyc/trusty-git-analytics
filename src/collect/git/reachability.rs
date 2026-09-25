@@ -71,6 +71,7 @@ use crate::core::config::ReachabilityConfig;
 /// What: commit-level counts for how many rows were written/updated.
 /// Test: populated by [`scan_and_persist`]; checked in integration tests.
 #[derive(Debug, Default, Clone)]
+#[non_exhaustive]
 pub struct ReachabilityStats {
     /// Total rows upserted into `fact_commit_reachability`.
     pub rows_upserted: usize,

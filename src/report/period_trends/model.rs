@@ -19,7 +19,8 @@ use crate::report::drilldown::PrMetrics;
 /// ticket coverage percentage, PR metrics, and repositories touched. All fields
 /// derive from existing DB schema; no migrations required.
 /// Test: see `query::tests::period_trends_basic_windowing` and related tests.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuthorPeriodSummary {
     /// Human-readable period label, e.g. `"2026-W01..W04"`.
     pub period_label: String,

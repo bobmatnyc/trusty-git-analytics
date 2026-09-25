@@ -32,15 +32,13 @@ async fn fetch_pull_requests_from_live_bitbucket() {
         return;
     };
 
-    let client = BitbucketClient::new(&BitbucketConfig {
-        username: Some(email),
-        app_password: Some(token),
-        workspace: Some(workspace.clone()),
-        repo_slug: Some(repo_slug.clone()),
-        fetch_prs: true,
-        ..Default::default()
-    })
-    .expect("client builds");
+    let mut config = BitbucketConfig::default();
+    config.username = Some(email);
+    config.app_password = Some(token);
+    config.workspace = Some(workspace.clone());
+    config.repo_slug = Some(repo_slug.clone());
+    config.fetch_prs = true;
+    let client = BitbucketClient::new(&config).expect("client builds");
 
     let prs = client
         .fetch_pull_requests()

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::core::models::Commit;
 
 /// Aggregate ticketed / unticketed commit counts and percentages.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TicketedStats {
     /// Total number of commits considered.
     pub total: usize,

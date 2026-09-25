@@ -1,4 +1,9 @@
 //! File formats shared by `tga eval sample` and `tga eval score`.
+//!
+//! Every struct and enum here is `#[non_exhaustive]` (#137), as are the
+//! summary and report structs of the sibling modules, so a new field or
+//! stratum is additive. Outside this crate, start from `Default::default()`
+//! and assign the public fields.
 
 use std::collections::BTreeMap;
 
@@ -12,8 +17,12 @@ use crate::classify::TraceTier;
 /// split out the remaining rule tiers, and `Other` holds verdicts decided
 /// outside the rule engine (manual override, external source, LLM, issue
 /// type, JIRA project, repo fallback) so every commit belongs to one stratum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+/// `Default` is [`Stratum::Unknown`] (#137: so [`SampleRecord`] can derive it).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Stratum {
     /// Exact-keyword rules.
     Exact,
@@ -30,6 +39,7 @@ pub enum Stratum {
     /// The built-in catch-all regex rule.
     CatchAll,
     /// No tier matched, or the verdict is `uncategorized` / Unknown.
+    #[default]
     Unknown,
     /// Verdicts decided outside the rule engine.
     Other,
@@ -95,6 +105,7 @@ impl Stratum {
 
 /// Lines changed by a commit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Diffstat {
     /// Files touched.
     pub files: i64,
@@ -105,7 +116,8 @@ pub struct Diffstat {
 }
 
 /// One sampled commit, one line of `sample.jsonl`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SampleRecord {
     /// Commit SHA.
     pub sha: String,
@@ -150,6 +162,7 @@ pub struct SampleRecord {
 
 /// Population and sample counts of one stratum.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StratumCounts {
     /// Commits in the window assigned to this stratum.
     pub population: u64,
@@ -159,6 +172,7 @@ pub struct StratumCounts {
 
 /// Contents of `strata.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StrataSummary {
     /// Seed the sample was drawn with.
     pub seed: u64,
@@ -191,6 +205,7 @@ pub struct StrataSummary {
 
 /// How a subset was drawn from a source sample (#111).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SubsampleOrigin {
     /// Seed the subset was drawn with.
     pub seed: u64,

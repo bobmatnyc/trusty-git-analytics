@@ -12,6 +12,7 @@ use thiserror::Error;
 /// Test: covered indirectly — any test that loads a malformed rule file
 /// or exercises the LLM tier without an API key produces these variants.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ClassifyError {
     /// Wraps a core error (DB, config, etc.).
     #[error("core error: {0}")]

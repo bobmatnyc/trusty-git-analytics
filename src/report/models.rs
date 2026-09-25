@@ -4,13 +4,18 @@
 //! database queries and then consumed by the formatters in
 //! [`crate::report::formatters`]. They are `serde`-friendly so that the JSON
 //! formatter can emit [`ReportData`] directly.
+//!
+//! Every struct here is `#[non_exhaustive]` (#137), so a new metric is an
+//! additive change. Outside this crate, start from `Default::default()` and
+//! assign the public fields.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
 /// Aggregated per-author commit summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuthorSummary {
     /// Canonical author display name.
     pub name: String,
@@ -33,7 +38,8 @@ pub struct AuthorSummary {
 }
 
 /// Aggregated per-repository summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RepositorySummary {
     /// Repository name (matches `commits.repository`).
     pub name: String,
@@ -50,7 +56,8 @@ pub struct RepositorySummary {
 }
 
 /// Per-week-per-author-per-repository activity row.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct WeeklyActivity {
     /// ISO week label, e.g. `"2024-W03"`.
     pub week: String,
@@ -154,7 +161,8 @@ pub struct WeeklyActivity {
 }
 
 /// Per-week aggregated metrics across all developers and repositories.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct WeeklyMetrics {
     /// ISO week label (e.g. `"2024-W03"`).
     pub week: String,
@@ -179,7 +187,8 @@ pub struct WeeklyMetrics {
 }
 
 /// Per-developer activity summary across the full reporting period.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DeveloperActivitySummary {
     /// Stable developer identifier (canonical email).
     pub developer_id: String,
@@ -200,7 +209,8 @@ pub struct DeveloperActivitySummary {
 }
 
 /// Single-row overview metrics for the whole report.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ReportSummary {
     /// Period range as `"<start> .. <end>"` (ISO 8601, UTC).
     pub date_range: String,
@@ -215,7 +225,8 @@ pub struct ReportSummary {
 }
 
 /// A commit that has no associated work-item / ticket reference.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct UntrackedCommit {
     /// Commit SHA.
     pub sha: String,
@@ -228,7 +239,8 @@ pub struct UntrackedCommit {
 }
 
 /// Per-week per-change-type count.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct WeeklyCategorization {
     /// ISO week label.
     pub week: String,
@@ -241,7 +253,8 @@ pub struct WeeklyCategorization {
 }
 
 /// Per-week velocity metrics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct WeeklyVelocity {
     /// ISO week label.
     pub week: String,
@@ -256,7 +269,8 @@ pub struct WeeklyVelocity {
 }
 
 /// DORA "Accelerate" metrics over the full reporting period.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DoraMetrics {
     /// Deployment frequency in deploys per week.
     pub deployment_frequency: f64,
@@ -298,7 +312,8 @@ pub struct DoraMetrics {
 }
 
 /// Period-level velocity summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct VelocitySummary {
     /// Average PR cycle time in hours (outlier-filtered).
     pub pr_cycle_time_avg_hours: f64,
@@ -314,7 +329,8 @@ pub struct VelocitySummary {
 }
 
 /// Quality / hygiene metrics derived from commit messages and classifications.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct QualitySummary {
     /// Composite quality score in `[0, 1]`.
     pub quality_score: f64,
@@ -334,6 +350,7 @@ pub struct QualitySummary {
 /// components are normalized via min-max scaling across the reporting period
 /// and then linearly combined.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ActivityWeights {
     /// Weight for raw commit count.
     pub commits: f64,
@@ -360,7 +377,8 @@ impl Default for ActivityWeights {
 }
 
 /// Full report payload passed to every formatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ReportData {
     /// ISO 8601 timestamp at which the report was generated.
     pub generated_at: String,

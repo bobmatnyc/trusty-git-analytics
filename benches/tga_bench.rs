@@ -91,15 +91,12 @@ fn bench_exact_matcher(c: &mut Criterion) {
         ("security", vec!["cve", "security", "openssl", "vuln"]),
     ];
     for (i, (cat, kws)) in categories.iter().enumerate() {
-        rules.push(Rule {
-            id: format!("r{i}"),
-            category: (*cat).to_string(),
-            subcategory: None,
-            keywords: kws.iter().map(|s| (*s).to_string()).collect(),
-            patterns: vec![],
-            priority: i as i32,
-            confidence: 0.9,
-        });
+        // #137: `Rule` is `#[non_exhaustive]`; build it through `Rule::new`.
+        let mut rule = Rule::new(format!("r{i}"), *cat);
+        rule.keywords = kws.iter().map(|s| (*s).to_string()).collect();
+        rule.priority = i as i32;
+        rule.confidence = 0.9;
+        rules.push(rule);
     }
     let matcher = ExactMatcher::new(&rules).expect("exact matcher builds");
     let msgs = synthetic_commit_messages(1_000);
@@ -124,17 +121,19 @@ fn bench_exact_matcher(c: &mut Criterion) {
 fn synthetic_report_data(n: usize) -> ReportData {
     let mut data = ReportData::empty("2025-01-01T00:00:00Z".to_string());
     data.weekly_metrics = (0..n)
-        .map(|i| WeeklyMetrics {
-            week: format!("2025-W{:02}", (i % 52) + 1),
-            total_commits: 50 + i,
-            feature_commits: 20,
-            bugfix_commits: 10,
-            maintenance_commits: 5,
-            refactor_commits: 5,
-            test_commits: 5,
-            doc_commits: 5,
-            active_developers: 8,
-            story_points: (i as f64) * 1.5,
+        .map(|i| {
+            let mut row = WeeklyMetrics::default();
+            row.week = format!("2025-W{:02}", (i % 52) + 1);
+            row.total_commits = 50 + i;
+            row.feature_commits = 20;
+            row.bugfix_commits = 10;
+            row.maintenance_commits = 5;
+            row.refactor_commits = 5;
+            row.test_commits = 5;
+            row.doc_commits = 5;
+            row.active_developers = 8;
+            row.story_points = (i as f64) * 1.5;
+            row
         })
         .collect();
     data

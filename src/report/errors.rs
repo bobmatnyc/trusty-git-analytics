@@ -11,6 +11,7 @@ use thiserror::Error;
 /// `tera::Error`, `std::io::Error`, and core errors.
 /// Test: covered indirectly via the formatter tests in `report::tests`.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ReportError {
     /// Underlying core error (DB, config, model).
     #[error("core error: {0}")]

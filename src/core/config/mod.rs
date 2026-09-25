@@ -8,6 +8,13 @@
 //!
 //! Paths support tilde-expansion (`~`, `~/foo`) via [`expand_path`].
 //!
+//! Every config struct and enum here is `#[non_exhaustive]` (#137), so a new
+//! key is an additive change. Outside this crate a struct literal (even with
+//! `..Default::default()`) does not compile: start from `Default::default()`
+//! and assign the public fields, or deserialize the YAML. `GithubConfig`,
+//! `JiraConfig` and `LinearConfig` have a `Default` that differs from their
+//! YAML defaults; each one's doc names the fields.
+//!
 //! # Example
 //!
 //! `no_run`: type-checks the real API without requiring a `config.yaml` on
@@ -54,6 +61,7 @@ pub use validator::{ConfigError, ConfigValidator};
 /// sections are optional except `repositories`, which must contain at
 /// least one entry to be useful.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Config {
     /// Repositories to analyze.
     #[serde(default)]
@@ -243,6 +251,7 @@ pub struct AuditConfig {
 
 /// Analysis pipeline configuration (forward-compat with Python schema).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AnalysisConfig {
     /// ML-based commit categorization settings.
     #[serde(default)]
@@ -251,6 +260,7 @@ pub struct AnalysisConfig {
 
 /// ML categorization toggle and model selection.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MlCategorizationConfig {
     /// Whether ML categorization is enabled.
     #[serde(default)]
@@ -263,6 +273,7 @@ pub struct MlCategorizationConfig {
 
 /// Cache layer configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CacheConfig {
     /// Filesystem directory used for cached artifacts. Supports `~` expansion.
     #[serde(default)]
@@ -271,6 +282,7 @@ pub struct CacheConfig {
 
 /// A single repository to collect commits from.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RepositoryConfig {
     /// Local filesystem path to the repository (supports `~` expansion).
     pub path: PathBuf,
@@ -329,8 +341,19 @@ pub struct RepositoryConfig {
     pub fetch_timeout_secs: Option<u64>,
 }
 
+impl RepositoryConfig {
+    /// A repository at `path` with every other key at its YAML default.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            ..Self::default()
+        }
+    }
+}
+
 /// Team roster and identity aliases.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TeamConfig {
     /// Canonical team members.
     #[serde(default)]
@@ -359,6 +382,7 @@ pub struct TeamConfig {
 
 /// A canonical team member with optional alias list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TeamMember {
     /// Canonical display name.
     pub name: String,
@@ -369,6 +393,20 @@ pub struct TeamMember {
     /// Alternative names/emails that map to this member.
     #[serde(default)]
     pub aliases: Vec<String>,
+}
+
+impl TeamMember {
+    /// A member `name` with primary `email` and no aliases.
+    ///
+    /// #137: prefer this to `TeamMember::default()`, whose empty `email` makes
+    /// two members collide on `authors.canonical_email` (#2244).
+    pub fn new(name: impl Into<String>, email: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            email: email.into(),
+            aliases: Vec::new(),
+        }
+    }
 }
 
 /// Build the alias list consumed by `IdentityResolver::from_alias_map` for
@@ -402,6 +440,7 @@ fn team_member_alias_list(member: &TeamMember) -> Vec<String> {
 
 /// Output / reporting configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OutputConfig {
     /// Single output format identifier (`csv`, `json`, `markdown`).
     ///
@@ -445,6 +484,7 @@ pub struct OutputConfig {
 // field, which `Config` likewise wrote out in the clear.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ClassificationConfig {
     /// Supplemental rule files to load and merge in order (#445 batch C).
     ///
@@ -753,6 +793,7 @@ fn default_true() -> bool {
 /// Test: loaded from YAML alongside the top-level Config; consumed by
 /// `collect::git::reachability::scan_and_persist`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ReachabilityConfig {
     /// If `true`, walk all git tags and populate `on_any_tag` /
     /// `reachable_from_tags`. Defaults to `true`.
@@ -791,11 +832,16 @@ impl Default for ReachabilityConfig {
 }
 
 /// Linear project management integration settings.
+///
+/// `LinearConfig::default()` is NOT an omitted `linear:` block: it gives
+/// `fetch_on_reference: false`, where YAML gives `true` (#137). Set that field
+/// when building one in code.
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `api_key` in the clear.
 // #5775: `Serialize` is hand-written in `credential_serialize` for the same
 // field.
 #[derive(Clone, Default, Deserialize)]
+#[non_exhaustive]
 pub struct LinearConfig {
     /// Linear API key (personal or workspace).
     ///
@@ -834,6 +880,7 @@ pub struct LinearConfig {
 /// dual-stack). Each member is independently optional; presence of the `pm`
 /// block does not require any specific integration to be configured.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct PmConfig {
     /// Azure DevOps integration (Phase 1: config + stub client).
     #[serde(default)]
@@ -852,6 +899,7 @@ pub struct PmConfig {
 ///
 /// `Default` is hand-written rather than derived — see the `impl` below.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DoraConfig {
     /// Source for deployment ingestion.
     ///
@@ -936,7 +984,10 @@ fn default_production_branch() -> String {
 /// an optional regex pattern, and a within-hours window.
 /// Test: parsed alongside `DoraConfig` and consumed by
 /// `commands::dora`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// `Default` is hand-written rather than derived — see the `impl` below.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FailureSignal {
     /// Match classification `category` (case-sensitive). `None` = match
     /// any classification.
@@ -958,6 +1009,25 @@ pub struct FailureSignal {
     pub within_hours: u32,
 }
 
+/// The value an empty `failure_signals` entry deserializes to.
+///
+/// Why: a derived `Default` gave `within_hours: 0`, a window that matches no
+/// commit, so change-failure-rate read 0% with no error (#137, as #5304 did
+/// for [`DoraConfig`]).
+/// What: `within_hours` is [`default_failure_window_hours`]; every filter is
+/// `None`.
+/// Test: `core::config::tests::failure_signal_default_matches_empty_yaml`.
+impl Default for FailureSignal {
+    fn default() -> Self {
+        Self {
+            work_type: None,
+            on_branch: None,
+            commit_message_pattern: None,
+            within_hours: default_failure_window_hours(),
+        }
+    }
+}
+
 fn default_failure_window_hours() -> u32 {
     48
 }
@@ -973,8 +1043,13 @@ fn default_failure_window_hours() -> u32 {
 ///
 /// `#[non_exhaustive]` since #5219, which added `fetch_on_reference`. A config
 /// section grows a knob whenever a provider learns an option, and every
-/// addition is otherwise a SemVer-major break for a published crate — build one
-/// with `..Default::default()`.
+/// addition is otherwise a SemVer-major break for a published crate.
+///
+/// `GithubConfig::default()` is NOT an omitted-keys YAML block (#137): it gives
+/// `fetch_on_reference: false`, `fetch_pr_reviews: false` and
+/// `review_fetch_concurrency: 0`, where YAML gives `true`, `true` and `1`.
+/// Outside this crate, start from `default()` and set those three fields too,
+/// or deserialize the section.
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `token` in the clear.
 // #5775: `Serialize` is hand-written in `credential_serialize` for the same
@@ -1140,7 +1215,10 @@ fn default_review_fetch_concurrency() -> u32 {
 // and a private field trades it for `constructible_struct_adds_private_field`.
 // The crate already owes a major bump for the same lint (#6744, InstallArgs),
 // and this field rides that bump rather than causing one.
+// #137: `#[non_exhaustive]` now, with every other config section, so the next
+// field is additive.
 #[derive(Clone, Default, Deserialize)]
+#[non_exhaustive]
 pub struct BitbucketConfig {
     /// Bitbucket account / workspace member username (required for Basic auth).
     #[serde(default)]
@@ -1208,6 +1286,10 @@ pub struct BitbucketConfig {
 ///
 /// `#[non_exhaustive]` since #5219, which added `fetch_on_reference` — same
 /// reasoning as [`GithubConfig`].
+///
+/// `JiraConfig::default()` is NOT an omitted `jira:` block: it gives
+/// `fetch_on_reference: false`, where YAML gives `true` (#137). Set that field
+/// when building one in code.
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `token` in the clear.
 // #5775: `Serialize` is hand-written in `credential_serialize` for the same
@@ -1778,6 +1860,24 @@ mod tests {
             parsed.failure_signals.len()
         );
         assert_eq!(defaulted.datadog_dir, parsed.datadog_dir);
+    }
+
+    /// Why: #137 — a derived `FailureSignal::default()` gave `within_hours: 0`,
+    /// which `commands::dora` turned into a window matching no commit.
+    /// What: an empty signal from YAML equals `FailureSignal::default()`.
+    #[test]
+    fn failure_signal_default_matches_empty_yaml() {
+        let parsed: FailureSignal = serde_yaml::from_str("{}").expect("parse signal");
+        let defaulted = FailureSignal::default();
+
+        assert_eq!(parsed.within_hours, 48);
+        assert_eq!(defaulted.within_hours, parsed.within_hours);
+        assert_eq!(defaulted.work_type, parsed.work_type);
+        assert_eq!(defaulted.on_branch, parsed.on_branch);
+        assert_eq!(
+            defaulted.commit_message_pattern,
+            parsed.commit_message_pattern
+        );
     }
 
     /// Why: `anthropic-api` uses a hyphen in the YAML value; a missing serde

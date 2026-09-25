@@ -63,6 +63,7 @@ where
 /// parse error at load time rather than being silently ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Rule {
     /// Unique rule identifier (used in logs and overrides).
     pub id: String,
@@ -121,6 +122,25 @@ pub struct Rule {
     pub confidence: f64,
 }
 
+impl Rule {
+    /// A rule `id` that assigns `category`, with no keywords or patterns and
+    /// the YAML defaults for priority (`110`) and confidence (`0.85`).
+    ///
+    /// #137: `Rule` is `#[non_exhaustive]`; outside this crate, build one here
+    /// and push keywords or patterns onto the public fields.
+    pub fn new(id: impl Into<String>, category: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            category: category.into(),
+            subcategory: None,
+            keywords: Vec::new(),
+            patterns: Vec::new(),
+            priority: default_rule_priority(),
+            confidence: default_confidence(),
+        }
+    }
+}
+
 fn default_confidence() -> f64 {
     0.85
 }
@@ -148,8 +168,13 @@ fn default_rule_priority() -> i32 {
 /// unknown-field rejection covered by `tests::rule_set_unknown_field_is_rejected`.
 ///
 /// `deny_unknown_fields` prevents silent YAML typos from going unnoticed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `#[non_exhaustive]` (#137): outside this crate, start from
+/// [`RuleSet::default`]. That is an empty, non-extending set with no rules —
+/// NOT the built-in rules, which come from
+/// [`crate::classify::rules::loader::default_rules`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RuleSet {
     /// Optional schema version for forward compatibility.
     #[serde(default)]
@@ -192,12 +217,23 @@ pub struct RuleSet {
 /// Test: `classify::rules::types::tests::categories_section_merges_by_name`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct CategoryDef {
     /// Category name, as a rule's `category` would spell it.
     pub name: String,
     /// What the category means; shown to the LLM when present.
     #[serde(default)]
     pub description: Option<String>,
+}
+
+impl CategoryDef {
+    /// A category `name` with no description (#137: `#[non_exhaustive]`).
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+        }
+    }
 }
 
 impl RuleSet {

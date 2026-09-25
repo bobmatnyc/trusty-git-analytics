@@ -273,12 +273,15 @@ To add a new project management source (e.g. ClickUp, Shortcut):
 ### 4.1 Add the config struct
 
 In `src/core/config/`, create a new struct (e.g. `ClickUpConfig`) with `serde::Deserialize`
-and add it as an optional field to the top-level `Config` struct:
+and add it as an optional field to the top-level `Config` struct. Mark it
+`#[non_exhaustive]`, like every other config section, so a later field is not a
+SemVer break (#137):
 
 ```rust
 // src/core/config/clickup.rs
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct ClickUpConfig {
     pub api_token: String,
     pub workspace_id: String,

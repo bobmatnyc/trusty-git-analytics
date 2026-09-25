@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 /// Test: round-trip deserialization covered by `config::tests`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SourceConfig {
     /// JIRA Cloud / Server integration.
     Jira(JiraSourceConfig),
@@ -74,6 +75,7 @@ pub enum SourceConfig {
 /// `tests::jira_source_config_email_env_deserializes` in this module.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct JiraSourceConfig {
     /// JIRA Cloud / Server base URL (e.g. `https://yourco.atlassian.net`).
     pub base_url: String,
@@ -136,6 +138,21 @@ pub struct JiraSourceConfig {
     pub field_mappings: JiraFieldMappings,
 }
 
+impl JiraSourceConfig {
+    /// A source for `base_url` with every optional key at the value an omitted
+    /// YAML key deserializes to (#137: the struct is `#[non_exhaustive]`).
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            token_env: default_jira_token_env(),
+            username: None,
+            email_env: None,
+            project_keys: Vec::new(),
+            field_mappings: JiraFieldMappings::default(),
+        }
+    }
+}
+
 fn default_jira_token_env() -> String {
     "JIRA_API_TOKEN".to_string()
 }
@@ -148,6 +165,7 @@ fn default_jira_token_env() -> String {
 /// Test: covered by `jira::tests::field_mapping_resolves_issue_type`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct JiraFieldMappings {
     /// Maps JIRA issue-type names (e.g. `"Story"`, `"Bug"`) to TGA categories.
     #[serde(default)]
@@ -172,6 +190,7 @@ pub struct JiraFieldMappings {
 /// Test: see `tests::github_issues_config_deserializes`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct GithubIssuesSourceConfig {
     /// Repository slug in `owner/name` form, e.g. `"acme/widgets"`.
     ///
@@ -200,6 +219,18 @@ pub struct GithubIssuesSourceConfig {
     pub label_mappings: HashMap<String, String>,
 }
 
+impl GithubIssuesSourceConfig {
+    /// A source for the `owner/name` slug `repo` with every optional key at
+    /// its YAML default (#137: the struct is `#[non_exhaustive]`).
+    pub fn new(repo: impl Into<String>) -> Self {
+        Self {
+            repo: repo.into(),
+            token_env: default_github_token_env(),
+            label_mappings: HashMap::new(),
+        }
+    }
+}
+
 fn default_github_token_env() -> String {
     "GITHUB_TOKEN".to_string()
 }
@@ -216,6 +247,7 @@ fn default_github_token_env() -> String {
 /// `linear::tests` module.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct LinearSourceConfig {
     /// Name of the environment variable carrying the Linear Personal API Key.
     /// The key is read at runtime — never stored in config files.
@@ -236,6 +268,17 @@ pub struct LinearSourceConfig {
     pub field_mappings: LinearFieldMappings,
 }
 
+/// Every key at the value an omitted YAML key deserializes to (#137).
+impl Default for LinearSourceConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: default_linear_api_key_env(),
+            team_keys: Vec::new(),
+            field_mappings: LinearFieldMappings::default(),
+        }
+    }
+}
+
 fn default_linear_api_key_env() -> String {
     "LINEAR_API_TOKEN".to_string()
 }
@@ -248,6 +291,7 @@ fn default_linear_api_key_env() -> String {
 /// Test: covered by `linear::tests::classify_issue_type_wins`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct LinearFieldMappings {
     /// Maps Linear issue-type names (e.g. `"Bug"`, `"Feature"`) to TGA
     /// categories.
@@ -274,6 +318,7 @@ pub struct LinearFieldMappings {
 /// `shortcut::tests` module.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ShortcutSourceConfig {
     /// Name of the environment variable carrying the Shortcut API token.
     /// The token is read at runtime — never stored in config files.
@@ -290,6 +335,17 @@ pub struct ShortcutSourceConfig {
     pub field_mappings: ShortcutFieldMappings,
 }
 
+/// Every key at the value an omitted YAML key deserializes to (#137).
+impl Default for ShortcutSourceConfig {
+    fn default() -> Self {
+        Self {
+            api_token_env: default_shortcut_api_token_env(),
+            workspace_id: String::new(),
+            field_mappings: ShortcutFieldMappings::default(),
+        }
+    }
+}
+
 fn default_shortcut_api_token_env() -> String {
     "SHORTCUT_API_TOKEN".to_string()
 }
@@ -302,6 +358,7 @@ fn default_shortcut_api_token_env() -> String {
 /// Test: covered by `shortcut::tests::classify_story_type_wins`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ShortcutFieldMappings {
     /// Maps Shortcut story-type strings (`"bug"`, `"feature"`, `"chore"`)
     /// to TGA categories.
@@ -330,6 +387,7 @@ pub struct ShortcutFieldMappings {
 /// higher-confidence source (JIRA, Linear) for production use.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ConfluenceSourceConfig {
     /// Confluence instance base URL, e.g.
     /// `"https://yourco.atlassian.net/wiki"`.
@@ -357,6 +415,19 @@ pub struct ConfluenceSourceConfig {
     pub label_mappings: HashMap<String, String>,
 }
 
+impl ConfluenceSourceConfig {
+    /// A source for `base_url` with every optional key at its YAML default
+    /// (#137: the struct is `#[non_exhaustive]`).
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            token_env: default_confluence_token_env(),
+            email_env: default_confluence_email_env(),
+            label_mappings: HashMap::new(),
+        }
+    }
+}
+
 fn default_confluence_token_env() -> String {
     "CONFLUENCE_API_TOKEN".to_string()
 }
@@ -376,6 +447,7 @@ fn default_confluence_email_env() -> String {
 /// `datadog::tests` module.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct DatadogSourceConfig {
     /// Name of the env var carrying the Datadog API key.
     #[serde(default = "default_datadog_api_key_env")]
@@ -404,6 +476,20 @@ pub struct DatadogSourceConfig {
     /// Override confidence for this source. Defaults to 0.95.
     #[serde(default)]
     pub confidence: Option<f64>,
+}
+
+/// Every key at the value an omitted YAML key deserializes to (#137).
+impl Default for DatadogSourceConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: default_datadog_api_key_env(),
+            app_key_env: default_datadog_app_key_env(),
+            dd_site: None,
+            service: None,
+            default_category: default_datadog_category(),
+            confidence: None,
+        }
+    }
 }
 
 fn default_datadog_api_key_env() -> String {
