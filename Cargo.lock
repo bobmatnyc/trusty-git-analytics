@@ -4112,7 +4112,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "9.0.1"
+version = "10.0.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
