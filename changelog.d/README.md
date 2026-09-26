@@ -25,6 +25,11 @@ numbers are unique per repo); the slug keeps two fragments for one number
 distinct. The file must sit directly in this directory — a nested one is
 rejected.
 
+A `Breaking` fragment does not, by itself, force a major version bump — see
+`docs/PUBLISHING.md`'s "Versioning policy" (owner ruling 2026-09-26): tga
+bumps minor for a feature or patch for a fix, even for a breaking change,
+until the owner says otherwise.
+
 There is no assembly script. At release time, the release PR folds these
 fragments into `CHANGELOG.md` by hand: add a new `## [<version>] — <date>`
 section above the previous release, in category order (`Breaking | Added |

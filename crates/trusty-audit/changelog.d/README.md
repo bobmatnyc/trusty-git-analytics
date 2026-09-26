@@ -25,6 +25,11 @@ numbers are unique per repo); the slug keeps two fragments for one number
 distinct. The file must sit directly in this directory — a nested one is
 rejected.
 
+A `Breaking` fragment does not, by itself, force a major version bump — see
+`docs/PUBLISHING.md`'s "Versioning policy" (owner ruling 2026-09-26):
+trusty-audit bumps minor for a feature or patch for a fix, even for a
+breaking change, until the owner says otherwise.
+
 Preview what the next release will say:
 
     bash scripts/assemble-changelog.sh <crate> --stdout
