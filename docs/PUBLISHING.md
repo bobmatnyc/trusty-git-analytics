@@ -23,6 +23,23 @@ trusty-installer-v0.5.0 in trusty-tools) — check the repo's release settings
 before the first real tag push, and if it is ON, be prepared to cut a new
 patch version rather than reuse the stuck tag.
 
+## Versioning policy — internal numbering (until further notice)
+
+From the next release, `tga` and `trusty-audit` follow an internal numbering
+scheme, not public-API SemVer (owner ruling 2026-09-26): there are not enough
+external users to protect, and tga's major number was climbing too fast for
+what the changes were.
+
+- No major bump for an API or CLI break.
+- A feature bumps the minor version; a bug fix bumps the patch version —
+  within the current major, either way.
+- Every break is still recorded in the crate's changelog as a `Breaking`
+  entry, even though the version itself does not go major.
+
+This applies to both crates until the owner says otherwise. It changes step 4
+below and the "Recording a break" section; nothing else in this checklist
+moves.
+
 ## Publish order
 
 **tga and trusty-audit have no Cargo dependency edge between them** — confirmed
@@ -74,8 +91,10 @@ BASELINE=$(curl -s https://crates.io/api/v1/crates/<pkg>/versions \
   | sort -V | tail -1)
 cargo semver-checks check-release -p <pkg> --baseline-version "$BASELINE" --only-explicit-features
 # A missing baseline (crate never published) is a clean skip, not a failure.
-# A reported break means: bump the breaking version component (0.x -> MINOR,
-# 1.x+ -> MAJOR) and re-run, or record the exception per "Accepting a break" below.
+# A reported break is information under the internal versioning policy above
+# (owner ruling 2026-09-26), not a required major bump: bump MINOR for a
+# feature or PATCH for a fix, and record the break per "Recording a break"
+# below.
 
 # 5. Bump the version in Cargo.toml, commit.
 git commit -am "chore: bump <crate> to v<version>"
@@ -105,16 +124,16 @@ cargo install --path <crate-dir> --locked
 <binary> --version
 ```
 
-## Accepting a break (rare)
+## Recording a break
 
-If a breaking public-API change genuinely ships without a breaking version
-bump (owner-authorized only), record it before publishing rather than
-disabling the gate: add a short note to the crate's changelog naming the
-break and the reason, and get explicit sign-off in the PR. This repo does not
-carry trusty-tools' `scripts/semver-accepted-breaks/` machine-readable
-override file — that is a deliberate simplification (see docs/release-assets.md); if this
-repo starts needing it routinely, port that mechanism rather than skipping
-the gate by hand.
+Under the internal versioning policy above, a breaking public-API or CLI
+change ships as a MINOR (feature) or PATCH (fix) bump, never MAJOR, until the
+owner says otherwise. Record it before publishing rather than disabling the
+gate: add a `Breaking` entry to the crate's changelog naming the break and the
+reason. This repo does not carry trusty-tools' `scripts/semver-accepted-breaks/`
+machine-readable override file — that is a deliberate simplification (see
+docs/release-assets.md); if this repo starts needing it routinely, port that
+mechanism rather than skipping the gate by hand.
 
 ## Publishing trusty-audit — one extra step
 
