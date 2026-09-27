@@ -78,6 +78,8 @@ const INTERRUPT_GRACE: Duration = Duration::from_millis(250);
 /// removed once it has been waited on. The sweep clones one repository at a
 /// time, so there is at most one entry in practice — a list rather than a slot
 /// because a second caller must not be able to displace the first's group.
+/// #8783: `crate::run::child` registers each `tga audit` group here too —
+/// `crate::run::run_tests::a_running_tga_group_is_registered_for_ctrl_c`.
 /// Test: `super::watchdog::watchdog_tests::an_interrupt_kills_a_detached_clone_group`,
 /// `super::watchdog::watchdog_tests::a_detached_group_is_deregistered_when_its_guard_drops`.
 static DETACHED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
@@ -87,11 +89,12 @@ static DETACHED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// A panic between the spawn and the wait would otherwise leave a pid behind
 /// that a later interrupt would signal, and pids are reused.
 /// Test: `super::watchdog::watchdog_tests::a_detached_group_is_deregistered_when_its_guard_drops`.
-struct Detached(u32);
+/// #8783: also held by `crate::run::child` for the `tga audit` group.
+pub(crate) struct Detached(u32);
 
 impl Detached {
     /// Record a child that now leads a process group of its own.
-    fn register(pid: u32) -> Self {
+    pub(crate) fn register(pid: u32) -> Self {
         // A poisoned lock must not disarm the one record of what is still
         // running: this guards against orphaned clones, so it recovers the
         // inner value rather than skipping the write.
@@ -110,6 +113,20 @@ impl Drop for Detached {
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|pid| *pid != self.0);
     }
+}
+
+/// A snapshot of [`DETACHED`], so an assertion never holds its lock.
+#[cfg(test)]
+pub(crate) fn registered_groups() -> Vec<u32> {
+    DETACHED.lock().expect("an unpoisoned lock").clone()
+}
+
+/// Is this pid still a process on this machine?
+#[cfg(test)]
+pub(crate) fn alive(pid: u32) -> bool {
+    // SAFETY: signal 0 performs the permission and existence check without
+    // delivering anything.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 /// Give Ctrl-C back its meaning, then die the way an uncaught one would have.
@@ -319,18 +336,34 @@ pub(super) async fn run(
     };
     // #5669: the `process_group(0)` above put this tree beyond the terminal's
     // reach, so record it while it runs — see `stop_clones_on_interrupt`.
-    let _detached = child.id().map(Detached::register);
-    watch_child(spec, child, staged, watch).await
+    let detached = child.id().map(Detached::register);
+    watch_registered(spec, child, staged, watch, detached).await
 }
 
 /// Watch an already-spawned child, so a test can hold its pid.
 ///
 /// Test: `super::watchdog::watchdog_tests::a_killed_child_leaves_no_process_behind`.
+#[cfg(test)]
 pub(super) async fn watch_child(
+    spec: &Spawn<'_>,
+    child: Child,
+    staged: &Path,
+    watch: Option<Watch>,
+) -> Outcome {
+    watch_registered(spec, child, staged, watch, None).await
+}
+
+/// [`watch_child`], releasing the child's [`DETACHED`] entry once it is decided.
+///
+/// #8783: the guard drops before the stderr drain, which can run for
+/// [`DRAIN_GRACE`] after the leader is reaped — long enough for its pgid to be
+/// reused and then signalled by a Ctrl-C.
+async fn watch_registered(
     spec: &Spawn<'_>,
     mut child: Child,
     staged: &Path,
     watch: Option<Watch>,
+    detached: Option<Detached>,
 ) -> Outcome {
     let drain = child.stderr.take().map(|mut pipe| {
         tokio::spawn(async move {
@@ -340,11 +373,63 @@ pub(super) async fn watch_child(
         })
     });
     let verdict = supervise(&mut child, staged, watch).await;
+    drop(detached);
     let stderr = match drain {
-        Some(handle) => handle.await.unwrap_or_default(),
-        None => Vec::new(),
+        Some(handle) => drain_within(handle, DRAIN_GRACE).await,
+        None => Some(Vec::new()),
     };
-    report(spec, verdict, &stderr, watch)
+    settle(spec, verdict, stderr, watch, DRAIN_GRACE)
+}
+
+/// How long the stderr drain may run on after the child is gone (#8783).
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+/// The drained stderr, or `None` once `grace` elapses.
+///
+/// Why: the pipe's EOF waits for EVERY holder, and a descendant that left the
+/// group (`setsid`) is beyond [`kill_tree`]'s reach — awaiting it unbounded
+/// turns a stopped clone back into a hang (#8783, the sweep's twin of this).
+/// What: awaits the drain task under `grace`; on expiry aborts it and returns
+/// `None`, which [`settle`] reads as an undrained child.
+/// Test: `super::watchdog::watchdog_tests::a_drain_held_open_past_the_grace_is_abandoned`.
+async fn drain_within(
+    mut handle: tokio::task::JoinHandle<Vec<u8>>,
+    grace: Duration,
+) -> Option<Vec<u8>> {
+    match tokio::time::timeout(grace, &mut handle).await {
+        Ok(joined) => Some(joined.unwrap_or_default()),
+        Err(_elapsed) => {
+            handle.abort();
+            None
+        }
+    }
+}
+
+/// Word the verdict, downgrading a success whose stderr never reached EOF.
+///
+/// Why: an undrained pipe means a process the clone left behind is still
+/// running, and may still be writing into the staged tree — the same reason
+/// `crate::run::child::join_pumps` downgrades an undrained `tga audit` (#8783).
+/// What: `Some(stderr)` is worded by [`report`] unchanged. `None` turns a zero
+/// exit into [`Outcome::Failed`]; every other verdict is already not a success
+/// and is worded without the stderr it lost.
+/// Test: `super::watchdog::watchdog_tests::an_undrained_success_is_not_completed`.
+fn settle(
+    spec: &Spawn<'_>,
+    verdict: Verdict,
+    stderr: Option<Vec<u8>>,
+    watch: Option<Watch>,
+    grace: Duration,
+) -> Outcome {
+    match (stderr, verdict) {
+        (Some(stderr), verdict) => report(spec, verdict, &stderr, watch),
+        (None, Verdict::Exited(status)) if status.success() => Outcome::Failed(format!(
+            "`{}` exited 0, but a process it left behind still held its stderr open {grace:?} \
+             after it ended",
+            spec.label
+        )),
+        (None, verdict) => report(spec, verdict, &[], watch),
+    }
 }
 
 /// What the supervision loop observed, before it is worded for a report.
@@ -431,10 +516,28 @@ async fn terminate(child: &mut Child, grace: Duration) {
         if let Ok(Ok(_)) = tokio::time::timeout(grace, child.wait()).await {
             return;
         }
+    }
+    let _ = kill_tree(child).await;
+}
+
+/// `SIGKILL` the child's whole process group, then reap the child.
+///
+/// Why: `Child::kill` signals the direct child alone, and a grandchild that
+/// inherited its pipes keeps them open — so a caller draining those pipes waits
+/// for the grandchild, not for the kill (#8783: a 200 ms budget took 600 s).
+/// What: [`signal_tree`] with `SIGKILL`, then `Child::kill`, which reaps and
+/// covers a child whose pid is already gone.
+/// Test: `super::watchdog::watchdog_tests::a_budget_kill_reaches_a_grandchild`,
+/// `crate::run::run_tests::a_timeout_kill_reaches_the_childs_grandchild`.
+///
+/// # Errors
+///
+/// Whatever `Child::kill` reports.
+pub(crate) async fn kill_tree(child: &mut Child) -> std::io::Result<()> {
+    if let Some(pid) = child.id() {
         signal_tree(pid, libc::SIGKILL);
     }
-    // Reaps, and covers the child whose pid is already gone.
-    let _ = child.kill().await;
+    child.kill().await
 }
 
 /// Signal the child and every process it forked.
@@ -473,8 +576,9 @@ fn signal_tree(pid: u32, signal: libc::c_int) {
 /// then reaps — after which `getpgid` on that pid answers `ESRCH` and
 /// [`signal_tree`] can no longer recognise the group, so the follow-up `SIGKILL`
 /// would land on nothing and the grandchildren would keep fetching (#5669).
-/// Every pid in [`DETACHED`] is a leader by construction — [`run`] is the only
-/// registrar and it always sets `process_group(0)` — so the group can be named
+/// Every pid in [`DETACHED`] is a leader by construction — both registrars,
+/// [`run`] and `crate::run::child::spawn_tga` (#8783), always set
+/// `process_group(0)` — so the group can be named
 /// directly there rather than probed for.
 /// What: `kill(-pgid)`. A group id is not reused while any member survives,
 /// which is exactly the case this is called in; an already-empty group answers
@@ -691,11 +795,6 @@ done
         .unwrap_or_else(|_| panic!("the watchdog left the child running past {STOP_DEADLINE:?}"))
     }
 
-    /// A snapshot of [`DETACHED`], so an assertion never holds its lock.
-    fn registered() -> Vec<u32> {
-        DETACHED.lock().expect("an unpoisoned lock").clone()
-    }
-
     /// The process group this pid belongs to.
     fn group_of(pid: u32) -> u32 {
         // SAFETY: `getpgid` only reads, and the pid names a live process the
@@ -703,13 +802,6 @@ done
         let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
         assert!(pgid > 0, "pid {pid} has no process group");
         pgid as u32
-    }
-
-    /// Is this pid still a process on this machine?
-    fn alive(pid: u32) -> bool {
-        // Signal 0 performs the permission and existence check without
-        // delivering anything.
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 
     fn tiny_watch(spent: u64, budget_bytes: u64) -> Watch {
@@ -1128,9 +1220,9 @@ done
         // it signals every registered group, and the other tests in this binary
         // clone too.
         assert!(
-            registered().contains(&group),
+            registered_groups().contains(&group),
             "run must register the group it detached; {group} is not in {:?}",
-            registered()
+            registered_groups()
         );
         // The other half: signalling that group ends the whole tree.
         stop_groups(&[group], Duration::from_millis(50)).await;
@@ -1158,14 +1250,59 @@ done
         {
             let _guard = Detached::register(SENTINEL);
             assert!(
-                registered().contains(&SENTINEL),
+                registered_groups().contains(&SENTINEL),
                 "registered while the guard is held"
             );
         }
 
         assert!(
-            !registered().contains(&SENTINEL),
+            !registered_groups().contains(&SENTINEL),
             "the entry is gone once the guard drops"
+        );
+    }
+
+    /// #8783: a drain whose pipe a stray holder keeps open is abandoned at the
+    /// grace rather than awaited until that holder exits.
+    #[tokio::test]
+    async fn a_drain_held_open_past_the_grace_is_abandoned() {
+        let held = tokio::spawn(std::future::pending::<Vec<u8>>());
+        let drained =
+            tokio::time::timeout(STOP_DEADLINE, drain_within(held, Duration::from_millis(50)))
+                .await
+                .expect("drain_within honours its grace");
+        assert_eq!(drained, None, "an abandoned drain reads as undrained");
+    }
+
+    /// #8783: a zero exit whose stderr never reached EOF is not a completed
+    /// clone — a process it left behind may still be writing into the tree —
+    /// while a verdict that was already a failure keeps its own wording.
+    #[test]
+    fn an_undrained_success_is_not_completed() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let grace = Duration::from_millis(50);
+        let success = || Verdict::Exited(std::process::ExitStatus::from_raw(0));
+
+        let Outcome::Failed(why) = settle(&SPEC, success(), None, None, grace) else {
+            panic!("an undrained success must not read as Completed");
+        };
+        assert!(why.contains("still held its stderr open 50ms"), "{why}");
+        assert_eq!(
+            settle(&SPEC, success(), Some(Vec::new()), None, grace),
+            Outcome::Completed,
+            "a drained success is unchanged"
+        );
+        assert_eq!(
+            settle(
+                &SPEC,
+                Verdict::OverBudget(9),
+                None,
+                Some(tiny_watch(0, 4)),
+                grace
+            ),
+            Outcome::OverBudget {
+                staged_bytes: 9,
+                budget_bytes: 4
+            },
         );
     }
 }
