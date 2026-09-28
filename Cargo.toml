@@ -1,13 +1,18 @@
 # Standalone repository (split from trusty-tools at 1c1ce516a). This root
 # manifest is both the `tga` package and the workspace, ripgrep-style.
 [workspace]
-members = [".", "crates/trusty-audit"]
-# A bare `cargo build` / `test` / `clippy` covers both crates, as it did in the
-# monorepo's `default-members`.
+# `crates/trusty-audit/ui/src-tauri` is `trusty-audit-ui`, the auditor client's
+# Tauri shell. It calls `trusty-audit`'s `Session::execute` in-process, so it
+# is a member and resolves `trusty-audit` by path (moved here from trusty-tools,
+# owner ruling 2026-09-28).
+members = [".", "crates/trusty-audit", "crates/trusty-audit/ui/src-tauri"]
+# A bare `cargo build` / `test` / `clippy` covers tga and trusty-audit only.
+# The Tauri GUI needs the pnpm/Svelte toolchain (and WebKitGTK on Linux), so it
+# is left out here and every `--workspace` command in CI passes
+# `--exclude trusty-audit-ui`. Build it with
+# `SKIP_UI_BUILD=1 cargo check -p trusty-audit-ui` (placeholder dist) or with
+# pnpm on PATH for the real bundle.
 default-members = [".", "crates/trusty-audit"]
-# The trusty-audit Tauri GUI needs the pnpm/Svelte toolchain (and WebKitGTK on
-# Linux), so it stays out of the workspace and out of every headless gate.
-exclude = ["crates/trusty-audit/ui"]
 resolver = "2"
 
 [workspace.package]
@@ -42,6 +47,9 @@ tempfile = "3.27.0"
 # tests need under nextest.
 serial_test = { version = "3.4.0", features = ["file_locks"] }
 wiremock = "0.6.5"
+# The auditor client itself, for `trusty-audit-ui` (`publish = false`, so the
+# path entry needs no version).
+trusty-audit = { path = "crates/trusty-audit" }
 
 [profile.release]
 opt-level = 3
