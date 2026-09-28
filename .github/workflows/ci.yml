@@ -78,6 +78,81 @@ jobs:
       - run: cargo clippy --workspace --exclude trusty-audit-ui --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
+  # audit-ui — clippy- and test-verify the auditor client's Tauri desktop shell
+  # (crates/trusty-audit/ui/src-tauri, package `trusty-audit-ui`), which the
+  # `clippy` job above excludes (see this file's header comment).
+  #
+  # Ported from trusty-tools' `trusty-audit-ui clippy` job when the crate
+  # moved to this repo (bobmatnyc/trusty-tools@279e12668
+  # .github/workflows/ci.yml), so the extraction does not silently drop that
+  # gate. Same check name on purpose, so it can be made a required check here
+  # too. Two adaptations from the source job:
+  #   - No `needs: [changes]` / docs-only gating: tga has no diff classifier
+  #     (see file header), so this job always runs on its own triggers below
+  #     and adds no `needs:` to any other job.
+  #   - Plain `apt-get install`, not `scripts/ci-apt-install.sh`: that
+  #     script's retry/infra-classification wrapper (trusty-tools issues
+  #     #5999, #7288) does not exist in this repo; same package list as the
+  #     source step.
+  #
+  # Tauri links WebKit2GTK on Linux, so this job installs that toolchain and
+  # compiles + lints the crate on its own runner.
+  # `tauri::generate_context!()` embeds `frontendDist` ("../dist") at compile
+  # time and hard-errors when it is absent; `dist/` is gitignored, so a
+  # placeholder index.html is stubbed before clippy, exactly as the source
+  # job did. `SKIP_UI_BUILD=1` stops build.rs from looking for pnpm, so this
+  # job never touches Node/pnpm (the source job did not either).
+  # ---------------------------------------------------------------------------
+  audit-ui:
+    name: trusty-audit-ui clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit-ui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Stub the frontendDist so tauri::generate_context!() can embed it.
+      # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
+      - name: Stub frontend dist for generate_context!
+        run: |
+          mkdir -p crates/trusty-audit/ui/dist
+          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-audit</title></head><body></body></html>\n' \
+            > crates/trusty-audit/ui/dist/index.html
+
+      - name: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
+
+      - name: cargo test -p trusty-audit-ui
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo test -p trusty-audit-ui
+
+  # ---------------------------------------------------------------------------
   # test — cargo test --workspace for both crates.
   #
   # fetch-depth: 0 (full clone): tga's collect/ module extracts real commit
