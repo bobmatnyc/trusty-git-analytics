@@ -14,6 +14,12 @@ binaries and `.sha256` files and attaches them to the GitHub Release that the
 pushed tag names — it never runs `cargo publish` and never holds a
 crates.io token.
 
+GitHub Actions runs only at release (owner ruling 2026-09-30): `ci.yml` and
+`semver.yml` run on the release tag push and on `workflow_dispatch`; the
+website, install.sh and engagement-pins workflows run on `workflow_dispatch`
+only. PR checks run locally through `scripts/gate.sh` — see CONTRIBUTING.md's
+"Local gate".
+
 **Assumption — Immutable Releases setting.** This repo's GitHub "Immutable
 releases" setting could not be read via the API while drafting these
 workflows; it is assumed OFF (the default for a new repository). If it turns
@@ -77,11 +83,11 @@ git rev-parse HEAD origin/main    # HEAD should equal origin/main
 curl -s https://crates.io/api/v1/crates/<pkg>/<version> | head -c 200
 # 404/"Not Found" -> safe to proceed; a JSON body means this version already shipped
 
-# 3. Quality gates (must all pass; no --allow-dirty / --no-verify / --force).
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p <pkg>
-cargo check --workspace
+# 3. Quality gates (must pass; no --allow-dirty / --no-verify / --force).
+#    The same local gate every PR runs, with every path-conditional step
+#    forced on: ci.yml's jobs, the website, install.sh and engagement-pin
+#    checks, and a report-only semver-checks run. Exit 0 or stop here.
+scripts/gate.sh --all
 
 # 4. SemVer gate — the local equivalent of .github/workflows/semver.yml,
 #    run BEFORE tagging so a break is caught while nothing is public yet.
@@ -161,6 +167,7 @@ worktree yourself. Whoever operates this repo's PM/orchestrator reclaims it.
 
 ## Cross-references
 
+- Local PR and pre-release gate: `scripts/gate.sh` (selftest: `scripts/gate-selftest.sh`)
 - CI's semver gate: `.github/workflows/semver.yml`
 - Release build/attach pipeline: `.github/workflows/release.yml`
 - Asset naming and the trusty-installer contract it must match: `docs/release-assets.md`

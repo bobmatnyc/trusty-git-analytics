@@ -1,5 +1,11 @@
 # CI for the standalone trusty-git-analytics repo (split-plan step 6).
 #
+# RUNS AT RELEASE OR ON DEMAND ONLY (owner ruling 2026-09-30): release tag
+# pushes (the same tag patterns release.yml builds) and workflow_dispatch.
+# PR and push checks run locally via `scripts/gate.sh`, which runs these same
+# jobs with the same flags and posts an informational `local-gate` commit
+# status. Keep the two in step: a job changed here is changed there too.
+#
 # Repo root = the `tga` crate (binary `tga`). `crates/trusty-audit` = the
 # `trusty-audit` crate (binaries `trusty-audit` + `taudit`). Root Cargo.toml
 # declares `[workspace] members = [".", "crates/trusty-audit",
@@ -19,18 +25,16 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [main]
   push:
-    branches: [main]
+    tags:
+      - "trusty-git-analytics-v*"
+      - "trusty-audit-v*"
   workflow_dispatch:
 
 concurrency:
-  # PR: one run per PR ref, superseded by each new push (saves CI minutes).
-  # push to main: keyed to the commit, never cancelled — the commit is
-  # already on main, so there is nothing to save by killing its own check run.
+  # Tag push: keyed to the commit, never cancelled. Dispatch: one run per ref.
   group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always

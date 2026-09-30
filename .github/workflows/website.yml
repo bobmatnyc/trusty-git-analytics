@@ -1,3 +1,7 @@
+# RUNS ON DEMAND ONLY (owner ruling 2026-09-30): workflow_dispatch. PR checks
+# run locally via `scripts/gate.sh`, which runs these steps whenever
+# `website/**` changes.
+#
 # Ported from trusty-tools/website's website-tests.yml (#5200 there), scoped
 # to this repository's simpler layout: this repo has no ci.yml / docs-only
 # classifier yet, so relevance is a plain `paths:` filter on `website/**`
@@ -5,16 +9,11 @@
 name: Website
 
 on:
-  push:
-    branches: [main]
-    paths: ["website/**", ".github/workflows/website.yml"]
-  pull_request:
-    branches: [main]
-    paths: ["website/**", ".github/workflows/website.yml"]
+  workflow_dispatch:
 
 concurrency:
-  group: website-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: website-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:

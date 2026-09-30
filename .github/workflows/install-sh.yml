@@ -1,5 +1,9 @@
 # Gate for the trusty-audit self-downloading installer at ./install.sh.
 #
+# RUNS ON DEMAND ONLY (owner ruling 2026-09-30): workflow_dispatch. PR checks
+# run locally via `scripts/gate.sh`, which runs these steps whenever
+# install.sh or its selftest changes.
+#
 # Ported from trusty-tools .github/workflows/trusty-audit-install.yml
 # (603e60394d9394a570cad61b53d033f4b7bfd6fa) when the installer moved here.
 #
@@ -14,17 +18,6 @@
 name: install.sh
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "install.sh"
-      - "scripts/install-sh-selftest.sh"
-      - ".github/workflows/install-sh.yml"
-  pull_request:
-    paths:
-      - "install.sh"
-      - "scripts/install-sh-selftest.sh"
-      - ".github/workflows/install-sh.yml"
   workflow_dispatch:
 
 permissions:

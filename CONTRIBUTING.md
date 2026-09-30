@@ -42,30 +42,31 @@ cargo build --release -p tga
 
 ---
 
-## CI Gates
+## Local gate
 
-All pull requests must pass the following checks before merging:
+GitHub Actions runs only for release builds. PR checks run on your machine
+through one script, `scripts/gate.sh`. It runs what `.github/workflows/ci.yml`
+runs (fmt, clippy, tests, the 1.94 MSRV check, the duplicate-dependency check,
+and the `trusty-audit-ui` clippy and tests). It adds the website, install.sh,
+engagement-pin and semver checks when their files changed against
+`origin/main`.
 
-```bash
-# No clippy warnings
-cargo clippy -p tga --all-targets -- -D warnings
-
-# Code is formatted
-cargo fmt --check
-
-# All tests pass
-cargo test -p tga --no-fail-fast
-```
-
-Run them locally before pushing:
+Before you open or update a PR, commit your work and run:
 
 ```bash
-cargo clippy -- -D warnings
-cargo fmt
-cargo test
+git fetch origin main
+scripts/gate.sh --post-status
 ```
 
-If `cargo fmt --check` fails, run `cargo fmt` to auto-format the code.
+`--post-status` posts the result on your HEAD commit as the `local-gate`
+commit status. The status is informational; it is not a required check. The
+gate exits non-zero when any step fails or a required tool is missing; the
+message names the install command. `semver-checks` is report-only: its
+failure is printed but does not fail the gate. `scripts/gate.sh --all` forces
+every path-conditional step on; the release checklist in `docs/PUBLISHING.md`
+uses that form.
+
+If the `fmt` step fails, run `cargo fmt` to auto-format the code.
 
 ---
 
