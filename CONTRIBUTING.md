@@ -48,8 +48,8 @@ GitHub Actions runs only for release builds. PR checks run on your machine
 through one script, `scripts/gate.sh`. It runs what `.github/workflows/ci.yml`
 runs (fmt, clippy, tests, the 1.94 MSRV check, the duplicate-dependency check,
 and the `trusty-audit-ui` clippy and tests). It adds the website, install.sh,
-engagement-pin and semver checks when their files changed against
-`origin/main`.
+engagement-pin and semver checks, and its own `scripts/gate-selftest.sh`,
+when their files changed against `origin/main`.
 
 Before you open or update a PR, commit your work and run:
 

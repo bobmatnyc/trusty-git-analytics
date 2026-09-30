@@ -15,7 +15,10 @@
 #   REPORT-ONLY, and the gate exits non-zero when any blocking step failed.
 #   cargo-semver-checks is report-only (standing owner ruling): its failure is
 #   printed but never fails the gate. A missing tool or toolchain fails the
-#   gate before any step runs; nothing is silently skipped.
+#   gate before any step runs; nothing is silently skipped. A change to
+#   scripts/gate*.sh also runs scripts/gate-selftest.sh; a gate started by
+#   that selftest (GATE_NESTED=1) lists the step as SKIPPED(nested) instead
+#   of starting the selftest again.
 #
 # Usage: scripts/gate.sh [--all] [--post-status]
 #   --all          run every path-conditional step, whatever the diff says
@@ -91,6 +94,12 @@ changed '^website/' && RUN_WEBSITE=1
 changed '^(install\.sh|scripts/install-sh-selftest\.sh)$' && RUN_INSTALL_SH=1
 changed '^(scripts/check-engagement-pins(-selftest)?\.sh|crates/trusty-audit/templates/engagement\.template\.toml)$' \
     && RUN_PINS=1
+RUN_GATE_SELFTEST=0
+changed '^scripts/gate[^/]*\.sh$' && RUN_GATE_SELFTEST=1
+# Recursion guard: gate-selftest.sh runs this gate with GATE_NESTED=1, and a
+# nested gate must not start the selftest that started it.
+NESTED=0
+[[ "${GATE_NESTED:-0}" == "1" ]] && NESTED=1
 if [[ ${ALL} -eq 1 ]]; then
     SEMVER_PKGS="tga trusty-audit"
 else
@@ -134,6 +143,9 @@ if [[ ${RUN_WEBSITE} -eq 1 ]]; then
 fi
 if [[ ${RUN_INSTALL_SH} -eq 1 || ${RUN_PINS} -eq 1 ]]; then
     need shellcheck "brew install shellcheck"
+fi
+if [[ ${RUN_GATE_SELFTEST} -eq 1 && ${NESTED} -eq 0 ]]; then
+    need jq "brew install jq"
 fi
 if [[ -n "${SEMVER_PKGS}" ]]; then
     need curl "brew install curl"
@@ -209,6 +221,8 @@ step_install_sh() {
     x shellcheck --shell=bash scripts/install-sh-selftest.sh
     x bash scripts/install-sh-selftest.sh
 }
+
+step_gate_selftest() { x bash scripts/gate-selftest.sh; }
 
 step_engagement_pins() {
     x shellcheck scripts/check-engagement-pins.sh
@@ -359,6 +373,13 @@ else
 fi
 if [[ ${RUN_INSTALL_SH} -eq 1 ]]; then run_step install-sh step_install_sh; else skip_step install-sh; fi
 if [[ ${RUN_PINS} -eq 1 ]]; then run_step engagement-pins step_engagement_pins; else skip_step engagement-pins; fi
+if [[ ${RUN_GATE_SELFTEST} -eq 0 ]]; then
+    skip_step gate-selftest
+elif [[ ${NESTED} -eq 1 ]]; then
+    record gate-selftest "SKIPPED(nested)" "this gate was started by gate-selftest.sh"
+else
+    run_step gate-selftest step_gate_selftest
+fi
 if [[ -n "${SEMVER_PKGS}" ]]; then
     run_step "semver-checks (${SEMVER_PKGS})" step_semver report-only
 else

@@ -74,6 +74,10 @@ else
     echo "{}" >"${out}"
     printf 404
 fi'
+# The gate's semver step needs a real jq, and PATH below holds only the stubs
+# plus /usr/bin:/bin.
+REAL_JQ="$(command -v jq)" || { echo "FATAL: jq is required (brew install jq)" >&2; exit 1; }
+ln -s "${REAL_JQ}" "${STUBS}/jq"
 
 # Same stubs without pnpm, for the missing-tool case.
 NOPNPM="${WORK}/stubs-nopnpm"
@@ -92,6 +96,7 @@ make_repo() {
     for s in install-sh-selftest check-engagement-pins check-engagement-pins-selftest; do
         printf '#!/usr/bin/env bash\nexit 0\n' >"${dir}/scripts/${s}.sh"
     done
+    printf '#!/usr/bin/env bash\necho "gate-selftest ran" >>"${STUB_LOG}"\n' >"${dir}/scripts/gate-selftest.sh"
     git -C "${dir}" init -q
     git -C "${dir}" add -A
     git -C "${dir}" -c user.name=t -c user.email=t@example.com commit -q -m init
@@ -100,13 +105,16 @@ make_repo() {
 }
 
 # run_gate <stub dir> <repo> [gate args...]; sets OUT, STATUS, LOG.
+# Every run sets GATE_NESTED=1 (the gate's recursion guard) unless a case
+# sets SELFTEST_NESTED=0 to prove the gate-selftest step itself runs.
 run_gate() {
     local stubs="$1" repo="$2"
     shift 2
     LOG="${WORK}/calls.log"
     : >"${LOG}"
     set +e
-    OUT="$(env PATH="${stubs}:/usr/bin:/bin" STUB_LOG="${LOG}" STUB_FAIL="${STUB_FAIL:-}" \
+    OUT="$(env PATH="${stubs}:/usr/bin:/bin" GATE_NESTED="${SELFTEST_NESTED:-1}" \
+        STUB_LOG="${LOG}" STUB_FAIL="${STUB_FAIL:-}" \
         STUB_TREE_OUT="${STUB_TREE_OUT:-}" STUB_NO_MSRV="${STUB_NO_MSRV:-}" STUB_GH_RC="${STUB_GH_RC:-0}" \
         bash "${repo}/scripts/gate.sh" "$@" 2>&1)"
     STATUS=$?
@@ -124,6 +132,7 @@ repo="$(make_repo pass)"
 run_gate "${STUBS}" "${repo}" --all
 if [[ ${STATUS} -eq 0 ]] && has_line '^GATE: PASS' && ! has_line 'FAIL' \
     && has_line '^  PASS +semver-checks \(tga trusty-audit\)' && has_line '^  PASS +website-lint' \
+    && has_line '^  SKIPPED\(nested\) +gate-selftest' && ! logged "gate-selftest ran" \
     && logged "cargo fmt --all --check" \
     && logged "cargo clippy --workspace --exclude trusty-audit-ui --all-targets -- -D warnings" \
     && logged "cargo test --workspace --exclude trusty-audit-ui" \
@@ -134,7 +143,7 @@ if [[ ${STATUS} -eq 0 ]] && has_line '^GATE: PASS' && ! has_line 'FAIL' \
     && logged "pnpm install --frozen-lockfile" \
     && logged "shellcheck --shell=sh install.sh" \
     && logged "cargo semver-checks check-release --package tga --baseline-version 1.0.0 --only-explicit-features"; then
-    pass "--all with every step green exits 0 and runs the ci.yml commands"
+    pass "--all with every step green exits 0, runs the ci.yml commands, and a nested gate skips gate-selftest"
 else
     fail "all-green run: status ${STATUS}"$'\n'"${OUT}"
 fi
@@ -192,7 +201,8 @@ fi
 repo7="$(make_repo paths)"
 run_gate "${STUBS}" "${repo7}"
 if [[ ${STATUS} -eq 0 ]] && has_line '^  SKIPPED\(path\) +install-sh' \
-    && has_line '^  SKIPPED\(path\) +semver-checks' && ! logged "shellcheck"; then
+    && has_line '^  SKIPPED\(path\) +semver-checks' && has_line '^  SKIPPED\(path\) +gate-selftest' \
+    && ! logged "shellcheck"; then
     pass "an empty diff skips every path-conditional step"
 else
     fail "empty diff: status ${STATUS}"$'\n'"${OUT}"
@@ -206,6 +216,18 @@ if [[ ${STATUS} -eq 0 ]] && has_line '^  PASS +install-sh' && has_line '^  PASS 
     pass "changed paths select install-sh and semver-checks (tga) only"
 else
     fail "path selection: status ${STATUS}"$'\n'"${OUT}"
+fi
+
+# 7b -- a scripts/gate*.sh edit runs gate-selftest when the gate is not
+#       nested (the outer, real gate's view of this same change).
+repo7b="$(make_repo gate-edit)"
+echo '# edited' >>"${repo7b}/scripts/gate-selftest.sh"
+SELFTEST_NESTED=0 run_gate "${STUBS}" "${repo7b}"
+if [[ ${STATUS} -eq 0 ]] && has_line '^  PASS +gate-selftest' && logged "gate-selftest ran" \
+    && has_line '^  SKIPPED\(path\) +install-sh'; then
+    pass "a scripts/gate*.sh edit runs gate-selftest in a non-nested gate"
+else
+    fail "gate-selftest step: status ${STATUS}"$'\n'"${OUT}"
 fi
 
 # 8 -- --post-status posts on HEAD; a gh failure exits non-zero and never
