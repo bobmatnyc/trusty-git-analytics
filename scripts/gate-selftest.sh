@@ -52,9 +52,16 @@ exit 0
 STUBEOF
     chmod +x "${STUBS}/${name}"
 }
+# STUB_MIDRUN=commit|dirty: the test step moves HEAD or dirties the tree
+# while the gate runs.
 write_stub cargo 'case "$1" in
     tree) printf "%s" "${STUB_TREE_OUT:-}" ;;
     semver-checks) [[ "$2" == "--version" ]] && echo "cargo-semver-checks 0.50.0" ;;
+    test)
+        case "${STUB_MIDRUN:-}" in
+            commit) git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m midrun ;;
+            dirty) echo midrun >>midrun.txt ;;
+        esac ;;
 esac'
 write_stub cargo-semver-checks ''
 write_stub rustup '[[ "$1" == toolchain ]] && { echo "stable-aarch64-apple-darwin (default)"; [[ -z "${STUB_NO_MSRV:-}" ]] && echo "1.94-aarch64-apple-darwin"; }'
@@ -78,6 +85,16 @@ fi'
 # plus /usr/bin:/bin.
 REAL_JQ="$(command -v jq)" || { echo "FATAL: jq is required (brew install jq)" >&2; exit 1; }
 ln -s "${REAL_JQ}" "${STUBS}/jq"
+# git passes through to the real git, but STUB_FAIL can make one call fail.
+REAL_GIT="$(command -v git)" || { echo "FATAL: git is required" >&2; exit 1; }
+write_stub git "exec \"${REAL_GIT}\" \"\$@\""
+
+# The recursion-guard nonce. It lives only as long as this run: the EXIT trap
+# removes WORK, so a stale exported value names a file that no longer exists.
+NONCE="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+NONCE_FILE="${WORK}/gate-nonce"
+printf '%s' "${NONCE}" >"${NONCE_FILE}"
+STRAY_ENV=()
 
 # Same stubs without pnpm, for the missing-tool case.
 NOPNPM="${WORK}/stubs-nopnpm"
@@ -105,16 +122,22 @@ make_repo() {
 }
 
 # run_gate <stub dir> <repo> [gate args...]; sets OUT, STATUS, LOG.
-# Every run sets GATE_NESTED=1 (the gate's recursion guard) unless a case
-# sets SELFTEST_NESTED=0 to prove the gate-selftest step itself runs.
+# Every run carries this selftest's live nonce (the gate's recursion guard)
+# unless a case sets SELFTEST_NESTED=0 to prove the gate-selftest step runs.
+# STRAY_ENV adds variables as if exported by the caller's shell; any value
+# inherited from the real environment is removed first.
 run_gate() {
-    local stubs="$1" repo="$2"
+    local stubs="$1" repo="$2" nest=()
     shift 2
     LOG="${WORK}/calls.log"
     : >"${LOG}"
+    if [[ "${SELFTEST_NESTED:-1}" == "1" ]]; then
+        nest=(GATE_SELFTEST_NONCE="${NONCE}" GATE_SELFTEST_NONCE_FILE="${NONCE_FILE}")
+    fi
     set +e
-    OUT="$(env PATH="${stubs}:/usr/bin:/bin" GATE_NESTED="${SELFTEST_NESTED:-1}" \
-        STUB_LOG="${LOG}" STUB_FAIL="${STUB_FAIL:-}" \
+    OUT="$(env -u GATE_SELFTEST_NONCE -u GATE_SELFTEST_NONCE_FILE -u GATE_NESTED \
+        PATH="${stubs}:/usr/bin:/bin" ${nest[@]+"${nest[@]}"} ${STRAY_ENV[@]+"${STRAY_ENV[@]}"} \
+        STUB_LOG="${LOG}" STUB_FAIL="${STUB_FAIL:-}" STUB_MIDRUN="${STUB_MIDRUN:-}" \
         STUB_TREE_OUT="${STUB_TREE_OUT:-}" STUB_NO_MSRV="${STUB_NO_MSRV:-}" STUB_GH_RC="${STUB_GH_RC:-0}" \
         bash "${repo}/scripts/gate.sh" "$@" 2>&1)"
     STATUS=$?
@@ -258,6 +281,51 @@ if [[ ${STATUS} -ne 0 ]] && has_line 'needs a clean tree' && ! logged "gh api"; 
 else
     fail "dirty tree: status ${STATUS}"$'\n'"${OUT}"
 fi
+
+# 9 -- HEAD moving or the tree changing mid-run: --post-status posts nothing.
+for how in commit dirty; do
+    repo9="$(make_repo "midrun-${how}")"
+    STUB_MIDRUN="${how}" run_gate "${STUBS}" "${repo9}" --post-status
+    if [[ ${STATUS} -ne 0 ]] && has_line 'changed during the run' && ! logged "gh api" \
+        && ! has_line '^Posted'; then
+        pass "a mid-run ${how} makes --post-status exit non-zero and post nothing"
+    else
+        fail "mid-run ${how}: status ${STATUS}"$'\n'"${OUT}"
+    fi
+done
+
+# 10 -- a failing `git diff --name-only` is fatal, never an empty change list.
+STUB_FAIL="diff --name-only" run_gate "${STUBS}" "${repo}"
+if [[ ${STATUS} -ne 0 ]] && has_line "git diff --name-only .*failed" && ! logged "cargo fmt"; then
+    pass "a failing git diff for the changed paths exits non-zero before any step"
+else
+    fail "changed-paths git failure: status ${STATUS}"$'\n'"${OUT}"
+fi
+
+# 11 -- a failing manifest diff is fatal, never a silent semver skip.
+STUB_FAIL="-- Cargo.toml" run_gate "${STUBS}" "${repo}"
+if [[ ${STATUS} -ne 0 ]] && has_line "Cargo\.toml' failed" && ! logged "cargo fmt"; then
+    pass "a failing git diff for a manifest version exits non-zero before any step"
+else
+    fail "version-bump git failure: status ${STATUS}"$'\n'"${OUT}"
+fi
+
+# 12 -- a stray exported guard value never skips gate-selftest: a stale nonce
+#       file, a wrong token, and the old GATE_NESTED=1 all still run it.
+repo12="$(make_repo stray-guard)"
+echo '# edited' >>"${repo12}/scripts/gate-selftest.sh"
+for stray in "stale nonce file|GATE_SELFTEST_NONCE_FILE=${WORK}/no-such-nonce GATE_SELFTEST_NONCE=${NONCE}" \
+    "wrong nonce token|GATE_SELFTEST_NONCE_FILE=${NONCE_FILE} GATE_SELFTEST_NONCE=wrong-token" \
+    "GATE_NESTED=1|GATE_NESTED=1"; do
+    read -r -a STRAY_ENV <<<"${stray#*|}"
+    SELFTEST_NESTED=0 run_gate "${STUBS}" "${repo12}"
+    STRAY_ENV=()
+    if [[ ${STATUS} -eq 0 ]] && has_line '^  PASS +gate-selftest' && logged "gate-selftest ran"; then
+        pass "a stray ${stray%%|*} does not skip gate-selftest"
+    else
+        fail "stray ${stray%%|*}: status ${STATUS}"$'\n'"${OUT}"
+    fi
+done
 
 echo "== ${PASS} passed, ${FAIL} failed =="
 [[ ${FAIL} -eq 0 ]]

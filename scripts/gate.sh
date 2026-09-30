@@ -17,16 +17,18 @@
 #   printed but never fails the gate. A missing tool or toolchain fails the
 #   gate before any step runs; nothing is silently skipped. A change to
 #   scripts/gate*.sh also runs scripts/gate-selftest.sh; a gate started by
-#   that selftest (GATE_NESTED=1) lists the step as SKIPPED(nested) instead
-#   of starting the selftest again.
+#   a live run of that selftest (a nonce only that run holds) lists the step
+#   as SKIPPED(nested) instead of starting the selftest again.
 #
 # Usage: scripts/gate.sh [--all] [--post-status]
 #   --all          run every path-conditional step, whatever the diff says
-#   --post-status  post the result as the `local-gate` commit status on HEAD
-#                  (needs `gh` and a clean working tree)
+#   --post-status  post the result as the `local-gate` commit status on the
+#                  HEAD the steps checked (needs `gh` and a clean working
+#                  tree; refuses if HEAD or the tree changes during the run)
 #
-# Exit: 0 gate passed; 1 a blocking step failed; 2 usage, preflight or
-#   missing-tool failure; 3 posting the commit status failed.
+# Exit: 0 gate passed; 1 a blocking step failed; 2 usage, preflight, git or
+#   missing-tool failure; 3 posting the commit status failed; 4 HEAD or the
+#   working tree changed during a --post-status run, so nothing was posted.
 #
 # Test: scripts/gate-selftest.sh
 
@@ -72,7 +74,17 @@ if ! MERGE_BASE="$(git merge-base "${BASE_REF}" HEAD 2>/dev/null)"; then
     echo "gate: no merge-base with ${BASE_REF}; run 'git fetch origin main' first." >&2
     exit 2
 fi
-CHANGED="$({ git diff --name-only "${MERGE_BASE}"; git ls-files --others --exclude-standard; } | sort -u)"
+# Each git call is checked on its own: a failed diff must never read as an
+# empty change list that skips every path step.
+if ! DIFF_NAMES="$(git diff --name-only "${MERGE_BASE}")"; then
+    echo "gate: 'git diff --name-only ${MERGE_BASE}' failed; cannot tell which paths changed." >&2
+    exit 2
+fi
+if ! UNTRACKED="$(git ls-files --others --exclude-standard)"; then
+    echo "gate: 'git ls-files --others' failed; cannot tell which paths changed." >&2
+    exit 2
+fi
+CHANGED="$(printf '%s\n%s\n' "${DIFF_NAMES}" "${UNTRACKED}" | sort -u)"
 
 changed() {
     [[ ${ALL} -eq 1 ]] && return 0
@@ -80,9 +92,13 @@ changed() {
 }
 
 # `+version =` in a manifest's diff is semver.yml's pull_request selection.
+# Called in `&&` context, where errexit is off, so a git failure exits here.
 version_bumped() {
     local diff
-    diff="$(git diff "${MERGE_BASE}" -- "$1")"
+    if ! diff="$(git diff "${MERGE_BASE}" -- "$1")"; then
+        echo "gate: 'git diff ${MERGE_BASE} -- $1' failed; cannot tell whether its version changed." >&2
+        exit 2
+    fi
     grep -q '^+version[[:space:]]*=' <<<"${diff}"
 }
 
@@ -96,10 +112,19 @@ changed '^(scripts/check-engagement-pins(-selftest)?\.sh|crates/trusty-audit/tem
     && RUN_PINS=1
 RUN_GATE_SELFTEST=0
 changed '^scripts/gate[^/]*\.sh$' && RUN_GATE_SELFTEST=1
-# Recursion guard: gate-selftest.sh runs this gate with GATE_NESTED=1, and a
-# nested gate must not start the selftest that started it.
+# Recursion guard: a nested gate must not start the selftest that started it.
+# gate-selftest.sh writes a random nonce to a file in its own temp dir, which
+# it deletes on exit, and passes both to each gate it runs. Only a nonce that
+# matches a live file counts, so a stray exported value never skips the step.
 NESTED=0
-[[ "${GATE_NESTED:-0}" == "1" ]] && NESTED=1
+if [[ -n "${GATE_SELFTEST_NONCE:-}" ]]; then
+    if [[ -f "${GATE_SELFTEST_NONCE_FILE:-}" \
+        && "$(cat "${GATE_SELFTEST_NONCE_FILE}")" == "${GATE_SELFTEST_NONCE}" ]]; then
+        NESTED=1
+    else
+        echo "gate: ignoring GATE_SELFTEST_NONCE: no live gate-selftest.sh run owns it." >&2
+    fi
+fi
 if [[ ${ALL} -eq 1 ]]; then
     SEMVER_PKGS="tga trusty-audit"
 else
@@ -163,7 +188,13 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
     exit 2
 fi
 
-if [[ ${POST} -eq 1 && -n "$(git status --porcelain)" ]]; then
+# The commit and tree the steps check. --post-status compares both again
+# before posting, so a status never names a commit the steps did not check.
+if ! HEAD_SHA="$(git rev-parse HEAD)" || ! START_STATUS="$(git status --porcelain)"; then
+    echo "gate: git rev-parse/status failed; no step ran." >&2
+    exit 2
+fi
+if [[ ${POST} -eq 1 && -n "${START_STATUS}" ]]; then
     echo "gate: --post-status needs a clean tree: the status is posted on HEAD and" >&2
     echo "      must describe HEAD. Commit your changes first. No step ran." >&2
     exit 2
@@ -386,7 +417,6 @@ else
     skip_step semver-checks
 fi
 
-HEAD_SHA="$(git rev-parse HEAD)"
 echo
 echo "== local gate summary: HEAD ${HEAD_SHA:0:12}, base ${MERGE_BASE:0:12}$([[ ${ALL} -eq 1 ]] && echo ', --all') =="
 for line in "${RESULTS[@]}"; do echo "${line}"; done
@@ -401,6 +431,13 @@ else
 fi
 
 if [[ ${POST} -eq 1 ]]; then
+    END_HEAD="$(git rev-parse HEAD)" || END_HEAD="(git rev-parse failed)"
+    END_STATUS="$(git status --porcelain)" || END_STATUS="(git status failed)"
+    if [[ "${END_HEAD}" != "${HEAD_SHA}" || "${END_STATUS}" != "${START_STATUS}" ]]; then
+        echo "gate: HEAD or the working tree changed during the run (HEAD ${HEAD_SHA:0:12} -> ${END_HEAD:0:12})." >&2
+        echo "      The steps may not have checked what HEAD names now. Nothing was posted." >&2
+        exit 4
+    fi
     if ! OUT="$(gh api --method POST "repos/${GH_REPO}/statuses/${HEAD_SHA}" \
         -f state="${STATE}" -f context="${STATUS_CONTEXT}" \
         -f description="scripts/gate.sh: ${DESC}" 2>&1)"; then
