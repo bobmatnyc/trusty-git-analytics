@@ -1,3 +1,7 @@
+# RUNS ON DEMAND ONLY (owner ruling 2026-09-30): workflow_dispatch. PR checks
+# run locally via `scripts/gate.sh`, which runs these steps whenever the pin
+# check, its selftest or the engagement template changes.
+#
 # Gate for scripts/check-engagement-pins.sh, the check that holds
 # trusty-audit's engagement template's [tools] pins to versions crates.io
 # actually serves (see the script's own header and docs/PUBLISHING.md's
@@ -17,19 +21,6 @@
 name: engagement-pins
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "scripts/check-engagement-pins.sh"
-      - "scripts/check-engagement-pins-selftest.sh"
-      - "crates/trusty-audit/templates/engagement.template.toml"
-      - ".github/workflows/engagement-pins.yml"
-  pull_request:
-    paths:
-      - "scripts/check-engagement-pins.sh"
-      - "scripts/check-engagement-pins-selftest.sh"
-      - "crates/trusty-audit/templates/engagement.template.toml"
-      - ".github/workflows/engagement-pins.yml"
   workflow_dispatch:
 
 permissions:

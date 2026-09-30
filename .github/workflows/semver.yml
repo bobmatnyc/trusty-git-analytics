@@ -1,5 +1,10 @@
 # Public-API / SemVer gate for the standalone trusty-git-analytics repo
-# (split-plan step 6). Carries over ONLY the check itself from trusty-tools'
+# (split-plan step 6).
+#
+# RUNS AT RELEASE OR ON DEMAND ONLY (owner ruling 2026-09-30): release tag
+# pushes and workflow_dispatch. For a PR, `scripts/gate.sh` runs the same
+# check locally, report-only, when a crate's `version =` line changes.
+# Carries over ONLY the check itself from trusty-tools'
 # semver-checks.yml / preflight-publish.sh CHECK 5 — none of that file's
 # accepted-breaks override system, its dynamic PR-check-name `verdict` job,
 # or its self-tests. Reintroduce a piece of that only once this repo has had
@@ -24,8 +29,6 @@ on:
     tags:
       - "trusty-git-analytics-v*"
       - "trusty-audit-v*"
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       crate:

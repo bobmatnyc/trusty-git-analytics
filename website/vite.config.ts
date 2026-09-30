@@ -31,6 +31,8 @@ export default defineConfig({
 					name: 'unit',
 					environment: 'jsdom',
 					include: ['src/**/*.test.ts'],
+					// Node 25+ shadows jsdom's localStorage; see the file itself.
+					setupFiles: ['./src/vitest-setup.ts'],
 					testTimeout: 30_000,
 					hookTimeout: 30_000
 				}
