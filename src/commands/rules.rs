@@ -17,7 +17,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use tga::classify::classifier::{ClassificationEngine, ClassificationEngineConfig};
 use tga::classify::rules::{default_rules, Rule};
 use tga::classify::taxonomy::{TaxonomyRegistry, TopLevelCategory};
-use tga::core::config::Config;
+use tga::core::config::{BucketMap, BucketSource, Config};
 use tga::core::db::Database;
 
 /// Arguments for `tga rules`.
@@ -133,7 +133,7 @@ pub fn run(config: Config, db: &Database, args: RulesArgs) -> anyhow::Result<()>
 /// Implementation of `tga rules list`.
 fn list(config: &Config, args: ListArgs) -> anyhow::Result<()> {
     match args.format {
-        ListFormat::Json => print_taxonomy_json(config),
+        ListFormat::Json => print_taxonomy_json(config, args.rules.as_deref()),
         ListFormat::Text => print_rule_table(config, args.rules.as_deref()),
     }
 }
@@ -149,8 +149,21 @@ fn list(config: &Config, args: ListArgs) -> anyhow::Result<()> {
 /// classification engine resolves the same registry), then prints a JSON
 /// object with `subcategory_to_top_level` (name -> `as_str_snake()` parent)
 /// and `top_level_categories` (the canonical 7-value list, in order).
-/// Test: `list_json_format_emits_taxonomy_rollup`.
-fn print_taxonomy_json(config: &Config) -> anyhow::Result<()> {
+/// #111: also `bucket_map`, the checked bucket map in effect (`buckets`, in
+/// map order) and its `source`: `config`, `rules_file` (the `--rules` file
+/// when given, else `classification.rules_file`) or `fallback`.
+/// Test: `list_json_format_emits_taxonomy_rollup`,
+/// `tests/rules_buckets_cli.rs::rules_list_json_reports_the_bucket_map_and_its_source`.
+fn print_taxonomy_json(config: &Config, cli_rules: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let mut effective = config.clone();
+    if let Some(path) = cli_rules {
+        effective
+            .classification
+            .get_or_insert_with(Default::default)
+            .rules_files = vec![path.to_path_buf()];
+    }
+    let (buckets, source) =
+        tga::classify::ClassificationPipeline::new(effective).bucket_map_with_source()?;
     let custom = config
         .classification
         .as_ref()
@@ -168,10 +181,23 @@ fn print_taxonomy_json(config: &Config) -> anyhow::Result<()> {
         .map(TopLevelCategory::as_str_snake)
         .collect();
 
-    let payload = serde_json::json!({
-        "subcategory_to_top_level": rollup,
-        "top_level_categories": top_level,
-    });
+    // Serialized directly, not through `json!`, so the map keeps its order.
+    #[derive(serde::Serialize)]
+    struct Payload<'a> {
+        subcategory_to_top_level: std::collections::BTreeMap<&'a str, &'a str>,
+        top_level_categories: Vec<&'a str>,
+        bucket_map: BucketMapJson,
+    }
+    #[derive(serde::Serialize)]
+    struct BucketMapJson {
+        source: BucketSource,
+        buckets: BucketMap,
+    }
+    let payload = Payload {
+        subcategory_to_top_level: rollup,
+        top_level_categories: top_level,
+        bucket_map: BucketMapJson { source, buckets },
+    };
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }

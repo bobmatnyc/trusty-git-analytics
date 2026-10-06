@@ -25,6 +25,21 @@ harness measures how often that category is right, as judged by people:
 - **Stratum-weighted accuracy** — Σ W_h · p_h, where W_h is the stratum's
   share of the population, with a normal-approximation 95% interval. It
   estimates accuracy over the whole window, not over the sample.
+- **Primary and secondary accuracy** (#111) — each scored row's label and
+  prediction are mapped to a bucket through the bucket map in effect:
+  `classification.buckets`, else the rules file's `buckets:`, else tga's
+  built-in fallback (see `docs/requirements/configuration.md`). Primary is right when the buckets
+  match, over every scored row. Secondary is right when the fine categories
+  match, over the rows whose label is in a bucket with more than one fine
+  category (by default Maintenance, Value Creation and Foundational
+  Investment; Internal Tooling has one category and is left out). Both are
+  stratum-weighted with the same estimator and normal-approximation
+  interval as the fine figure, and both also carry unweighted counts with
+  a Wilson 95% interval. Per bucket, the report gives the rows labelled and
+  predicted in it, primary accuracy, and secondary accuracy with its Wilson
+  interval. A prediction with no bucket (`uncategorized`) is wrong at both
+  levels; a label the map does not name is counted and left out of both.
+  `report.json` carries all of it under `buckets`.
 - **Coverage at precision** — for each confidence value among the labelled
   rows, the weighted share of the population at or above it and the
   precision there. Use it to pick a confidence floor.
@@ -189,9 +204,13 @@ sample goes to the others.
    Kappa then reports `n = 100` and precision covers those 100 rows, each
    weighted by its stratum population ÷ labelled rows in the stratum.
 
-   Valid labels come from `--config` when it is passed, otherwise from the
-   categories recorded in `strata.json`; the sample's predicted categories
-   are always valid. An unknown label, or a label for a SHA outside
+   Valid labels come from `--config` or `--rules` when either is passed,
+   otherwise from the categories recorded in `strata.json`; the sample's
+   predicted categories are always valid. `--rules <path>` names the rules
+   file for this run in place of `classification.rules_file`, as
+   `tga rules --rules` does; its categories are valid labels and its
+   `buckets:` map applies when the config has no `classification.buckets`.
+   The console names the bucket map's source. An unknown label, or a label for a SHA outside
    `--sample`, stops the run with the offending SHA. Output: `report.md` and
    `report.json`.
 
@@ -238,7 +257,8 @@ tga eval score --config ~/private/eval/config-v2.yaml \
   as it treats any such row: a prediction that a real label marks wrong.
 - **Fail-closed.** A row whose commit is not in `--db` stops the run; no row
   is skipped or left with its old prediction. `--db` is opened read-only.
-  `--config` must be passed explicitly. An existing `--out` or provenance
+  `--config` must be passed explicitly. `--rules <path>` replaces the
+  config's rules file for the run (#111). An existing `--out` or provenance
   file is never overwritten.
 - **Provenance.** `sample.v2.provenance.json` records the tga version, the
   config file and each rules file with its BLAKE3 hash, the source sample

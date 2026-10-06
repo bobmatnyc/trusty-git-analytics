@@ -10,6 +10,7 @@ use super::records::{SampleRecord, StrataSummary, Stratum};
 use super::sample::write_json;
 use super::stats::{cohen_kappa, wilson_interval, Kappa, Z_95};
 use super::{io_err, EvalError, Result};
+use crate::core::config::BucketMap;
 
 /// Label meaning the rater could not decide.
 pub const UNCLEAR: &str = "unclear";
@@ -158,6 +159,9 @@ pub struct ScoreReport {
     pub abstention: Abstention,
     /// Inter-rater agreement, when two label files were given.
     pub kappa: Option<Kappa>,
+    /// #111: primary (bucket) and secondary (fine within bucket) accuracy.
+    #[serde(default)]
+    pub buckets: super::score_buckets::BucketScores,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,7 +217,7 @@ pub(crate) fn read_sample(path: &Path) -> Result<Vec<SampleRecord>> {
         .collect()
 }
 
-fn precision_rows<'a>(
+pub(super) fn precision_rows<'a>(
     rows: impl Iterator<Item = (String, Option<bool>)> + 'a,
 ) -> Vec<PrecisionRow> {
     let mut acc: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
@@ -272,6 +276,23 @@ fn precision_rows<'a>(
 /// left blank, more than two rater files, or a row whose merge status is
 /// unknown.
 pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
+    run_score_with_buckets(params, &BucketMap::default())
+}
+
+/// [`run_score`] against a given bucket map (#111).
+///
+/// What: as [`run_score`], plus [`ScoreReport::buckets`] scored against
+/// `buckets`; see [`super::score_buckets`].
+/// Test: `tests/eval_harness.rs::score_reports_primary_and_secondary_accuracy`,
+/// `tests/eval_harness.rs::score_moves_with_a_bucket_override`,
+/// `tests/eval_harness.rs::score_rejects_an_unknown_category_in_the_bucket_map`.
+///
+/// # Errors
+///
+/// As [`run_score`], plus [`EvalError::Invalid`] when a map other than the
+/// default names a category outside the label vocabulary
+/// ([`BucketMap::check_known`]).
+pub fn run_score_with_buckets(params: &ScoreParams, buckets: &BucketMap) -> Result<ScoreReport> {
     if params.labels.is_empty() || params.labels.len() > 2 {
         return Err(EvalError::Invalid("pass one or two --labels files".into()));
     }
@@ -303,6 +324,11 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
         .map(|c| c.to_lowercase())
         .collect();
     valid.extend(NO_ANSWER_LABELS.map(String::from));
+    // #111: an override naming a category nobody can label is an error.
+    let vocabulary: Vec<String> = valid.iter().cloned().collect();
+    buckets
+        .check_known(&vocabulary)
+        .map_err(|e| EvalError::Invalid(e.to_string()))?;
 
     let mut raters: Vec<BTreeMap<String, String>> = params
         .labels
@@ -403,6 +429,16 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
         precision_rows(labelled_rows().map(|(r, o)| (r.stratum.as_str().to_string(), o)));
 
     let weighted_accuracy = weighted_accuracy(&per_stratum, &strata);
+    let bucket_scores = super::score_buckets::score_buckets(
+        buckets,
+        sample
+            .iter()
+            .zip(&finals)
+            .zip(&outcomes)
+            .filter(|(_, o)| matches!(o, Some(Some(_))))
+            .filter_map(|((r, l), _)| l.as_deref().map(|l| (r, l))),
+        &strata,
+    );
     let coverage_curve = coverage_curve(&labelled_weights(&sample, &outcomes, &strata));
 
     let mut confusion: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
@@ -455,6 +491,7 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
         confusion,
         abstention,
         kappa,
+        buckets: bucket_scores,
     };
 
     fs::create_dir_all(&params.out).map_err(io_err(&params.out))?;
@@ -464,7 +501,7 @@ pub fn run_score(params: &ScoreParams) -> Result<ScoreReport> {
     Ok(report)
 }
 
-fn weighted_accuracy(
+pub(super) fn weighted_accuracy(
     per_stratum: &[PrecisionRow],
     strata: &StrataSummary,
 ) -> Option<WeightedAccuracy> {

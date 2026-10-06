@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::records::StrataSummary;
-use super::score::{PrecisionRow, ScoreReport};
+use super::score::{PrecisionRow, ScoreReport, WeightedAccuracy};
+use super::score_buckets::BucketScores;
 
 fn pct(v: Option<f64>) -> String {
     v.map_or_else(|| "—".to_string(), |v| format!("{:.1}%", v * 100.0))
@@ -35,6 +36,88 @@ fn table(out: &mut String, title: &str, key: &str, rows: &[PrecisionRow]) {
             pct(r.precision),
             ci,
             r.excluded
+        );
+    }
+    out.push('\n');
+}
+
+fn ci(row: &PrecisionRow) -> String {
+    match (row.ci_low, row.ci_high) {
+        (Some(lo), Some(hi)) => format!("[{lo:.3}, {hi:.3}]"),
+        _ => "—".to_string(),
+    }
+}
+
+fn weighted_line(out: &mut String, what: &str, w: Option<&WeightedAccuracy>) {
+    match w {
+        Some(w) => {
+            let _ = writeln!(
+                out,
+                "- {what} stratum-weighted accuracy: **{}** (95% CI [{:.3}, {:.3}]), covering {} of the population",
+                pct(Some(w.estimate)),
+                w.ci_low,
+                w.ci_high,
+                pct(Some(w.population_covered))
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "- {what} stratum-weighted accuracy: — (no scored labels)"
+            );
+        }
+    }
+}
+
+/// #111: primary and secondary accuracy, overall and per bucket.
+fn buckets_section(out: &mut String, b: &BucketScores) {
+    out.push_str("## Primary and secondary accuracy\n\n");
+    let _ = writeln!(
+        out,
+        "Primary is the bucket of the label versus the bucket of the prediction, over \
+         every scored row. Secondary is the fine category, over rows whose label is in \
+         {}. A prediction with no bucket is wrong at both levels; {} scored rows had a \
+         prediction with no bucket and {} a label the map does not name (left out).\n",
+        if b.secondary_buckets.is_empty() {
+            "no bucket with more than one category".to_string()
+        } else {
+            b.secondary_buckets.join(", ")
+        },
+        b.unmapped_predictions,
+        b.unmapped_labels
+    );
+    out.push_str("| level | n | correct | accuracy | 95% CI (Wilson, unweighted) |\n");
+    out.push_str("|---|---:|---:|---:|---|\n");
+    for row in [&b.primary_counts, &b.secondary_counts] {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} |",
+            row.key,
+            row.n,
+            row.correct,
+            pct(row.precision),
+            ci(row)
+        );
+    }
+    out.push_str(
+        "\n| bucket | categories | labelled | predicted | primary correct | primary | \
+                  secondary correct | secondary | secondary 95% CI (Wilson) |\n",
+    );
+    out.push_str("|---|---|---:|---:|---:|---:|---:|---:|---|\n");
+    for (row, bucket) in b.per_bucket.iter().zip(b.map.buckets()) {
+        let (sc, sp, sci) = match &row.secondary {
+            Some(s) => (s.correct.to_string(), pct(s.precision), ci(s)),
+            None => ("—".into(), "— (one category)".into(), "—".into()),
+        };
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} | {sc} | {sp} | {sci} |",
+            row.bucket,
+            bucket.categories.join(", "),
+            row.labelled,
+            row.predicted,
+            row.primary.correct,
+            pct(row.primary.precision)
         );
     }
     out.push('\n');
@@ -114,6 +197,14 @@ pub(crate) fn render(report: &ScoreReport, strata: &StrataSummary) -> String {
         }
         None => out.push_str("- Stratum-weighted accuracy: — (no scored labels)\n"),
     }
+    // #111: the two-level figures sit next to the fine one.
+    let b = &report.buckets;
+    weighted_line(&mut out, "Primary (bucket)", b.primary.as_ref());
+    weighted_line(
+        &mut out,
+        "Secondary (fine within bucket)",
+        b.secondary.as_ref(),
+    );
     let a = &report.abstention;
     let _ = writeln!(
         out,
@@ -139,6 +230,7 @@ pub(crate) fn render(report: &ScoreReport, strata: &StrataSummary) -> String {
     }
     out.push('\n');
 
+    buckets_section(&mut out, &report.buckets);
     table(
         &mut out,
         "Precision per stratum",

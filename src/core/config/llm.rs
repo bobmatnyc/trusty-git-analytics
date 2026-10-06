@@ -199,7 +199,13 @@ pub enum LlmFallbackScope {
 ///
 /// `#[non_exhaustive]` (#137): outside this crate, start from
 /// [`LlmConfig::default`] and assign fields.
+///
+/// #111 (critic HIGH 3): an unknown key is a load error, so a `jev:`
+/// option written one level too high (`llm.payload_dump_dir`) can never be
+/// ignored and turn a payload dump into live requests.
+/// Test: `tests::misplaced_llm_keys_fail_the_config_load`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct LlmConfig {
     /// LLM provider to use.
@@ -346,5 +352,44 @@ mod tests {
         // Other sources keep reading `api_key_env` as written.
         let or = LlmConfig::default();
         assert_eq!(or.effective_api_key_env(), "OPENROUTER_API_KEY");
+    }
+
+    /// Why (#111, critic HIGH 3): a `jev:` option written one level too high
+    /// was ignored, so `llm: {source: jev, payload_dump_dir: ...}` sent live
+    /// requests instead of writing a dump.
+    /// What: each `jev:` option, and a typo, placed directly under `llm:` is
+    /// a parse error naming the key, both for the section alone and through
+    /// [`crate::core::config::Config::load`]; the documented shape loads.
+    /// Test: this test.
+    #[test]
+    fn misplaced_llm_keys_fail_the_config_load() {
+        for key in [
+            "payload_dump_dir: ./dump",
+            "budget_usd: 0.1",
+            "sensitive_terms: [ledgerd]",
+            "id_patterns: ['Q\\d+']",
+            "name_matcher_bytes: 1024",
+            "modle: jev-1.13.0",
+        ] {
+            let e = serde_yaml::from_str::<LlmConfig>(&format!("source: jev\n{key}\n"))
+                .expect_err(key)
+                .to_string();
+            let name = key.split(':').next().expect("key");
+            assert!(e.contains(name), "{key}: {e}");
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "llm:\n  source: jev\n  payload_dump_dir: ./dump\n").expect("write");
+        assert!(
+            crate::core::config::Config::load(&path).is_err(),
+            "a misplaced payload_dump_dir loaded"
+        );
+        std::fs::write(
+            &path,
+            "llm:\n  source: jev\n  jev:\n    payload_dump_dir: ./dump\n",
+        )
+        .expect("write");
+        let cfg = crate::core::config::Config::load(&path).expect("documented shape");
+        assert!(cfg.llm.expect("llm").jev.payload_dump_dir.is_some());
     }
 }

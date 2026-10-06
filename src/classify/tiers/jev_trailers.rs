@@ -288,6 +288,20 @@ pub(super) fn item_names(p: &Patterns, item: &str) -> Vec<String> {
         .collect()
 }
 
+/// [`names_in`] over every message of `messages`, deduplicated, for a
+/// caller outside the tiers module (#111: the stored commit messages).
+/// Test: `jev_round4_tests::trailer_names_from_stored_commits_are_redacted`.
+///
+/// # Errors
+///
+/// A built-in pattern does not compile.
+pub(crate) fn trailer_names<'a>(
+    messages: impl IntoIterator<Item = &'a str>,
+) -> Result<std::collections::BTreeSet<String>, super::jev_error::JevError> {
+    let p = super::jev_patterns::patterns()?;
+    Ok(messages.into_iter().flat_map(|m| names_in(p, m)).collect())
+}
+
 /// Every name in `text`'s identity trailers and their continuations, plus
 /// the local-part of each address in them (`cc mtolsk` in prose).
 /// Test: `jev_redaction_tests::git_trailers_hide_names_and_emails`.

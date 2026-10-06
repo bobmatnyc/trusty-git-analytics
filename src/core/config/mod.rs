@@ -38,6 +38,8 @@ use crate::core::errors::{Result, TgaError};
 
 pub mod aliases;
 pub mod azdo;
+// #111: the two-level bucket map, `classification.buckets`.
+mod buckets;
 // #5770: hand-written `Debug` for every config section holding a credential.
 mod credential_debug;
 // #5775: hand-written `Serialize` for the same sections — the derived one wrote
@@ -52,6 +54,9 @@ pub mod validator;
 
 pub use aliases::{AliasFile, DeveloperAliasEntry};
 pub use azdo::AzureDevOpsConfig;
+pub use buckets::{
+    Bucket, BucketMap, BucketSource, DEFAULT_BUCKETS, MAP_ONLY_CATEGORIES, NO_BUCKET_LABELS,
+};
 pub use llm::{
     JevOptions, LlmConfig, LlmEffort, LlmFallbackScope, LlmSource, JEV_API_KEY_ENV,
     JEV_DEFAULT_BUDGET_USD, JEV_DEFAULT_NAME_MATCHER_BYTES,
@@ -701,6 +706,21 @@ pub struct ClassificationConfig {
     /// `config.yaml`. Ignored when `no_external` is `true`.
     #[serde(default)]
     pub sources: Vec<crate::classify::sources::SourceConfig>,
+
+    /// #111: the two-level map, bucket name → fine categories. Absent means
+    /// [`BucketMap::default`]; a present map replaces the default whole.
+    /// Read through [`Config::bucket_map`].
+    ///
+    /// ```yaml
+    /// classification:
+    ///   buckets:
+    ///     Maintenance: [bug_fix, devops, security, qa, upkeep]
+    ///     Value Creation: [new_feature, integration, content_design]
+    ///     Foundational Investment: [platform_infrastructure, data_science]
+    ///     Internal Tooling: [internal_tooling]
+    /// ```
+    #[serde(default)]
+    pub buckets: Option<BucketMap>,
 }
 
 /// Deserialize `rules_files` from either a single path string or a list of paths.
@@ -778,6 +798,7 @@ impl Default for ClassificationConfig {
             sources: Vec::new(),
             weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig::default(),
             checkpoint_every: 0,
+            buckets: None,
         }
     }
 }

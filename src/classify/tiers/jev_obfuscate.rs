@@ -135,6 +135,18 @@ pub(crate) struct KnownNames {
     pub(crate) vocab: Vec<String>,
 }
 
+/// Names a run learns from the database before its first request (#111).
+#[derive(Clone, Default)]
+pub(crate) struct RunNames {
+    /// Every person the database knows, including every identity-trailer
+    /// name in every stored commit message (`PERSON_n`).
+    pub(crate) people: Vec<String>,
+    /// Every repository file path the database records (`PATH_n`).
+    pub(crate) paths: Vec<String>,
+    /// Every repository name the database stores (`REPO_n`).
+    pub(crate) repos: Vec<String>,
+}
+
 /// Per-run pseudonymizer.
 ///
 /// Why / What: see the module doc. After a failed matcher rebuild the
@@ -270,6 +282,41 @@ impl Obfuscator {
             if let Some((stem, _)) = base.split_once('.') {
                 if ident(stem) && !self.names.is_common(stem) {
                     changed |= self.names.push(stem, TokenKind::Path);
+                }
+            }
+        }
+        if changed {
+            self.rebuild()?;
+        }
+        Ok(())
+    }
+
+    /// Learn repository and org names the database stores.
+    ///
+    /// Why (#111, critic HIGH 2): `commits.repository` and
+    /// `pull_requests.repository` name repositories the config may not
+    /// list, such as ones found by org-wide discovery.
+    /// What: each name and, for an `owner/name` slug, each part, of two or
+    /// more characters, becomes a `REPO_n` name in the same matcher as
+    /// people, under the same fail-closed size cap. The column default
+    /// `unknown` and classification vocabulary (`platform`, `docs`) are
+    /// skipped, so a category word is never hidden.
+    /// Test: `jev_round4_tests::org_and_repo_names_from_every_source_are_redacted`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::add_people`].
+    pub(crate) fn add_repos(&mut self, repos: &[String]) -> Result<(), JevError> {
+        self.check()?;
+        let mut changed = false;
+        for repo in repos {
+            let parts = repo.split('/').filter(|_| repo.contains('/'));
+            for name in std::iter::once(repo.as_str()).chain(parts).map(str::trim) {
+                let skip = name.chars().count() < 2
+                    || name.eq_ignore_ascii_case("unknown")
+                    || self.names.is_common(name);
+                if !skip {
+                    changed |= self.names.push(name, TokenKind::Repo);
                 }
             }
         }

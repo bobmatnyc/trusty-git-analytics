@@ -257,6 +257,7 @@ fn jev_test_pointers_resolve() {
         ),
         ("jev_review_tests", include_str!("jev_review_tests.rs")),
         ("jev_round3_tests", include_str!("jev_round3_tests.rs")),
+        ("jev_round4_tests", include_str!("jev_round4_tests.rs")),
         ("jev_gateb_tests", include_str!("jev_gateb_tests.rs")),
         ("jev_gateb2_tests", include_str!("jev_gateb2_tests.rs")),
     ];

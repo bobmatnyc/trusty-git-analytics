@@ -207,6 +207,18 @@ pub struct RuleSet {
     /// ```
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub categories: Vec<CategoryDef>,
+
+    /// Optional bucket map (#111, owner ruling 2026-10-06): the consumer's
+    /// secondary → primary map, with the shape and checks of
+    /// `classification.buckets`, which takes precedence over it.
+    ///
+    /// ```yaml
+    /// buckets:
+    ///   Maintenance: [bug_fix, upkeep]
+    ///   Value Creation: [new_feature]
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buckets: Option<crate::core::config::BucketMap>,
 }
 
 /// One entry of a rules file's `categories:` list (#131).
@@ -261,7 +273,7 @@ impl RuleSet {
     /// What: builds a HashMap keyed by `id`, inserts all rules from `self`,
     /// then overwrites / adds rules from `other`. The `extend_defaults` flag
     /// of `other` (the later file) wins. `version` is set to the last
-    /// non-None value seen.
+    /// non-None value seen, and so is `buckets` (#111).
     /// Test: `classify::rules::multi_loader::tests::multiple_files_merge_in_order`.
     pub fn merge(self, other: RuleSet) -> RuleSet {
         use std::collections::HashMap;
@@ -298,6 +310,8 @@ impl RuleSet {
             extend_defaults: other.extend_defaults,
             rules,
             categories,
+            // #111: a later file's map replaces an earlier one whole.
+            buckets: other.buckets.or(self.buckets),
         }
     }
 }

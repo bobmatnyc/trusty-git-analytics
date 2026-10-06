@@ -119,5 +119,6 @@ pub fn default_rules() -> RuleSet {
         extend_defaults: true,
         rules,
         categories: Vec::new(),
+        buckets: None,
     }
 }

@@ -122,6 +122,9 @@ mod jev_gateb2_tests;
 mod jev_round3_tests;
 
 #[cfg(test)]
+mod jev_round4_tests;
+
+#[cfg(test)]
 mod jev_tests;
 
 #[cfg(test)]

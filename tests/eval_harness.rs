@@ -1577,3 +1577,183 @@ fn rules_file_resolves_from_another_cwd() {
     assert!(!out.status.success(), "ran without --config");
     assert!(stderr.contains("--config"), "{stderr}");
 }
+
+/// #111: scheme v2 categories plus `content_design`, the label vocabulary
+/// of the bucket tests.
+const V2: [&str; 11] = [
+    "security",
+    "devops",
+    "qa",
+    "bug_fix",
+    "new_feature",
+    "internal_tooling",
+    "integration",
+    "platform_infrastructure",
+    "upkeep",
+    "data_science",
+    "content_design",
+];
+
+/// Six rows in two strata (`exact` population 300, `catch_all` 100), as
+/// `(sha, stratum, label, predicted)`.
+const BUCKET_ROWS: [(&str, &str, &str, &str); 6] = [
+    ("b0", "exact", "upkeep", "bug_fix"),
+    ("b1", "exact", "upkeep", "platform_infrastructure"),
+    ("b2", "exact", "internal_tooling", "internal_tooling"),
+    ("b3", "exact", "release_merge", "bug_fix"),
+    ("b4", "catch_all", "new_feature", "new_feature"),
+    ("b5", "catch_all", "bug_fix", "uncategorized"),
+];
+
+/// Write [`BUCKET_ROWS`] as sample, strata and one rater file in `d`.
+fn bucket_sample(d: &Path) -> ScoreParams {
+    let lines: Vec<String> = BUCKET_ROWS
+        .iter()
+        .map(|(sha, stratum, _, predicted)| record(sha, stratum, "rule", predicted, 0.9, 1.0))
+        .collect();
+    fs::write(d.join("sample.jsonl"), lines.join("\n") + "\n").expect("sample");
+    let strata = serde_json::json!({
+        "seed": 1, "weeks": 26, "window_start": "a", "window_end": "b",
+        "requested_size": 6, "cap": 5, "population": 400,
+        "strata": {
+            "exact": {"population": 300, "sampled": 4},
+            "catch_all": {"population": 100, "sampled": 2}
+        },
+        "categories": V2
+    });
+    fs::write(d.join("strata.json"), strata.to_string()).expect("strata");
+    let labels: Vec<(&str, &str)> = BUCKET_ROWS.iter().map(|r| (r.0, r.2)).collect();
+    write_labels(&d.join("rater.csv"), &labels);
+    ScoreParams {
+        sample: d.join("sample.jsonl"),
+        strata: None,
+        labels: vec![d.join("rater.csv")],
+        adjudicated: None,
+        categories: None,
+        db: None,
+        out: d.join("report"),
+    }
+}
+
+/// A config whose `classification.buckets` is `buckets` (YAML lines).
+fn bucket_config(d: &Path, buckets: &str) -> Config {
+    let path = d.join("buckets.yaml");
+    fs::write(&path, format!("classification:\n  buckets:\n{buckets}")).expect("config");
+    Config::load(&path).expect("load config")
+}
+
+/// Why: #111 — primary (bucket) and secondary (fine within bucket) are read
+/// next to the fine figure; a wrong derivation moves them.
+/// What: `upkeep`→`bug_fix` is primary-right, secondary-wrong;
+/// `upkeep`→`platform_infrastructure` is wrong at both levels;
+/// `internal_tooling` is primary-scored only; `release_merge` is in neither;
+/// an `uncategorized` prediction is wrong at both. Weighted (0.75 / 0.25):
+/// fine 0.375, primary 0.75·2/3 + 0.25·1/2 = 0.625, secondary
+/// 0.75·0/2 + 0.25·1/2 = 0.125; per-bucket counts and report.md follow.
+/// Test: this function.
+#[test]
+fn score_reports_primary_and_secondary_accuracy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let r = eval::run_score(&bucket_sample(dir.path())).expect("score");
+    assert_eq!((r.scored, r.release_merge), (5, 1));
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    let fine = r.weighted_accuracy.as_ref().expect("fine").estimate;
+    assert!(close(fine, 0.375), "fine {fine}");
+    let b = &r.buckets;
+    let primary = b.primary.as_ref().expect("primary");
+    assert!(
+        close(primary.estimate, 0.625),
+        "primary {}",
+        primary.estimate
+    );
+    assert!(primary.ci_low < 0.625 && primary.ci_high > 0.625);
+    let secondary = b.secondary.as_ref().expect("secondary").estimate;
+    assert!(close(secondary, 0.125), "secondary {secondary}");
+    assert_eq!((b.primary_counts.n, b.primary_counts.correct), (5, 3));
+    assert_eq!((b.secondary_counts.n, b.secondary_counts.correct), (4, 1));
+    assert!(b.secondary_counts.ci_low.is_some());
+    assert_eq!(
+        b.secondary_buckets,
+        ["Maintenance", "Value Creation", "Foundational Investment"]
+    );
+    assert_eq!((b.unmapped_predictions, b.unmapped_labels), (1, 0));
+    let row = |name: &str| b.per_bucket.iter().find(|x| x.bucket == name).expect(name);
+    let m = row("Maintenance");
+    assert_eq!((m.labelled, m.predicted, m.primary.correct), (3, 1, 1));
+    assert_eq!(m.secondary.as_ref().map(|s| (s.n, s.correct)), Some((3, 0)));
+    let it = row("Internal Tooling");
+    assert_eq!((it.labelled, it.predicted, it.primary.correct), (1, 1, 1));
+    assert!(
+        it.secondary.is_none(),
+        "internal_tooling scored at secondary"
+    );
+    assert_eq!(row("Foundational Investment").predicted, 1);
+
+    let md = fs::read_to_string(dir.path().join("report/report.md")).expect("md");
+    assert!(md.contains("Stratum-weighted accuracy: **37.5%**"), "{md}");
+    assert!(md.contains("Primary (bucket) stratum-weighted accuracy: **62.5%**"));
+    assert!(md.contains("Secondary (fine within bucket) stratum-weighted accuracy: **12.5%**"));
+    assert!(md.contains("| Internal Tooling | internal_tooling | 1 | 1 | 1 | 100.0% | — |"));
+    let json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dir.path().join("report/report.json")).expect("json"),
+    )
+    .expect("parse");
+    assert_eq!(json["buckets"]["per_bucket"][0]["labelled"], 3);
+    assert_eq!(json["buckets"]["map"]["Maintenance"][4], "upkeep");
+}
+
+/// Why: #111 — the bucket map is configuration; moving one category must
+/// move the scores, and the fine figure must not move.
+/// What: a config moves `platform_infrastructure` into Maintenance, so
+/// `upkeep`→`platform_infrastructure` becomes primary-right: primary rises
+/// from 0.625 to 0.75·3/3 + 0.25·1/2 = 0.875; secondary and fine stay.
+/// Test: this function.
+#[test]
+fn score_moves_with_a_bucket_override() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let params = bucket_sample(dir.path());
+    let config = bucket_config(
+        dir.path(),
+        "    Maintenance: [bug_fix, devops, security, qa, upkeep, platform_infrastructure]\n    \
+         Value Creation: [new_feature, integration, content_design]\n    \
+         Foundational Investment: [data_science]\n    \
+         Internal Tooling: [internal_tooling]\n",
+    );
+    let map = config.bucket_map();
+    assert_eq!(
+        map.bucket_of("platform_infrastructure"),
+        Some("Maintenance")
+    );
+    let r = eval::run_score_with_buckets(&params, &map).expect("score");
+    let primary = r.buckets.primary.as_ref().expect("primary").estimate;
+    assert!((primary - 0.875).abs() < 1e-9, "primary {primary}");
+    let secondary = r.buckets.secondary.as_ref().expect("secondary").estimate;
+    assert!((secondary - 0.125).abs() < 1e-9, "secondary {secondary}");
+    let fine = r.weighted_accuracy.as_ref().expect("fine").estimate;
+    assert!((fine - 0.375).abs() < 1e-9, "fine {fine}");
+}
+
+/// Why: #111 — a misspelt category in an override is an error, never a
+/// silently unbucketed row.
+/// What: an override naming `upkep` is refused with the name in the error;
+/// a map listing one category in two buckets fails at config load.
+/// Test: this function.
+#[test]
+fn score_rejects_an_unknown_category_in_the_bucket_map() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let params = bucket_sample(dir.path());
+    let config = bucket_config(
+        dir.path(),
+        "    Maintenance: [bug_fix, upkep]\n    Internal Tooling: [internal_tooling]\n",
+    );
+    let err = eval::run_score_with_buckets(&params, &config.bucket_map())
+        .expect_err("an unknown category was accepted");
+    assert!(err.to_string().contains("upkep"), "{err}");
+    let dup = dir.path().join("dup.yaml");
+    fs::write(
+        &dup,
+        "classification:\n  buckets:\n    A: [qa]\n    B: [qa]\n",
+    )
+    .expect("write");
+    assert!(Config::load(&dup).is_err(), "a duplicate category loaded");
+}

@@ -25,6 +25,8 @@ pub mod records;
 pub mod repredict;
 pub mod sample;
 pub mod score;
+// #111: primary (bucket) and secondary scoring.
+pub mod score_buckets;
 pub mod stats;
 // #111: a proportional, seeded subset of a sample for a second rater.
 pub mod subsample;
@@ -47,7 +49,8 @@ use thiserror::Error;
 pub use records::{SampleRecord, StrataSummary, Stratum};
 pub use repredict::{run_repredict, RepredictParams, RepredictSummary};
 pub use sample::{run_sample, SampleParams, SampleSummary};
-pub use score::{run_score, ScoreParams, ScoreReport};
+pub use score::{run_score, run_score_with_buckets, ScoreParams, ScoreReport};
+pub use score_buckets::{BucketRow, BucketScores};
 pub use subsample::{run_subsample, SubsampleParams, SubsampleSummary};
 
 /// Errors raised by the eval harness.
@@ -117,10 +120,7 @@ pub(crate) fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> EvalError + 
 ///
 /// A rules file that fails to load or compile.
 pub fn config_categories(config: &crate::core::config::Config) -> Result<Vec<String>> {
-    let pipeline = crate::classify::ClassificationPipeline::new(config.clone());
-    let engine = pipeline.build_rule_engine()?;
-    let taxonomy = engine.taxonomy().all().iter().map(|d| d.name.clone());
-    Ok(taxonomy.chain(pipeline.rule_categories()?).collect())
+    Ok(crate::classify::ClassificationPipeline::new(config.clone()).known_categories()?)
 }
 
 /// Open a tga database for the harness, refusing any handle that can write.

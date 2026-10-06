@@ -407,6 +407,7 @@ impl ClassificationPipeline {
             custom.rules.iter().map(|r| r.id.clone()).collect();
         merged.rules.retain(|r| !custom_ids.contains(&r.id));
         merged.rules.extend(custom.rules);
+        merged.buckets = custom.buckets; // #111: the consumer's map, if any
         Ok((merged, sources))
     }
 

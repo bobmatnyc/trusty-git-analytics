@@ -1,7 +1,8 @@
 //! `tga classify` — stage 2 (classification cascade) entry point.
 
+use tga::classify::pipeline_buckets::bucket_counts;
 use tga::classify::ClassificationPipeline;
-use tga::core::config::{ClassificationConfig, Config};
+use tga::core::config::{BucketMap, BucketSource, ClassificationConfig, Config};
 use tga::core::db::{CheckpointMode, Database};
 
 use crate::commands::args::ClassifyArgs;
@@ -98,6 +99,8 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
         return Ok(());
     }
 
+    // #111: check the bucket map before any write; it is a derived view.
+    let (buckets, bucket_source) = pipeline.bucket_map_with_source()?;
     let stats = pipeline.run(db).await?;
 
     // Issue #298: call PRAGMA wal_checkpoint(TRUNCATE) on clean exit to flush
@@ -125,9 +128,35 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
             println!("  {category}: {count}");
         }
     }
+    print_buckets(&buckets, bucket_source, &stats.by_category);
     print_llm_usage(&stats.llm_usage);
     print_skipped_recovery(&stats.llm_usage, &cfg_source, db)?;
     Ok(())
+}
+
+/// #111: the per-category counts rolled up to the bucket map in effect, a
+/// derived view; nothing is stored. The header names the map's source.
+fn print_buckets(
+    buckets: &BucketMap,
+    source: BucketSource,
+    by_category: &std::collections::HashMap<String, usize>,
+) {
+    let rows = bucket_counts(
+        buckets,
+        by_category.iter().map(|(c, &n)| (c.as_str(), n as u64)),
+    );
+    if rows.is_empty() {
+        return;
+    }
+    println!("By bucket (map from {}):", source.describe());
+    for row in rows {
+        let parts: Vec<String> = row
+            .categories
+            .iter()
+            .map(|(c, n)| format!("{c} {n}"))
+            .collect();
+        println!("  {}: {} ({})", row.bucket, row.total, parts.join(", "));
+    }
 }
 
 /// When LLM calls were skipped (spend cap or payload dump), write their SHAs

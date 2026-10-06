@@ -33,6 +33,10 @@ pub(crate) enum JevError {
     /// unmatched; every later message fails closed.
     #[error("jev pseudonymizer is disabled for the rest of the run after a failed rebuild; nothing was sent")]
     Poisoned,
+    /// A panic while the pseudonymizer's lock was held left it poisoned; its
+    /// name set may be half-updated, so nothing more is sent (#111).
+    #[error("jev pseudonymizer lock was poisoned by a panic; nothing was sent")]
+    LockPoisoned,
     /// The category set is empty or larger than Jev accepts.
     #[error("jev needs 1 to {max} categories, got {got}")]
     CategoryCount {

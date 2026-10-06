@@ -614,9 +614,9 @@ impl ClassificationEngine {
         Some(call)
     }
 
-    /// Hand the LLM tier the run's messages, in commit order, and the run's
-    /// author names before the concurrent calls start (#111: every name is
-    /// known to the Jev pseudonymizer before its first request).
+    /// Hand the LLM tier the run's messages, in commit order, and the names
+    /// the database records before the concurrent calls start (#111: every
+    /// name is known to the Jev pseudonymizer before its first request).
     ///
     /// # Errors
     ///
@@ -624,11 +624,10 @@ impl ClassificationEngine {
     pub(crate) fn llm_prepare(
         &self,
         messages: &[&str],
-        people: &[String],
-        paths: &[String],
+        names: &crate::classify::tiers::jev_obfuscate::RunNames,
     ) -> std::result::Result<(), crate::classify::tiers::jev_error::JevError> {
         match &self.llm {
-            Some(llm) => llm.prepare_batch(messages, people, paths),
+            Some(llm) => llm.prepare_batch(messages, names),
             None => Ok(()),
         }
     }
@@ -776,6 +775,7 @@ mod tests {
                 confidence: 0.9,
             }],
             categories: Vec::new(),
+            buckets: None,
         };
         let engine = ClassificationEngine::new(ruleset, ClassificationEngineConfig::default())
             .expect("engine builds");

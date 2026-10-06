@@ -449,7 +449,7 @@ fn legacy_jev_provider_is_an_error() {
     assert!(err.contains("llm.source: jev"), "{err}");
 }
 
-const RULES: &str = "extend_defaults: false
+pub(super) const RULES: &str = "extend_defaults: false
 rules:
   - id: infra
     category: platform
@@ -499,11 +499,23 @@ pub(super) async fn run_pipeline_with(
     rows: &[(&str, &str, &str, bool)],
     setup: impl FnOnce(&Database),
 ) -> (crate::classify::ClassificationStats, Database) {
+    run_pipeline_cfg(server, rows, RULES, setup, |_| {}).await
+}
+
+/// [`run_pipeline_with`] over the rules file `rules_yaml`, with `tweak`
+/// applied to the config before the pipeline is built (#111).
+pub(super) async fn run_pipeline_cfg(
+    server: &MockServer,
+    rows: &[(&str, &str, &str, bool)],
+    rules_yaml: &str,
+    setup: impl FnOnce(&Database),
+    tweak: impl FnOnce(&mut Config),
+) -> (crate::classify::ClassificationStats, Database) {
     let mut rules = tempfile::Builder::new()
         .suffix(".yaml")
         .tempfile()
         .expect("tempfile");
-    rules.write_all(RULES.as_bytes()).expect("write rules");
+    rules.write_all(rules_yaml.as_bytes()).expect("write rules");
     let llm_cfg = LlmConfig {
         source: LlmSource::Jev,
         jev: JevOptions {
@@ -517,7 +529,7 @@ pub(super) async fn run_pipeline_with(
         org: Some("acme-fin".into()),
         ..RepositoryConfig::default()
     };
-    let config = Config {
+    let mut config = Config {
         repositories: vec![repo],
         classification: Some(ClassificationConfig {
             rules_files: vec![rules.path().to_path_buf()],
@@ -530,6 +542,7 @@ pub(super) async fn run_pipeline_with(
         llm: Some(llm_cfg.clone()),
         ..Config::default()
     };
+    tweak(&mut config);
     let pipeline = ClassificationPipeline::new(config);
     let creds = CredentialSource::fixed([("TYPESAFE_API_KEY", TEST_KEY)]);
     let llm = LlmClassifier::from_llm_config_with_creds(&llm_cfg, JEV_MODEL, &creds)
@@ -600,6 +613,77 @@ async fn outbound_body_carries_no_sensitive_string() {
             (provider.as_str(), model.as_str(), input),
             ("jev", JEV_MODEL, Some(150))
         );
+    }
+}
+
+/// Why (#111, owner ruling 2026-10-06): the consumer owns the bucket map. A
+/// map it supplies widens Jev's one question so each arm can land in every
+/// bucket; tga's built-in fallback map must not add categories the rules
+/// and Bedrock never see. The bucket pair is derived, never asked for.
+/// What: the rules emit `platform` and define `feature`. With no consumer
+/// map the question offers those two only; with a map in the config, or in
+/// the rules file, it also offers that map's `bug_fix` and
+/// `content_design`, each exactly once, and no second question.
+/// Test: this function.
+#[tokio::test]
+async fn jev_choices_cover_every_bucket_category() {
+    const MAP: &str =
+        "Maintenance: [bug_fix, platform]\nValue Creation: [feature, content_design]\n";
+    async fn criteria(rules: &str, buckets: Option<&str>) -> Vec<String> {
+        let server = server_with(reply("CAT_1", probs("CAT_1"), 150)).await;
+        let buckets = buckets.map(|b| serde_yaml::from_str(b).expect("map"));
+        let (stats, _db) = run_pipeline_cfg(
+            &server,
+            &[("zzz", "a", "a@x", false)],
+            rules,
+            |_| {},
+            |c| c.classification.as_mut().expect("section").buckets = buckets,
+        )
+        .await;
+        assert_eq!(stats.llm_usage.calls, 1);
+        let sent = bodies(&server).await;
+        let questions = sent[0]["questions"].as_object().expect("questions");
+        assert_eq!(questions.len(), 1, "{questions:?}");
+        questions["category"]["criteria"]
+            .as_object()
+            .expect("criteria")
+            .values()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    }
+    let offered = |texts: &[String], name: &str| {
+        texts
+            .iter()
+            .filter(|t| t.eq_ignore_ascii_case(name))
+            .count()
+    };
+
+    let fallback = criteria(RULES, None).await;
+    assert_eq!(offered(&fallback, "platform"), 1, "{fallback:?}");
+    for fine in crate::core::config::BucketMap::default().fine_categories() {
+        assert_eq!(
+            offered(&fallback, fine),
+            0,
+            "fallback added {fine}: {fallback:?}"
+        );
+    }
+    // 2 rule categories + 2 abstain codes.
+    assert_eq!(fallback.len(), 4, "{fallback:?}");
+
+    let in_rules = format!(
+        "{RULES}buckets:\n  Maintenance: [bug_fix, platform]\n  \
+         Value Creation: [feature, content_design]\n"
+    );
+    for texts in [
+        criteria(RULES, Some(MAP)).await,
+        criteria(&in_rules, None).await,
+    ] {
+        for fine in ["platform", "bug_fix", "content_design"] {
+            assert_eq!(offered(&texts, fine), 1, "{fine}: {texts:?}");
+        }
+        // 2 rule categories + 2 map-only categories + 2 abstain codes.
+        assert_eq!(texts.len(), 6, "{texts:?}");
     }
 }
 

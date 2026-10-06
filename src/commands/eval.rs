@@ -52,14 +52,15 @@ pub enum EvalSubcommand {
     /// method, rule_id and confidence with what the config's rules give for
     /// that commit in --db. Writes <out>.jsonl and <out>.provenance.json (config
     /// and rules-file BLAKE3 hashes, tga version). A row whose commit is not in
-    /// --db is an error. Requires an explicit --config.
+    /// --db is an error. Requires an explicit --config; --rules replaces its
+    /// rules file for this run.
     #[command(after_help = PRIVACY)]
     Repredict(RepredictArgs),
     /// Score rater labels against a sample: precision per rule, method and stratum.
     ///
     /// Valid labels are the categories recorded in strata.json, or the taxonomy
-    /// and rule categories of the config when --config is passed explicitly,
-    /// plus every predicted category in the sample, `unclear`, `mixed` and
+    /// and rule categories of the config when --config or --rules is passed
+    /// explicitly, plus every predicted category in the sample, `unclear`, `mixed` and
     /// `release_merge`. Those three are reported per label but score as no
     /// answer. Merge commits (2+ parents) are excluded with their labels; a
     /// sample written without merge flags needs --db to resolve them.
@@ -133,6 +134,22 @@ pub struct RepredictArgs {
     /// .provenance.json must not exist. Required.
     #[arg(long)]
     pub out: PathBuf,
+    /// Rules file for this run, in place of `classification.rules_file`
+    /// (as `tga rules --rules`). Its categories and `buckets:` map apply.
+    #[arg(long)]
+    pub rules: Option<PathBuf>,
+}
+
+/// #111: `--rules` stands in for `classification.rules_file`, as in
+/// `tga rules --rules`.
+fn with_rules(mut config: Config, rules: Option<PathBuf>) -> Config {
+    if let Some(path) = rules {
+        config
+            .classification
+            .get_or_insert_with(Default::default)
+            .rules_files = vec![path];
+    }
+    config
 }
 
 /// Flags for `tga eval score`.
@@ -164,6 +181,11 @@ pub struct ScoreArgs {
     /// Output directory for report.md and report.json. Required.
     #[arg(long)]
     pub out: PathBuf,
+    /// Rules file for this run, in place of `classification.rules_file`
+    /// (as `tga rules --rules`). Its categories are valid labels and its
+    /// `buckets:` map applies when the config has none.
+    #[arg(long)]
+    pub rules: Option<PathBuf>,
 }
 
 fn warn_if_in_repo(out: &Path) {
@@ -339,7 +361,7 @@ fn run_repredict(
     let summary = eval::run_repredict(&RepredictParams {
         sample: a.sample,
         db: a.db,
-        config,
+        config: with_rules(config, a.rules),
         config_path: config_path.to_path_buf(),
         out: a.out,
     })
@@ -373,20 +395,31 @@ fn run_score(a: ScoreArgs, config: Config, config_explicit: bool) -> Result<()> 
         bail!("pass at most two --labels files");
     }
     warn_if_in_repo(&a.out);
-    let categories = if config_explicit {
+    let explicit = config_explicit || a.rules.is_some();
+    let config = with_rules(config, a.rules);
+    let categories = if explicit {
         Some(eval::config_categories(&config).context("loading categories from --config")?)
     } else {
         None
     };
-    let report = eval::run_score(&ScoreParams {
-        sample: a.sample,
-        strata: a.strata,
-        labels: a.labels,
-        adjudicated: a.adjudicated,
-        categories,
-        db: a.db,
-        out: a.out.clone(),
-    })
+    // #111: `classification.buckets`, else the rules file's map, else the
+    // built-in fallback.
+    let (buckets, source) = tga::classify::ClassificationPipeline::new(config)
+        .effective_bucket_map()
+        .context("loading the bucket map")?;
+    println!("Bucket map from {}", source.describe());
+    let report = eval::run_score_with_buckets(
+        &ScoreParams {
+            sample: a.sample,
+            strata: a.strata,
+            labels: a.labels,
+            adjudicated: a.adjudicated,
+            categories,
+            db: a.db,
+            out: a.out.clone(),
+        },
+        &buckets,
+    )
     .context("tga eval score")?;
 
     println!(
@@ -417,6 +450,19 @@ fn run_score(a: ScoreArgs, config: Config, config_explicit: bool) -> Result<()> 
             w.ci_low * 100.0,
             w.ci_high * 100.0
         );
+    }
+    for (what, w) in [
+        ("Primary (bucket)", &report.buckets.primary),
+        ("Secondary (fine within bucket)", &report.buckets.secondary),
+    ] {
+        if let Some(w) = w {
+            println!(
+                "{what} stratum-weighted accuracy {:.1}% [{:.1}%, {:.1}%]",
+                w.estimate * 100.0,
+                w.ci_low * 100.0,
+                w.ci_high * 100.0
+            );
+        }
     }
     println!("Abstention share {:.1}%", report.abstention.share * 100.0);
     if let Some(k) = report.kappa.as_ref().and_then(|k| k.kappa) {

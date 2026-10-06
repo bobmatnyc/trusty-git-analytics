@@ -86,6 +86,28 @@ Stage 2 only — run classification cascade against cached commits.
 | `--show-jira-signals` | false | Emit JIRA signal diagnostics per commit |
 | `--validate-coverage` | false | Exit non-zero if coverage below threshold |
 | `--coverage-threshold <PCT>` | 20.0 | Minimum classification coverage % |
+| `--rules <PATH>` | — | Rules file for this run, loaded before any `classification.rules_file` (a later file wins on rule ids and on `buckets:`); its `buckets:` map applies when the config has no `classification.buckets` (#111) |
+
+The "By bucket" breakdown names the bucket map's source: `classification.buckets`,
+the rules file, or tga's built-in fallback (#111).
+
+### `tga rules list`
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--rules <PATH>` | — | Rules file in place of `classification.rules_file` |
+| `--format <text\|json>` | `text` | `json` prints `subcategory_to_top_level`, `top_level_categories` and `bucket_map` |
+
+`bucket_map` is the checked bucket map in effect and its source (#111):
+`{"source": "config" | "rules_file" | "fallback", "buckets": {"<bucket>": ["<category>", …]}}`,
+buckets in map order.
+
+### `tga eval score` / `tga eval repredict`
+
+Both take `--rules <PATH>`: the rules file for this run, in place of
+`classification.rules_file`, as `tga rules list --rules` (#111). On `score` its
+categories are valid labels and its `buckets:` map applies when the config has
+no `classification.buckets`. See `docs/eval-harness.md` for every other flag.
 
 ### `tga report`
 

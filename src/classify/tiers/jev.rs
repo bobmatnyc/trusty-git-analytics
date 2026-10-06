@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 use crate::classify::rules::CategoryDef;
 use crate::classify::tiers::jev_budget::JevBudget;
 use crate::classify::tiers::jev_error::JevError;
-use crate::classify::tiers::jev_obfuscate::{KnownNames, ObfuscatedText, Obfuscator};
+use crate::classify::tiers::jev_obfuscate::{KnownNames, ObfuscatedText, Obfuscator, RunNames};
 use crate::classify::tiers::jev_response::interpret;
 use crate::classify::tiers::llm::LlmClassifier;
 use crate::classify::tiers::llm_prompt::LlmCall;
@@ -427,6 +427,20 @@ impl JevClassifier {
         &self.budget
     }
 
+    /// Poison the pseudonymizer's lock, as a panic while holding it would.
+    #[cfg(test)]
+    pub(crate) fn poison_obfuscator_lock(&self) {
+        let Some(ctx) = &self.context else { return };
+        std::thread::scope(|s| {
+            let held = s.spawn(|| {
+                let _guard = ctx.obfuscator.lock();
+                panic!("test: poison the pseudonymizer lock");
+            });
+            assert!(held.join().is_err(), "the holder did not panic");
+        });
+        assert!(ctx.obfuscator.is_poisoned());
+    }
+
     /// Learn the run's names, then pseudonymize `messages` in order.
     ///
     /// Why (#111): every author and trailer name of the run must be known
@@ -443,28 +457,33 @@ impl JevClassifier {
     /// The name matcher cannot be built; nothing may be sent this run.
     #[cfg(test)]
     pub(crate) fn prepare(&self, messages: &[&str], people: &[String]) -> Result<(), JevError> {
-        self.prepare_with_files(messages, people, &[])
+        let names = RunNames {
+            people: people.to_vec(),
+            ..RunNames::default()
+        };
+        self.prepare_run(messages, &names)
     }
 
-    /// The run's preparation (see `prepare`), also learning the repository
-    /// file `paths` the database records (see [`Obfuscator::add_files`]).
-    /// Test: `jev_gateb2_tests::db_file_names_are_redacted`.
+    /// The run's preparation (see `prepare`) over the names the database
+    /// records: people, file paths ([`Obfuscator::add_files`]) and
+    /// repositories ([`Obfuscator::add_repos`]).
+    /// Test: `jev_gateb2_tests::db_file_names_are_redacted`,
+    /// `jev_round4_tests::org_and_repo_names_from_every_source_are_redacted`,
+    /// `jev_round4_tests::poisoned_obfuscator_lock_sends_nothing`.
     ///
     /// # Errors
     ///
-    /// The name matcher cannot be built; nothing may be sent this run.
-    pub(crate) fn prepare_with_files(
-        &self,
-        messages: &[&str],
-        people: &[String],
-        paths: &[String],
-    ) -> Result<(), JevError> {
+    /// The name matcher cannot be built, or the pseudonymizer's lock is
+    /// poisoned; nothing may be sent this run.
+    pub(crate) fn prepare_run(&self, messages: &[&str], names: &RunNames) -> Result<(), JevError> {
         let Some(ctx) = &self.context else {
             return Ok(());
         };
-        let mut obf = ctx.obfuscator.lock().unwrap_or_else(|p| p.into_inner());
-        obf.add_people(people)?;
-        obf.add_files(paths)?;
+        // #111: a poisoned lock may guard a half-updated name set; fail closed.
+        let mut obf = ctx.obfuscator.lock().map_err(|_| JevError::LockPoisoned)?;
+        obf.add_people(&names.people)?;
+        obf.add_files(&names.paths)?;
+        obf.add_repos(&names.repos)?;
         obf.learn_trailers(&messages.join("\n"))?;
         for m in messages {
             obf.obfuscate(m)?;
@@ -495,9 +514,11 @@ impl JevClassifier {
             return LlmCall::failed(None);
         }
         let dumping = matches!(self.mode, Mode::Dump(_));
-        let text = {
-            let mut obf = ctx.obfuscator.lock().unwrap_or_else(|p| p.into_inner());
-            obf.obfuscate(message).map(|t| {
+        // #111: a poisoned lock fails the call closed, like any other
+        // pseudonymizer error.
+        let text = match ctx.obfuscator.lock() {
+            Err(_) => Err(JevError::LockPoisoned),
+            Ok(mut obf) => obf.obfuscate(message).map(|t| {
                 // #111: the on-host token map, only for a payload dump.
                 let map = if dumping {
                     obf.originals_in(&t)
@@ -505,7 +526,7 @@ impl JevClassifier {
                     BTreeMap::new()
                 };
                 (t, map)
-            })
+            }),
         };
         let (text, originals) = match text {
             Ok(t) => t,
@@ -673,21 +694,20 @@ impl LlmClassifier {
         self.jev.is_some()
     }
 
-    /// Give the Jev pseudonymizer the run's names, file paths and messages
-    /// before the first request (see [`JevClassifier::prepare_with_files`]);
+    /// Give the Jev pseudonymizer the database's names and the run's
+    /// messages before the first request (see [`JevClassifier::prepare_run`]);
     /// a no-op otherwise.
     ///
     /// # Errors
     ///
-    /// As [`JevClassifier::prepare_with_files`].
+    /// As [`JevClassifier::prepare_run`].
     pub(crate) fn prepare_batch(
         &self,
         messages: &[&str],
-        people: &[String],
-        paths: &[String],
+        names: &RunNames,
     ) -> Result<(), JevError> {
         match &self.jev {
-            Some(jev) => jev.prepare_with_files(messages, people, paths),
+            Some(jev) => jev.prepare_run(messages, names),
             None => Ok(()),
         }
     }

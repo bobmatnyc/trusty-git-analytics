@@ -10,6 +10,7 @@ The configuration file is YAML, matching the schema used by the Python predecess
 repositories: []          # list[RepositoryConfig], required
 database: ~               # path  — SQLite DB override (added v2.2.2, issue #406)
 llm: {}                   # LlmConfig — top-level LLM section (added v2.2.2, issue #407)
+classification: {}        # ClassificationConfig — rules, LLM tier knobs, `buckets` (#111)
 github: {}                # GitHubConfig
 bitbucket: {}             # BitbucketConfig (Cloud only)
 developer_aliases: {}     # dict[str, list[str]] — inline identity alias map
@@ -72,6 +73,10 @@ an `llm:` section emits a `tracing::warn!` deprecation message.
 | `region` | string | None | AWS region (Bedrock only). When absent, the AWS SDK resolves the region from the environment (`AWS_DEFAULT_REGION`, profile, etc.). |
 | `model` | string | provider-appropriate default | Provider-specific model id (see below). |
 | `jev` | map | see below | `source: jev` settings: `budget_usd`, `sensitive_terms`, `payload_dump_dir`, `id_patterns`, `name_matcher_bytes`. Ignored by the other sources. |
+
+Any other key under `llm:` is a load error (#111), as it is under `llm.jev:`.
+A `jev` option written one level too high (`llm.payload_dump_dir`) therefore
+stops the run instead of being ignored.
 
 #### Source variants
 
@@ -170,8 +175,8 @@ rules can emit. A category may not be named `NO_MATCH` or
   `Helped-by`, `cc`), `@` mentions and roster names from `team:` and
   `developer_aliases` (`PERSON_n`), ticket keys such as `ABC-123`
   (`TICKET_n`), URLs (`URL_n`), host names, domains and IPv4 addresses
-  (`HOST_n`), file paths and source file names (`PATH_n`), repository names,
-  directory names and owners from `repositories:` (`REPO_n`), and every
+  (`HOST_n`), file paths and source file names (`PATH_n`), repository, org
+  and workspace names (`REPO_n`, see below), and every
   `jev.sensitive_terms` entry (`TERM_n`). Numbers are assigned in first-seen
   order and are stable for the run; other text is sent unchanged. The
   pseudonym → original map stays in memory and is never sent or logged.
@@ -181,7 +186,10 @@ rules can emit. A category may not be named `NO_MATCH` or
   `pr_reviewers.reviewer_id` and `display_name`, `linear_issues.assignee`
   Jira changelog and comment authors (`fact_ticket_transitions.author`,
   `fact_jira_comment_detail.author`), reporters (`fact_pm_effort.pm_name`)
-  and the `author_email` local-parts of the weekly fact tables. A known
+  and the `author_email` local-parts of the weekly fact tables, and every
+  name in an identity trailer of every commit message the database stores,
+  classified or not (#111). `--since`, `--repos` and `--shas` narrow the
+  commits sent, never the names learned. A known
   name is matched whole; a multi-word display name is also matched by its
   parts, including hyphen parts and either apostrophe (`O'Brien`,
   `O’Brien`). A single-token login is matched whole only, and bot accounts
@@ -199,6 +207,29 @@ rules can emit. A category may not be named `NO_MATCH` or
   on their own line, but teach the run a name only when they look like one
   (`Jane Roe`, `jroe-acme`); `Tested with: chrome and firefox` teaches
   nothing.
+- **Repository, org and workspace names** (`REPO_n`, #111): from the
+  config, `repositories[].name`, `.org` and the path basename,
+  `github.org`, `github.orgs` and `github.repo`, `bitbucket.workspace`,
+  `bitbucket.workspaces` and `bitbucket.repo_slug`, the Azure DevOps
+  organisation (from `pm.azure_devops.organization_url`) and its `project`
+  and `projects`, the Jira site name (`acme` in
+  `jira.url: https://acme.atlassian.net`), and every
+  `classification.repo_categories` key that is not a glob; from the
+  database, every distinct `repository` in `commits` and `pull_requests`.
+  An `owner/name` slug also gives each part. Names are matched whole, in
+  any case, hyphens included (`port acme-fin invoicing-api client` →
+  `port REPO_1 REPO_2 client`). A database name that is the column default
+  `unknown` or classification vocabulary (`platform`, `docs`) is not
+  learned. Database names share the name matcher, its size cap and its
+  fail-closed rebuild with people.
+- **Stored trailer scan cost:** the trailer names of stored commits are
+  read in one pass over `commits.message`, skipping messages with no `:`
+  in SQL. Measured on a synthetic 300,000-commit database (a quarter of
+  the messages one-line, a quarter multi-line with no trailer, half with
+  one or two trailers; 2,250 distinct names): the scan takes 0.25 s in a
+  release build (3.5 s in a debug build), and learning the names and
+  rebuilding the matcher 15 ms more. It runs once per Jev run, before the
+  first request.
 - **Categories:** option keys are pseudonym codes (`CAT_1`…). Each code's
   criterion text is the category's description, or — when it has none — the
   category name itself, sent verbatim: it is operator configuration, not
@@ -316,6 +347,89 @@ comment out the `llm:` block.
 `api_key_env` stores the **variable name** (e.g. `OPENROUTER_API_KEY`), never
 the key value. The actual secret is read from the environment at runtime. Never
 commit API keys to the config file.
+
+---
+
+### `classification.buckets` — two-level bucket map (#111)
+
+A classification has two levels. The **primary** is a bucket; the
+**secondary** is the fine category within it. A bucket map maps each bucket
+name to its fine categories, in report order.
+
+The consumer owns the map (owner ruling 2026-10-06): the downstream
+consumer defines the secondary categories, their rules and the
+secondary → primary map, and supplies them as config. tga classifies; its
+built-in map is only a fallback for a consumer that supplies none. The map
+in effect is the first of:
+
+1. `classification.buckets` in the main config;
+2. a top-level `buckets:` map in the rules file (`classification.rules_file`,
+   or the file `--rules` names on `tga classify`, `tga eval score`,
+   `tga eval repredict` and `tga rules list`). With several rules files, a later
+   file's map replaces an earlier one whole;
+3. tga's built-in fallback:
+
+```yaml
+classification:
+  buckets:
+    Maintenance: [bug_fix, devops, security, qa, upkeep]
+    Value Creation: [new_feature, integration, content_design]
+    Foundational Investment: [platform_infrastructure, data_science]
+    Internal Tooling: [internal_tooling]
+```
+
+A rules file carrying its own map:
+
+```yaml
+extend_defaults: false
+rules:
+  - id: defect
+    category: bug_fix
+    keywords: ["fix:"]
+  - id: deps
+    category: upkeep
+    keywords: ["chore(deps)"]
+  - id: feat
+    category: new_feature
+    keywords: ["feat:"]
+categories:
+  - name: bug_fix
+    description: Corrects behaviour that was wrong.
+buckets:
+  Maintenance: [bug_fix, upkeep]
+  Value Creation: [new_feature]
+```
+
+`tga rules list --format json` prints the map in effect and its source
+under `bucket_map` (`{"source": "config" | "rules_file" | "fallback",
+"buckets": {...}}`); `tga classify` and `tga eval score` name the source on
+the console.
+
+- A present map replaces the lower levels whole; to move one category, copy
+  the table and edit it. A rules-file map has the same shape and the same
+  checks as `classification.buckets`.
+- Bucket names are free text. Category names are matched case-insensitively.
+- Load-time errors: no bucket, a blank or duplicate bucket name, a bucket
+  with no categories, a category in two buckets, or a no-answer label
+  (`unclear`, `mixed`, `release_merge`, `uncategorized`) in the map.
+- A map other than the default must name only categories the config knows
+  (its taxonomy and rules files). `content_design` is always accepted. An
+  unknown category is an error at `tga classify`, at `tga eval score`, and
+  when a Jev tier starts; it is never dropped silently. The default map is
+  accepted with any config, so a config with another category scheme still
+  loads; its categories then have no bucket.
+- `unclear`, `mixed` and `release_merge` have no bucket. A predicted
+  `uncategorized`, or any category the map does not name, has no bucket and
+  is wrong at both levels.
+- The pair is derived from the fine category, the same way for every arm
+  (rules, Bedrock, Jev). Nothing is stored and there is no migration:
+  `tga classify` prints a derived "By bucket" breakdown, and `tga eval score`
+  reports primary and secondary accuracy (see `docs/eval-harness.md`).
+- With `llm.source: jev`, the one category question per commit offers the
+  rules' categories and, when the consumer supplies the map (level 1 or 2),
+  every fine category in it. The built-in fallback adds no category to the
+  question: its categories reach Jev only through the rules, as they reach
+  Bedrock and the other sources.
 
 ---
 
