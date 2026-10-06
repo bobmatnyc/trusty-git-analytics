@@ -106,6 +106,9 @@ impl ClassificationResult {
 }
 
 #[cfg(test)]
+mod jev_context_tests;
+
+#[cfg(test)]
 mod jev_obfuscate_tests;
 
 #[cfg(test)]

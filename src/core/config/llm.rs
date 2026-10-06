@@ -524,6 +524,54 @@ mod tests {
         assert!(cfg.llm.expect("llm").jev.obfuscate);
     }
 
+    /// Why (#111): `llm.context` is a real field under `deny_unknown_fields`,
+    /// and a typo in one of its items must fail the load, not silently send
+    /// less context than the operator asked for.
+    /// What: the three items and both caps load through
+    /// [`crate::core::config::Config::load`]; the caps default to 30 paths
+    /// and 2048 bytes; an unknown item, or a bare scalar instead of a list,
+    /// fails the load and the error names the item.
+    /// Test: this test.
+    #[test]
+    fn llm_context_items_parse_and_unknown_items_fail_the_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let load = |yaml: &str| {
+            std::fs::write(&path, yaml).expect("write");
+            crate::core::config::Config::load(&path)
+        };
+        let cfg = load(
+            "llm:\n  source: openrouter\n  context: [paths, pr_title, issue_type]\n  \
+             context_max_paths: 5\n  context_max_path_bytes: 100\n",
+        )
+        .unwrap_or_else(|e| panic!("documented shape: {e}"));
+        let llm = serde_yaml::to_value(cfg.llm.expect("llm")).expect("serialize");
+        assert_eq!(
+            llm["context"],
+            serde_yaml::from_str::<serde_yaml::Value>("[paths, pr_title, issue_type]")
+                .expect("yaml")
+        );
+        assert_eq!(llm["context_max_paths"], serde_yaml::Value::from(5));
+        assert_eq!(llm["context_max_path_bytes"], serde_yaml::Value::from(100));
+
+        let default = serde_yaml::to_value(LlmConfig::default()).expect("serialize");
+        assert_eq!(default["context"], serde_yaml::Value::Sequence(Vec::new()));
+        assert_eq!(default["context_max_paths"], serde_yaml::Value::from(30));
+        assert_eq!(
+            default["context_max_path_bytes"],
+            serde_yaml::Value::from(2048)
+        );
+
+        for (yaml, named) in [
+            ("llm:\n  context: [paths, diff]\n", "diff"),
+            ("llm:\n  context: [PR_TITLE]\n", "PR_TITLE"),
+            ("llm:\n  context: paths\n", "paths"),
+        ] {
+            let e = load(yaml).expect_err(yaml).to_string();
+            assert!(e.contains(named), "{yaml:?}: {e}");
+        }
+    }
+
     /// #111: a duplicate key the typed parse accepts must not skip the check.
     #[test]
     fn misplaced_top_level_jev_key_fails_beside_a_duplicate_key() {
