@@ -2475,7 +2475,9 @@ async fn a_search_daemon_that_never_comes_up_refuses_the_audit() {
 /// What a search-guard call in this fixture waits on: a real forked `sh` reaching
 /// its `touch`. Only the OS scheduler decides when that happens, so the ceiling
 /// has to absorb a loaded machine. `spin_until_ready` polls every 50ms and returns
-/// on the first 200, so a wide ceiling costs an idle run nothing.
+/// on the first 200, so a wide ceiling costs an idle run nothing. #154: the
+/// stub's first-exec scan is NOT inside it — `degraded_stack` runs the stub once
+/// before the guard does.
 #[cfg(unix)]
 const FORK_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -2515,10 +2517,18 @@ async fn degraded_stack(
         dir,
         "trusty-search-stub",
         &format!(
-            "#!/bin/sh\ntouch {}\nsleep 30\n",
+            "#!/bin/sh\n[ \"$1\" = --warm ] && exit 0\ntouch {}\nsleep 30\n",
             flag.to_str().expect("a UTF-8 temp path")
         ),
     );
+    // See #154: macOS assesses a new unsigned executable on its first exec,
+    // measured at 2-15 s on a busy build host. Pay that here, so FORK_BUDGET
+    // times the guard's spawn and poll rather than the host's scan queue.
+    let warmed = std::process::Command::new(&search_stub)
+        .arg("--warm")
+        .status()
+        .expect("run the search stub once");
+    assert!(warmed.success(), "the warm-up run exits 0: {warmed}");
     let analyze_stub = stub_binary(dir, "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
 
     let mut search = search_guard_on(
