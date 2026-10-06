@@ -2804,19 +2804,28 @@ exit 0
     /// The pid a stub wrote to `path` with a `mv`, once it is there.
     ///
     /// The stubs rename a finished file into place, so one read that parses is
-    /// the whole number rather than half of one.
+    /// the whole number rather than half of one. `bound`, when given, is
+    /// measured from this call; `None` waits until the caller stops polling.
     #[cfg(unix)]
-    async fn recorded_pid(path: &Path) -> u32 {
+    async fn recorded_pid(path: &Path, bound: Option<std::time::Duration>) -> u32 {
         let started = std::time::Instant::now();
-        while started.elapsed() < std::time::Duration::from_secs(10) {
+        // See #154: read BEFORE checking the deadline. A runtime thread that
+        // was busy past `bound` must still see a file written meanwhile.
+        loop {
             if let Ok(text) = std::fs::read_to_string(path)
                 && let Ok(pid) = text.trim().parse::<u32>()
             {
                 return pid;
             }
+            if let Some(bound) = bound {
+                assert!(
+                    started.elapsed() < bound,
+                    "no pid was recorded at {} within {bound:?}",
+                    path.display()
+                );
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        panic!("no pid was recorded at {}", path.display());
     }
 
     /// A hung child must cost its repository, not the whole run — and the
@@ -2891,7 +2900,7 @@ exit 0
             .kill_on_drop(true)
             .spawn()
             .expect("/bin/sh");
-        let grandchild = recorded_pid(&pidfile).await;
+        let grandchild = recorded_pid(&pidfile, Some(std::time::Duration::from_secs(10))).await;
         let file = std::fs::File::create(&log).expect("log");
         let errors = file.try_clone().expect("log clone");
 
@@ -2931,6 +2940,15 @@ exit 0
     ///
     /// The stub records `$$` and waits for this test's release, so the list is
     /// read while `spawn_tga` is certainly still running the child.
+    ///
+    /// #154: the pid wait has no clock of its own; it races the sweep. Every
+    /// stub here is a freshly written unsigned executable, and macOS assesses
+    /// each one on its first exec — measured at 2–15 s on a busy build host.
+    /// A fixed 10 s window opened at the sweep's first await covered two of
+    /// those execs (the `trusty-search` approval, then `tga`) and failed. The
+    /// scan lands after the spawn returns, inside the sweep's per-child budget,
+    /// so the `tga` stub is run once before the sweep; the budget then times
+    /// only the child. A sweep that ends without a pid panics with its result.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_running_tga_group_is_registered_for_ctrl_c() {
@@ -2940,30 +2958,39 @@ exit 0
         install_stubs(
             &work,
             &format!(
-                "#!/bin/sh\necho $$ > \"{p}.tmp\" && mv \"{p}.tmp\" \"{p}\"\n\
+                "#!/bin/sh\n[ \"$1\" = --warm ] && exit 0\n\
+                 echo $$ > \"{p}.tmp\" && mv \"{p}.tmp\" \"{p}\"\n\
                  while [ ! -f \"{r}\" ]; do sleep 0.05; done\n",
                 p = pidfile.display(),
                 r = release.display()
             ),
         );
+        // See #154: pay the stub's first-exec scan here, outside HANG_GUARD.
+        let warmed = std::process::Command::new(RequiredTool::Tga.path_in(&work))
+            .arg("--warm")
+            .status()
+            .expect("run the tga stub once");
+        assert!(warmed.success(), "the warm-up run exits 0: {warmed}");
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
         let (config, options, progress) = (config(), RunOptions::default(), Progress::none());
         let sweep = sweep_with_budget(&work, &config, &options, None, HANG_GUARD, &progress);
-        let probe = async {
-            let pid = recorded_pid(&pidfile).await;
-            let registered = crate::clone::registered_groups();
-            // SAFETY: `getpgid` only reads, and the stub is still waiting.
-            let group = unsafe { libc::getpgid(pid as libc::pid_t) };
-            std::fs::write(&release, b"").expect("release the stub");
-            (pid, registered, group)
+        tokio::pin!(sweep);
+        // See #154: a sweep that ends first gave the stub no chance to write
+        // its pid (a refusal, or a budget kill); say which.
+        let pid = tokio::select! {
+            pid = recorded_pid(&pidfile, None) => pid,
+            swept = &mut sweep => panic!("the sweep ended before `tga` recorded its pid: {swept:?}"),
         };
-        let (swept, (pid, registered, group)) =
-            tokio::time::timeout(HANG_GUARD, async { tokio::join!(sweep, probe) })
-                .await
-                .expect("the released stub exits");
-        swept.expect("the sweep completes");
+        let registered = crate::clone::registered_groups();
+        // SAFETY: `getpgid` only reads, and the stub is still waiting.
+        let group = unsafe { libc::getpgid(pid as libc::pid_t) };
+        std::fs::write(&release, b"").expect("release the stub");
+        tokio::time::timeout(HANG_GUARD, sweep)
+            .await
+            .expect("the released stub exits")
+            .expect("the sweep completes");
 
         assert_eq!(group, pid as libc::pid_t, "the child leads its own group");
         assert!(
