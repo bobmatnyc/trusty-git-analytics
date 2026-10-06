@@ -2804,19 +2804,26 @@ exit 0
     /// The pid a stub wrote to `path` with a `mv`, once it is there.
     ///
     /// The stubs rename a finished file into place, so one read that parses is
-    /// the whole number rather than half of one.
+    /// the whole number rather than half of one. `bound` is measured from this
+    /// call, so it covers whatever runs between the call and the stub's write.
     #[cfg(unix)]
-    async fn recorded_pid(path: &Path) -> u32 {
+    async fn recorded_pid(path: &Path, bound: std::time::Duration) -> u32 {
         let started = std::time::Instant::now();
-        while started.elapsed() < std::time::Duration::from_secs(10) {
+        // See #154: read BEFORE checking the deadline. A runtime thread that
+        // was busy past `bound` must still see a file written meanwhile.
+        loop {
             if let Ok(text) = std::fs::read_to_string(path)
                 && let Ok(pid) = text.trim().parse::<u32>()
             {
                 return pid;
             }
+            assert!(
+                started.elapsed() < bound,
+                "no pid was recorded at {} within {bound:?}",
+                path.display()
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        panic!("no pid was recorded at {}", path.display());
     }
 
     /// A hung child must cost its repository, not the whole run — and the
@@ -2891,7 +2898,7 @@ exit 0
             .kill_on_drop(true)
             .spawn()
             .expect("/bin/sh");
-        let grandchild = recorded_pid(&pidfile).await;
+        let grandchild = recorded_pid(&pidfile, std::time::Duration::from_secs(10)).await;
         let file = std::fs::File::create(&log).expect("log");
         let errors = file.try_clone().expect("log clone");
 
@@ -2931,6 +2938,12 @@ exit 0
     ///
     /// The stub records `$$` and waits for this test's release, so the list is
     /// read while `spawn_tga` is certainly still running the child.
+    ///
+    /// #154: the pid wait races the sweep. The sweep's preflight (`gh auth
+    /// token`, the git-credential probe, the secret store) runs before the
+    /// spawn, so a fixed window opened at the sweep's first await failed this
+    /// test on a host where that preflight was slow, and a sweep that ended
+    /// without spawning was reported as a missing pid instead of its error.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_running_tga_group_is_registered_for_ctrl_c() {
@@ -2951,19 +2964,20 @@ exit 0
 
         let (config, options, progress) = (config(), RunOptions::default(), Progress::none());
         let sweep = sweep_with_budget(&work, &config, &options, None, HANG_GUARD, &progress);
-        let probe = async {
-            let pid = recorded_pid(&pidfile).await;
-            let registered = crate::clone::registered_groups();
-            // SAFETY: `getpgid` only reads, and the stub is still waiting.
-            let group = unsafe { libc::getpgid(pid as libc::pid_t) };
-            std::fs::write(&release, b"").expect("release the stub");
-            (pid, registered, group)
+        tokio::pin!(sweep);
+        // See #154: a sweep that ends first never spawned the stub; say why.
+        let pid = tokio::select! {
+            pid = recorded_pid(&pidfile, HANG_GUARD) => pid,
+            swept = &mut sweep => panic!("the sweep ended before `tga` recorded its pid: {swept:?}"),
         };
-        let (swept, (pid, registered, group)) =
-            tokio::time::timeout(HANG_GUARD, async { tokio::join!(sweep, probe) })
-                .await
-                .expect("the released stub exits");
-        swept.expect("the sweep completes");
+        let registered = crate::clone::registered_groups();
+        // SAFETY: `getpgid` only reads, and the stub is still waiting.
+        let group = unsafe { libc::getpgid(pid as libc::pid_t) };
+        std::fs::write(&release, b"").expect("release the stub");
+        tokio::time::timeout(HANG_GUARD, sweep)
+            .await
+            .expect("the released stub exits")
+            .expect("the sweep completes");
 
         assert_eq!(group, pid as libc::pid_t, "the child leads its own group");
         assert!(
