@@ -297,18 +297,23 @@ const JEV_OPTION_KEYS: [&str; 6] = [
 /// `obfuscate` left off and real text was sent.
 /// What: for a YAML mapping, fails on the key `jev`, any key starting with
 /// `llm.`, or a [`JevOptions`] field name, naming the key and where it
-/// belongs. Every other key, and text that is not a mapping or does not
-/// parse, passes; the typed parse reports those.
+/// belongs. Keys are read as text, as the typed parse reads them, so a
+/// tagged or non-string scalar key is checked by its text. Every other key
+/// passes. Text passes unchecked only when it is not a mapping with
+/// scalar keys (a sequence, a map or sequence key, or a syntax error);
+/// the typed parse fails on all of those, so nothing loads unchecked.
 /// Test: `tests::misplaced_top_level_jev_keys_fail_the_config_load`,
-/// `tests::misplaced_top_level_jev_key_fails_beside_a_duplicate_key`.
+/// `tests::misplaced_top_level_jev_key_fails_beside_a_duplicate_key`,
+/// `tests::misplaced_top_level_jev_key_fails_beside_a_tagged_key`.
 pub(super) fn reject_misplaced_top_level_keys(text: &str) -> Result<()> {
     // #111: a `Value` parse rejects a duplicate key at any depth that the
     // typed parse accepts; read only top-level keys, last one winning.
-    type TopLevel = std::collections::HashMap<serde_yaml::Value, serde::de::IgnoredAny>;
+    // String keys: a `Value` key failed on `!!int abc`, which loads.
+    type TopLevel = std::collections::HashMap<String, serde::de::IgnoredAny>;
     let Ok(map) = serde_yaml::from_str::<TopLevel>(text) else {
         return Ok(());
     };
-    for key in map.keys().filter_map(serde_yaml::Value::as_str) {
+    for key in map.keys().map(String::as_str) {
         let belongs = if key == "jev" || JEV_OPTION_KEYS.contains(&key) {
             "it belongs under `llm.jev:`"
         } else if key.starts_with("llm.") {
@@ -555,6 +560,51 @@ mod tests {
             "jev: {obfuscate: true}\nllm: [\n",
         ] {
             assert!(load(yaml).is_err(), "loaded: {yaml:?}");
+        }
+    }
+
+    /// Why (#111): a key whose tag its text does not fit (`!!int abc`)
+    /// failed the key-only parse, which then checked nothing, while the
+    /// typed parse read the key as text and loaded.
+    /// What: a misplaced `jev:` beside such a key, or itself tagged, fails
+    /// the load; non-string scalar keys alone still load.
+    /// Test: this test.
+    #[test]
+    fn misplaced_top_level_jev_key_fails_beside_a_tagged_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let load = |yaml: &str| {
+            std::fs::write(&path, yaml).expect("write");
+            crate::core::config::Config::load(&path)
+        };
+        let mut loaded = Vec::new();
+        for (name, extra) in [
+            ("int tag", "!!int abc: 1\njev:\n  obfuscate: true\n"),
+            ("bool tag", "!!bool xyz: 1\njev:\n  obfuscate: true\n"),
+            ("tagged jev", "!foo jev: {obfuscate: true}\n"),
+            (
+                "scalar keys",
+                "1: a\n~: b\ntrue: c\njev:\n  obfuscate: true\n",
+            ),
+        ] {
+            match load(&format!("llm:\n  source: jev\n{extra}")) {
+                Ok(_) => loaded.push(name),
+                Err(e) => assert!(e.to_string().contains("`jev`"), "{name}: {e}"),
+            }
+        }
+        assert!(
+            loaded.is_empty(),
+            "loaded despite misplaced `jev`: {loaded:?}"
+        );
+
+        let cfg = load("llm:\n  source: jev\n  jev:\n    obfuscate: true\n1: a\n~: b\ntrue: c\n")
+            .expect("non-string scalar keys are not refused");
+        assert!(cfg.llm.expect("llm").jev.obfuscate);
+
+        // A map or sequence key fails the key-only parse and the typed one.
+        for key in ["? {a: 1}\n: x\n", "? [a]\n: x\n"] {
+            let yaml = format!("{key}jev: {{obfuscate: true}}\n");
+            assert!(load(&yaml).is_err(), "loaded: {yaml:?}");
         }
     }
 }
