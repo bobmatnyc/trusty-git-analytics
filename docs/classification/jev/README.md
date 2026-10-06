@@ -4,14 +4,15 @@
 > names, author names or emails, and nothing from the operator's private
 > data or from any private repository. Where the operator's
 > organisation needs a mention, it is "the operator's organisation," never a
-> name. Separately, for the Bedrock options measured or priced below: AWS
-> processes routed commit text under the operator's AWS agreement, and per
-> Bedrock's data terms the model provider does not receive it (see
-> [`cost-benefit.md`](cost-benefit.md) for the per-option detail). For
-> `llm.source: jev`, TypeSafe receives each routed commit message as
-> stored, names included, by default; pseudonymization is opt-in through
-> `llm.jev.obfuscate: true` (owner ruling 2026-10-06; see
-> [`configuration.md`](../../requirements/configuration.md)).
+> name. Routed commit text goes to the LLM tier you configure.
+> **Bedrock:** AWS processes it in the operator's AWS account under the
+> operator's AWS agreement; per Bedrock's data terms the model provider does
+> not receive it. **Jev:** the default is real commit text, as stored, names
+> included, and with `llm.jev.obfuscate: false` (the default) it goes to
+> TypeSafe. Set `llm.jev.obfuscate: true` to pseudonymize names, trailers,
+> repos, paths, tickets, URLs and hashes first (owner ruling 2026-10-06; see
+> [`configuration.md`](../../requirements/configuration.md)). See
+> [`cost-benefit.md`](cost-benefit.md) for the per-option detail.
 
 ## 1. Purpose and scope
 
@@ -26,10 +27,8 @@ and what the operator needs to decide.
 
 "Jev" is TypeSafe's hosted commit-classification model, proposed as a fourth
 `llm.source` alongside `openrouter`, `bedrock` and `anthropic-api`. This
-report measures the options that exist today (rules, rules + Bedrock Haiku
-4.5, rules + Bedrock Sonnet 5) and prices the one that does not yet have a
-measurement (Jev). Adding Jev as a wired `llm.source` is a separate
-engineering task; §5 below describes it as planned only.
+report measures rules, rules + Bedrock Haiku 4.5, Sonnet 5 and Sonnet 5.5,
+and rules + Jev (jev-1.13.0). Haiku 4.5 stays the default LLM tier.
 
 ## 2. Method
 
@@ -80,18 +79,42 @@ Tool weighted accuracy against rater 1, with 95% confidence intervals:
 | v2 rules + new precision rules (`data_science`, `internal_tooling`, `upkeep`) | 32.9% [20.3, 45.6] | Rules built without seeing the 100 labelled commits; each spot-checked ≥17/20 correct on other commits. 30/80 rows left unanswered; precision on answered rows ≈41% (19/46) |
 | Rules + LLM tier on unanswered rows only, Bedrock Claude Haiku 4.5 | **45.9% [32.8, 58.9]** | 4/80 rows still unanswered; LLM precision on its own rows 73% (19/26); 48 LLM calls, 24,171 input / 1,736 output tokens |
 | Rules + LLM tier on unanswered rows only, Bedrock Claude Sonnet 5 | **47.1% [34.1, 60.1]** | 4/80 rows still unanswered; 32 LLM calls (28 adopted, 4 abstained, 0 out-of-set, 0 failed), 23,321 input / 1,197 output tokens |
-| Rules + Jev (TypeSafe's hosted decision model) | NOT YET MEASURED | Needs an API key and the owner's go-ahead |
+| Rules + Bedrock Claude Sonnet 5.5 (`us.anthropic.claude-sonnet-5-5`) | **47.1% [34.1, 60.1]** | LLM-only precision 20/26 (77%) |
+| Rules + Jev (jev-1.13.0, TypeSafe's hosted model, real commit text) | **45.0% [32.0, 58.1]** | 32 LLM-routed rows: 21 adopted, 11 abstained, 0 failed; LLM-only precision 17/21 (81%); 25,718 input / 4,150 output tokens |
 
-The 45.9% and 47.1% rows are the two measured LLM configurations. Both leave
-the same 4/80 rows unanswered, and both confidence intervals overlap each
-other's as well as the 32.9% rules-only row's — so neither the Haiku-over-rules
-gain nor the Sonnet-over-Haiku gain is statistically clear at this sample
-size. Sonnet 5 costs roughly 3x Haiku 4.5 per LLM call (see
-[`cost-benefit.md`](cost-benefit.md)) for no statistically clear accuracy
-gain on this sample, so Haiku 4.5 remains the default recommendation.
-Neither is directly comparable to the 32.9% row on precision-per-answered-row,
-because the LLM tier only sees the 30 rows the rules left unanswered — a
-harder subset than the full 80.
+All five runs use the same 100-row sample, the same rater-1 labels and the
+same scorer: `tga eval score` with buckets. Rater 2 is the second rater.
+76 rows are scored. Accuracy is weighted by stratum, with 95% confidence
+intervals. The three accuracy columns are:
+
+- **Fine:** the exact category, as in the table above.
+- **Primary (bucket):** the bucket the category maps to.
+- **Secondary:** fine-category accuracy within buckets that have more than
+  one category. Internal Tooling is excluded.
+
+Buckets: Maintenance = `bug_fix`, `devops`, `security`, `qa`, `upkeep`.
+Value Creation = `new_feature`, `integration`, `content_design`.
+Foundational Investment = `platform_infrastructure`, `data_science`.
+Internal Tooling = `internal_tooling`. The map is config-driven. Consumers
+supply it through `classification.buckets` or a rules-file `buckets:`.
+
+| Run | Fine | Primary (bucket) | Secondary |
+|---|---|---|---|
+| Rules | 32.9 [20.3, 45.6] | 44.4 [31.9, 56.9] | 35.5 [21.7, 49.2] |
+| Bedrock Haiku 4.5 | 45.9 [32.8, 58.9] | 59.9 [47.1, 72.7] | 48.9 [34.7, 63.0] |
+| Bedrock Sonnet 5 | 47.1 [34.1, 60.1] | 60.3 [47.5, 73.0] | 50.2 [36.1, 64.3] |
+| Bedrock Sonnet 5.5 | 47.1 [34.1, 60.1] | 59.4 [46.6, 72.3] | 50.2 [36.1, 64.3] |
+| Jev jev-1.13.0, real text | 45.0 [32.0, 58.1] | 57.4 [44.5, 70.2] | 48.0 [33.9, 62.2] |
+
+The confidence intervals of the four LLM arms overlap on every measure. At
+n = 76 the four LLM arms are statistically level. The gain of each LLM arm
+over rules alone is also not statistically clear on fine accuracy. Sonnet 5
+costs roughly 3x Haiku 4.5 per LLM call, and Jev costs far less than either
+(see [`cost-benefit.md`](cost-benefit.md)). Jev abstains more (11 of 32
+routed rows) but is the most precise when it answers: 17/21 (81%), against
+20/26 (77%) for Sonnet 5.5 and 19/26 (73%) for Haiku 4.5. No arm is directly
+comparable to the rules row on precision per answered row, because the LLM
+tier only sees the rows the rules left unanswered, a harder subset.
 
 **Method note.** The Sonnet 5 run used tga at the
 [#140](https://github.com/bobmatnyc/trusty-git-analytics/pull/140) merge
@@ -141,11 +164,12 @@ llm:
 
 ### Jev
 
-`llm.source: jev` is wired (#111). Like `openrouter` and `anthropic-api`, it
-reads its API key from the environment variable named by `api_key_env`
-(`TYPESAFE_API_KEY` by default). By default Jev receives the commit message
-as stored; `llm.jev.obfuscate: true` pseudonymizes it first (owner ruling
-2026-10-06). This report measures the cost (§4) once a key exists.
+`llm.source: jev` is wired (#111) as a fourth `llm.source` value. Like
+`openrouter` and `anthropic-api`, it reads its API key from the environment
+variable named by `api_key_env` (`TYPESAFE_API_KEY` by default). Jev runs on
+real commit text by default, and with obfuscation off the text goes to
+TypeSafe. Set `llm.jev.obfuscate: true` to pseudonymize it first (owner
+ruling 2026-10-06).
 
 ## 6. Limits
 
