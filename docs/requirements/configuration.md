@@ -73,6 +73,9 @@ an `llm:` section emits a `tracing::warn!` deprecation message.
 | `region` | string | None | AWS region (Bedrock only). When absent, the AWS SDK resolves the region from the environment (`AWS_DEFAULT_REGION`, profile, etc.). |
 | `model` | string | provider-appropriate default | Provider-specific model id (see below). |
 | `jev` | map | see below | `source: jev` settings: `budget_usd`, `sensitive_terms`, `payload_dump_dir`, `id_patterns`, `name_matcher_bytes`. Ignored by the other sources. |
+| `context` | list | `[]` | Commit facts appended to the user prompt after the message: any of `paths`, `pr_title`, `issue_type` (#111). See [Commit context](#commit-context-llmcontext-111). Any other item is a load error. |
+| `context_max_paths` | integer | `30` | Most changed paths `context: [paths]` lists per commit. |
+| `context_max_path_bytes` | integer | `2048` | Most bytes of path text `context: [paths]` lists per commit. |
 
 Any other key under `llm:` is a load error (#111), as it is under `llm.jev:`.
 A `jev` option written one level too high (`llm.payload_dump_dir`) therefore
@@ -344,6 +347,60 @@ llm:
     # sensitive_terms: [ledgerd, paygate]   # extra names to hide; obfuscation only
     # payload_dump_dir: ./jev-payloads   # write bodies, send nothing
     # name_matcher_bytes: 134217728      # raise past ~1M names (default 64 MiB)
+```
+
+#### Commit context (`llm.context`, #111)
+
+By default the LLM sees only the commit message. `llm.context` adds facts
+the database stores about the commit, read by the same joins `tga eval
+sample` uses for the label sheet:
+
+- `paths`: the changed file paths (`files.path`), in path order. The list
+  stops before the first path that would pass `context_max_paths` entries
+  or `context_max_path_bytes` bytes; a cut list's header says how many of
+  how many are shown.
+- `pr_title`: the title of the lowest-numbered stored pull request whose
+  `commit_shas` contains the commit.
+- `issue_type`: the `item_type` of the first work item linked to the
+  commit (`commit_work_items` → `work_items`), such as `Bug` or `Story`.
+
+The facts go in one block after the message, each on one line:
+
+```text
+<commit message>
+
+--- commit context (from the repository, not the commit message) ---
+Changed paths (2 of 41 shown):
+- src/ledger/retry.rs
+- tests/retry_tests.rs
+PR title: Retry ledger writes
+Issue type: Bug
+--- end commit context ---
+```
+
+A fact the database does not hold for a commit is left out; a commit with
+none gets no block. With `context: []`, the default, every provider sends
+exactly the pre-#111 prompt. All four sources honour the key. For `jev` the
+block is part of `state.commit.message`; with `jev.obfuscate: true` it is
+pseudonymized as well: every path becomes a whole `PATH_n` (plus a known
+extension), whatever its shape, and the PR title and issue type pass
+through the same pseudonymizer as the message. Only the block's fixed
+header lines are sent unchanged.
+
+Caching: no LLM verdict is cached by prompt. `tga classify` sends only
+commits that have no stored verdict, so commits classified before
+`context` was set keep their verdict until a `--force` run re-sends them
+with the block. `llm_usage` gains one row per call and is not a cache. The
+Jev payload dump names each file by a hash of the body, so a context body
+never shares a file name with a no-context body.
+
+```yaml
+llm:
+  source: anthropic-api
+  api_key_env: ANTHROPIC_API_KEY
+  context: [paths, pr_title, issue_type]
+  context_max_paths: 30          # default
+  context_max_path_bytes: 2048   # default
 ```
 
 #### Self-enabling behavior (added v2.3.0)

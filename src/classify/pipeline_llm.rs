@@ -4,9 +4,12 @@
 //! unanswered and must price that before any full run. Extracted from
 //! `pipeline.rs` to keep it under the size cap.
 //! What: [`llm_eligible`] decides which verdicts reach the LLM (shared with
-//! `tga eval repredict`); [`run_llm_fallback`] makes the calls and totals the
-//! tokens; [`record_usage`] writes one `llm_usage` row per call.
+//! `tga eval repredict`); [`load_contexts`] reads the `llm.context` facts
+//! (#111); [`run_llm_fallback`] makes the calls and totals the tokens;
+//! [`record_usage`] writes one `llm_usage` row per call.
 //! Test: `classify::pipeline_llm_tests`.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use futures::stream::StreamExt;
 use rusqlite::params;
@@ -14,9 +17,10 @@ use tracing::{info, warn};
 
 use crate::classify::classifier::ClassificationEngine;
 use crate::classify::errors::Result;
+use crate::classify::tiers::llm_context::CommitContext;
 use crate::classify::tiers::llm_prompt::{LlmOutcome, LlmUsage};
 use crate::classify::tiers::ClassificationResult;
-use crate::core::config::LlmFallbackScope;
+use crate::core::config::{LlmConfig, LlmContextItem, LlmFallbackScope};
 use crate::core::db::Database;
 
 use super::pipeline_db::CommitRow;
@@ -46,6 +50,74 @@ pub(crate) fn llm_eligible(
         LlmFallbackScope::LowConfidence => r.confidence <= threshold,
         LlmFallbackScope::Unanswered => is_unanswered(r),
     }
+}
+
+/// The `llm.context` facts of every commit the LLM fallback will send.
+///
+/// Why (#111): the LLM sees the same facts the human rater sees in
+/// `tga eval sample`, read by the same joins.
+/// What: empty unless `llm.context` names an item. Otherwise, for each
+/// commit [`run_llm_fallback`] will send (eligible, not a merge), reads only
+/// the requested facts, applies the path caps, and keys the commits that
+/// have any fact by their index in `commits`.
+/// Test: `classify::llm_context_tests::context_paths_appends_a_paths_block`,
+/// `classify::llm_context_tests::missing_context_facts_add_nothing`.
+///
+/// # Errors
+///
+/// A database read fails.
+pub(super) fn load_contexts(
+    db: &Database,
+    llm: Option<&LlmConfig>,
+    commits: &[CommitRow],
+    results: &[ClassificationResult],
+    scope: LlmFallbackScope,
+    threshold: f64,
+) -> Result<BTreeMap<usize, CommitContext>> {
+    use crate::core::db::commit_context::{load_issue_types, load_paths, load_pr_titles};
+    let Some(cfg) = llm.filter(|c| !c.context.is_empty()) else {
+        return Ok(BTreeMap::new());
+    };
+    let wants = |item| cfg.context.contains(&item);
+    let sent: Vec<usize> = (0..commits.len())
+        .filter(|&i| !commits[i].is_merge && llm_eligible(scope, &results[i], threshold))
+        .collect();
+    let conn = db.connection();
+    let ids: Vec<i64> = sent.iter().map(|&i| commits[i].id).collect();
+    let shas: HashSet<&str> = sent.iter().map(|&i| commits[i].sha.as_str()).collect();
+    let db_err = crate::core::TgaError::from;
+    let mut paths = HashMap::new();
+    let mut prs = HashMap::new();
+    let mut issues = HashMap::new();
+    if wants(LlmContextItem::Paths) {
+        paths = load_paths(conn, &ids).map_err(db_err)?;
+    }
+    if wants(LlmContextItem::PrTitle) {
+        prs = load_pr_titles(conn, &shas).map_err(db_err)?;
+    }
+    if wants(LlmContextItem::IssueType) {
+        issues = load_issue_types(conn, &shas).map_err(db_err)?;
+    }
+    let contexts: BTreeMap<usize, CommitContext> = sent
+        .into_iter()
+        .filter_map(|i| {
+            let c = &commits[i];
+            let ctx = CommitContext::new(
+                paths.get(&c.id).map_or(&[][..], Vec::as_slice),
+                cfg.context_max_paths,
+                cfg.context_max_path_bytes,
+                prs.get(&c.sha).map(String::as_str),
+                issues.get(&c.sha).map(String::as_str),
+            );
+            (!ctx.is_empty()).then_some((i, ctx))
+        })
+        .collect();
+    info!(
+        with_context = contexts.len(),
+        items = ?cfg.context,
+        "LLM context loaded"
+    );
+    Ok(contexts)
 }
 
 /// Totals for one run's LLM calls (#111).
@@ -131,13 +203,14 @@ pub(super) struct UsageRow {
 pub(super) async fn run_llm_fallback(
     engine: &ClassificationEngine,
     commits: &[CommitRow],
+    contexts: &BTreeMap<usize, CommitContext>,
     results: &mut [ClassificationResult],
     scope: LlmFallbackScope,
     threshold: f64,
     concurrency: usize,
 ) -> (LlmUsageTotals, Vec<UsageRow>) {
     let mut skipped_merges = 0_usize;
-    let mut pending: Vec<(usize, &str)> = Vec::new();
+    let mut pending: Vec<(usize, &str, Option<&CommitContext>)> = Vec::new();
     for (idx, c) in commits.iter().enumerate() {
         if !llm_eligible(scope, &results[idx], threshold) {
             continue;
@@ -147,7 +220,7 @@ pub(super) async fn run_llm_fallback(
         if c.is_merge {
             skipped_merges += 1;
         } else {
-            pending.push((idx, c.message.as_str()));
+            pending.push((idx, c.message.as_str(), contexts.get(&idx)));
         }
     }
     info!(
@@ -160,10 +233,10 @@ pub(super) async fn run_llm_fallback(
     let pb = super::pipeline_db::make_progress(pending.len() as u64, "LLM fallback");
     let pb_ref = &pb;
     let calls: Vec<_> =
-        futures::stream::iter(pending.into_iter().map(|(idx, message)| async move {
+        futures::stream::iter(pending.into_iter().map(|(idx, message, ctx)| async move {
             // Direct LLM dispatch — `engine.classify` would re-run the rule tiers
             // and stop at the verdict that triggered the fallback (issue #99).
-            let call = engine.llm_classify_detailed(message).await;
+            let call = engine.llm_classify_with_context(message, ctx).await;
             pb_ref.inc(1);
             (idx, call)
         }))

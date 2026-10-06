@@ -147,6 +147,7 @@ async fn from_llm_config_anthropic_api_reads_api_key_env() {
         model: Some("claude-3-5-haiku-latest".to_string()),
         effort: None,
         jev: Default::default(),
+        ..Default::default()
     };
     let result =
         LlmClassifier::from_llm_config_with_creds(&cfg, "claude-3-5-haiku-latest", &creds).await;
@@ -172,6 +173,7 @@ async fn from_llm_config_anthropic_api_missing_key_errors() {
         model: None,
         effort: None,
         jev: Default::default(),
+        ..Default::default()
     };
     // #6405: an empty credential table is how "absent" is stated now — no
     // `remove_var` racing the rest of the suite.
@@ -206,6 +208,7 @@ async fn anthropic_default_model_used_when_none_configured() {
         model: None, // user did not set a model
         effort: None,
         jev: Default::default(),
+        ..Default::default()
     };
     // The pipeline passes "gpt-4o-mini" as the fallback when model is None.
     let result = LlmClassifier::from_llm_config_with_creds(&cfg, "gpt-4o-mini", &creds).await;
@@ -232,6 +235,7 @@ fn llm_section_presence_self_enables_tier() {
             model: Some("claude-3-5-haiku-latest".to_string()),
             effort: None,
             jev: Default::default(),
+            ..Default::default()
         }),
         classification: None,
         ..crate::core::config::Config::default()

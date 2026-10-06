@@ -38,6 +38,8 @@ use crate::core::errors::{Result, TgaError};
 
 pub mod azdo_iterations;
 pub mod collection_runs;
+// #111: path / PR-title / issue-type joins for `eval sample` and `llm.context`.
+pub(crate) mod commit_context;
 pub mod correlation;
 pub mod jira_facts;
 pub mod linear_facts;

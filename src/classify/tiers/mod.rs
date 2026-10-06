@@ -25,6 +25,8 @@ pub(crate) mod jev_tickets;
 pub(crate) mod jev_trailers;
 pub(crate) mod jev_vocab;
 pub mod llm;
+// #111: the `llm.context` block appended to the user prompt.
+pub(crate) mod llm_context;
 // #131: LLM prompt, reply validation and token accounting.
 pub mod llm_prompt;
 pub mod override_tier;
@@ -104,6 +106,9 @@ impl ClassificationResult {
         }
     }
 }
+
+#[cfg(test)]
+mod jev_context_tests;
 
 #[cfg(test)]
 mod jev_obfuscate_tests;

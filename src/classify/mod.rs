@@ -48,4 +48,7 @@ mod pipeline_tests;
 mod pipeline_llm_tests;
 
 #[cfg(test)]
+mod llm_context_tests;
+
+#[cfg(test)]
 mod trace_tests;

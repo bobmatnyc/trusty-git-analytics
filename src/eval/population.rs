@@ -1,11 +1,12 @@
 //! Read-only queries behind `tga eval sample`.
 
-use std::collections::{HashMap, HashSet};
-
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::Connection;
 
 use super::Result;
+
+// #111: the path / PR-title / issue-type joins are shared with `llm.context`.
+pub(crate) use crate::core::db::commit_context::{load_issue_types, load_paths, load_pr_titles};
 
 /// A commit in the database with its stored verdict, if any.
 #[derive(Debug, Clone)]
@@ -80,70 +81,4 @@ pub(crate) fn load_commits(conn: &Connection) -> Result<Vec<CommitRow>> {
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-/// Changed paths per commit id, for the given ids only.
-pub(crate) fn load_paths(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
-    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
-    for chunk in ids.chunks(500) {
-        let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT commit_id, path FROM files WHERE commit_id IN ({placeholders}) \
-             ORDER BY commit_id, path"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(chunk.iter()), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?;
-        for row in rows {
-            let (id, path) = row?;
-            out.entry(id).or_default().push(path);
-        }
-    }
-    Ok(out)
-}
-
-/// Title of the lowest-numbered pull request containing each wanted SHA.
-pub(crate) fn load_pr_titles(
-    conn: &Connection,
-    wanted: &HashSet<&str>,
-) -> Result<HashMap<String, String>> {
-    let mut stmt =
-        conn.prepare("SELECT title, commit_shas FROM pull_requests ORDER BY pr_number, id")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-    let mut out = HashMap::new();
-    for row in rows {
-        let (title, shas) = row?;
-        // A malformed list is skipped rather than failing the sample.
-        let Ok(list) = serde_json::from_str::<Vec<String>>(&shas) else {
-            continue;
-        };
-        for sha in list {
-            if wanted.contains(sha.as_str()) {
-                out.entry(sha).or_insert_with(|| title.clone());
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Issue type of the first linked work item per wanted SHA.
-pub(crate) fn load_issue_types(
-    conn: &Connection,
-    wanted: &HashSet<&str>,
-) -> Result<HashMap<String, String>> {
-    let mut stmt = conn.prepare(
-        "SELECT cw.commit_sha, w.item_type FROM commit_work_items cw \
-         JOIN work_items w ON w.id = cw.work_item_id AND w.source = cw.work_item_source \
-         ORDER BY cw.commit_sha, w.source, w.id",
-    )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-    let mut out = HashMap::new();
-    for row in rows {
-        let (sha, item_type) = row?;
-        if wanted.contains(sha.as_str()) {
-            out.entry(sha).or_insert(item_type);
-        }
-    }
-    Ok(out)
 }

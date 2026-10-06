@@ -31,6 +31,7 @@ use super::jev_patterns::{
 };
 use super::jev_tickets::{is_hex_id, is_record_id, replace_ids, ticket_start};
 use super::jev_trailers::{item_names, items, names_in, scan, Role, Trailer};
+use super::llm_context::{CommitContext, Fact};
 
 /// Heap-byte cap for the name matcher. Hundreds of thousands of names fit
 /// inside it; past it, building the matcher is an error, never a silent
@@ -456,6 +457,46 @@ impl Obfuscator {
             })
             .collect();
         Ok(ObfuscatedText(lines.join("\n")))
+    }
+
+    /// [`Self::obfuscate`] for `message`, then its `llm.context` block (#111).
+    ///
+    /// Why: with obfuscation on, no part of the context may be sent raw.
+    /// What: the message and the block are pseudonymized apart, so a
+    /// context line is never read as one of the message's trailers. See
+    /// [`Self::context_block`].
+    /// Test: `jev_context_tests::obfuscated_jev_context_sends_no_raw_path`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::obfuscate`].
+    pub(crate) fn obfuscate_with_context(
+        &mut self,
+        message: &str,
+        context: Option<&CommitContext>,
+    ) -> Result<ObfuscatedText, JevError> {
+        let mut text = self.obfuscate(message)?.0;
+        if let Some(ctx) = context {
+            text.push_str(&self.context_block(ctx)?);
+        }
+        Ok(ObfuscatedText(text))
+    }
+
+    /// The `llm.context` block of `ctx` with every fact pseudonymized (#111):
+    /// each changed path whole, as `PATH_n` plus a known extension, whatever
+    /// its shape (`Dockerfile`, `build`); the PR title and the issue type
+    /// through [`Self::obfuscate`]. Only the block's fixed headers pass
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::obfuscate`].
+    pub(crate) fn context_block(&mut self, ctx: &CommitContext) -> Result<String, JevError> {
+        self.check()?;
+        ctx.render(|fact, s| match fact {
+            Fact::Path => Ok(self.file_token(s)),
+            Fact::PrTitle | Fact::IssueType => self.obfuscate(s).map(|t| t.0),
+        })
     }
 
     /// `Token: Name <email>` → `Token: PERSON_n <EMAIL_n>`.

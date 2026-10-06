@@ -740,15 +740,27 @@ impl ClassificationPipeline {
                      fallback will short-circuit silently"
                 );
             }
-            // #111: Jev learns every author and message of the run first.
-            super::pipeline_jev::prepare_jev(&engine, db, &commits)?;
             let cls = self.config.classification.as_ref();
+            let scope = cls.map(|c| c.llm_fallback_scope).unwrap_or_default();
+            let threshold = cls.map(|c| c.llm_fallback_threshold).unwrap_or(0.65);
+            // #111: the `llm.context` facts of the commits the LLM will see.
+            let contexts = super::pipeline_llm::load_contexts(
+                db,
+                self.config.llm.as_ref(),
+                &commits,
+                &results,
+                scope,
+                threshold,
+            )?;
+            // #111: Jev learns every author and message of the run first.
+            super::pipeline_jev::prepare_jev(&engine, db, &commits, &contexts)?;
             (llm_totals, usage_rows) = super::pipeline_llm::run_llm_fallback(
                 &engine,
                 &commits,
+                &contexts,
                 &mut results,
-                cls.map(|c| c.llm_fallback_scope).unwrap_or_default(),
-                cls.map(|c| c.llm_fallback_threshold).unwrap_or(0.65),
+                scope,
+                threshold,
                 cls.map(|c| c.llm_fallback_concurrency).unwrap_or(8),
             )
             .await;

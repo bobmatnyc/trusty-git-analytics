@@ -259,6 +259,8 @@ fn jev_test_pointers_resolve() {
             "jev_text_mode_tests",
             include_str!("jev_text_mode_tests.rs"),
         ),
+        // #111: `llm.context` on the Jev path.
+        ("jev_context_tests", include_str!("jev_context_tests.rs")),
     ];
     let pointer = regex::Regex::new(r"(jev_[a-z0-9_]*tests)::([a-z0-9_]+)").expect("regex");
     let mut stale = Vec::new();

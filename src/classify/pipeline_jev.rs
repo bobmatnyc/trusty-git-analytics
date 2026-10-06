@@ -8,7 +8,7 @@
 //! [`db_repositories`] and [`prepare_jev`].
 //! Test: `classify::tiers::jev_tests::outbound_body_carries_no_sensitive_string`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::classify::classifier::ClassificationEngine;
 use crate::classify::errors::{ClassifyError, Result};
@@ -17,6 +17,7 @@ use crate::classify::rules::CategoryDef;
 use crate::classify::tiers::jev_obfuscate::{KnownNames, RunNames};
 use crate::classify::tiers::jev_trailers::trailer_names;
 use crate::classify::tiers::llm::LlmClassifier;
+use crate::classify::tiers::llm_context::CommitContext;
 use crate::core::config::Config;
 use crate::core::db::Database;
 
@@ -329,6 +330,7 @@ pub(super) fn prepare_jev(
     engine: &ClassificationEngine,
     db: &Database,
     commits: &[CommitRow],
+    contexts: &BTreeMap<usize, CommitContext>,
 ) -> Result<()> {
     if !engine.llm_jev_obfuscates() {
         return Ok(());
@@ -341,7 +343,11 @@ pub(super) fn prepare_jev(
         repos: db_repositories(db)?,
     };
     let messages: Vec<&str> = commits.iter().map(|c| c.message.as_str()).collect();
-    engine.llm_prepare(&messages, &names).map_err(jev_init)
+    // #111: `llm.context` blocks too, in commit order (the map's key order).
+    let contexts: Vec<&CommitContext> = contexts.values().collect();
+    engine
+        .llm_prepare(&messages, &contexts, &names)
+        .map_err(jev_init)
 }
 
 impl ClassificationPipeline {

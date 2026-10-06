@@ -12,6 +12,7 @@ use crate::classify::tiers::jev::{JevClassifier, JEV_MODEL};
 use crate::classify::tiers::jev_error::JevError;
 use crate::classify::tiers::jev_obfuscate::{KnownNames, RunNames};
 use crate::classify::tiers::llm::LlmClassifier;
+use crate::classify::tiers::llm_context::CommitContext;
 use crate::core::config::LlmConfig;
 use crate::core::creds::CredentialSource;
 
@@ -106,10 +107,11 @@ impl LlmClassifier {
     pub(crate) fn prepare_batch(
         &self,
         messages: &[&str],
+        contexts: &[&CommitContext],
         names: &RunNames,
     ) -> Result<(), JevError> {
         match &self.jev {
-            Some(jev) => jev.prepare_run(messages, names),
+            Some(jev) => jev.prepare_run(messages, contexts, names),
             None => Ok(()),
         }
     }

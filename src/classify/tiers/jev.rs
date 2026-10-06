@@ -31,6 +31,7 @@ use crate::classify::tiers::jev_budget::JevBudget;
 use crate::classify::tiers::jev_error::JevError;
 use crate::classify::tiers::jev_obfuscate::{KnownNames, ObfuscatedText, Obfuscator, RunNames};
 use crate::classify::tiers::jev_response::interpret;
+use crate::classify::tiers::llm_context::{with_context, CommitContext};
 use crate::classify::tiers::llm_prompt::{LlmCall, TEXT_MODE_OBFUSCATED, TEXT_MODE_REAL};
 use crate::core::config::JevOptions;
 
@@ -104,7 +105,8 @@ struct JevCommit<'a> {
 /// default, owner ruling 2026-10-06) or, under `llm.jev.obfuscate`, its
 /// pseudonymized form.
 enum CommitText<'a> {
-    Real(&'a str),
+    /// #111: the message, then any plain `llm.context` block.
+    Real(std::borrow::Cow<'a, str>),
     Obfuscated(ObfuscatedText),
 }
 
@@ -514,22 +516,30 @@ impl JevClassifier {
             people: people.to_vec(),
             ..RunNames::default()
         };
-        self.prepare_run(messages, &names)
+        self.prepare_run(messages, &[], &names)
     }
 
     /// The run's preparation (see `prepare`) over the names the database
     /// records: people, file paths ([`Obfuscator::add_files`]) and
     /// repositories ([`Obfuscator::add_repos`]). A no-op without
-    /// obfuscation (#111).
+    /// obfuscation (#111). #111: the `llm.context` blocks are pseudonymized
+    /// after the messages, in commit order, so their pseudonym numbers do
+    /// not depend on call order either.
     /// Test: `jev_gateb2_tests::db_file_names_are_redacted`,
     /// `jev_round4_tests::org_and_repo_names_from_every_source_are_redacted`,
-    /// `jev_round4_tests::poisoned_obfuscator_lock_sends_nothing`.
+    /// `jev_round4_tests::poisoned_obfuscator_lock_sends_nothing`,
+    /// `jev_context_tests::obfuscated_jev_context_sends_no_raw_path`.
     ///
     /// # Errors
     ///
     /// The name matcher cannot be built, or the pseudonymizer's lock is
     /// poisoned; nothing may be sent this run.
-    pub(crate) fn prepare_run(&self, messages: &[&str], names: &RunNames) -> Result<(), JevError> {
+    pub(crate) fn prepare_run(
+        &self,
+        messages: &[&str],
+        contexts: &[&CommitContext],
+        names: &RunNames,
+    ) -> Result<(), JevError> {
         let Some((ctx, obf)) = self
             .context
             .as_ref()
@@ -546,19 +556,37 @@ impl JevClassifier {
         for m in messages {
             obf.obfuscate(m)?;
         }
+        for c in contexts {
+            obf.context_block(c)?;
+        }
         ctx.prepared.store(true, Ordering::Release);
         Ok(())
     }
 
     /// Classify one commit message; the call records its text mode (#111).
     /// Test: `jev_text_mode_tests::default_config_sends_the_message_verbatim`.
+    #[cfg(test)]
     pub(crate) async fn classify(&self, message: &str) -> LlmCall {
+        self.classify_with_context(message, None).await
+    }
+
+    /// [`Self::classify`] with the commit's `llm.context` block after the
+    /// message (#111); pseudonymized with the message when obfuscating.
+    /// Test: `jev_context_tests::obfuscated_jev_context_sends_no_raw_path`,
+    /// `jev_context_tests::real_text_jev_context_is_sent_as_stored`.
+    pub(crate) async fn classify_with_context(
+        &self,
+        message: &str,
+        context: Option<&CommitContext>,
+    ) -> LlmCall {
         let mode = if self.obfuscate {
             TEXT_MODE_OBFUSCATED
         } else {
             TEXT_MODE_REAL
         };
-        self.classify_text(message).await.with_text_mode(mode)
+        self.classify_text(message, context)
+            .await
+            .with_text_mode(mode)
     }
 
     /// What: with obfuscation on, pseudonymize — on any error the call is
@@ -572,7 +600,7 @@ impl JevClassifier {
     /// `jev_tests::obfuscation_error_sends_nothing`,
     /// `jev_tests::outbound_body_carries_no_sensitive_string`,
     /// `jev_tests::concurrent_calls_never_pass_the_cap`.
-    async fn classify_text(&self, message: &str) -> LlmCall {
+    async fn classify_text(&self, message: &str, commit: Option<&CommitContext>) -> LlmCall {
         let Some(ctx) = &self.context else {
             warn!("Jev classifier has no category set attached");
             return LlmCall::failed(None);
@@ -584,13 +612,14 @@ impl JevClassifier {
         let dumping = matches!(self.mode, Mode::Dump(_));
         // #111 (owner ruling 2026-10-06): no pseudonymizer, no token map.
         let Some(obfuscator) = &ctx.obfuscator else {
-            return self.send(ctx, CommitText::Real(message), None).await;
+            let text = CommitText::Real(with_context(message, commit));
+            return self.send(ctx, text, None).await;
         };
         // #111: a poisoned lock fails the call closed, like any other
         // pseudonymizer error.
         let text = match obfuscator.lock() {
             Err(_) => Err(JevError::LockPoisoned),
-            Ok(mut obf) => obf.obfuscate(message).map(|t| {
+            Ok(mut obf) => obf.obfuscate_with_context(message, commit).map(|t| {
                 // #111: the on-host token map, only for a payload dump.
                 let map = if dumping {
                     obf.originals_in(&t)
