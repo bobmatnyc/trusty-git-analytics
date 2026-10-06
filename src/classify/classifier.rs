@@ -614,6 +614,30 @@ impl ClassificationEngine {
         Some(call)
     }
 
+    /// Hand the LLM tier the run's messages, in commit order, and the run's
+    /// author names before the concurrent calls start (#111: every name is
+    /// known to the Jev pseudonymizer before its first request).
+    ///
+    /// # Errors
+    ///
+    /// The Jev name matcher cannot be built.
+    pub(crate) fn llm_prepare(
+        &self,
+        messages: &[&str],
+        people: &[String],
+        paths: &[String],
+    ) -> std::result::Result<(), crate::classify::tiers::jev_error::JevError> {
+        match &self.llm {
+            Some(llm) => llm.prepare_batch(messages, people, paths),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the attached LLM tier routes through Jev (#111).
+    pub(crate) fn llm_is_jev(&self) -> bool {
+        self.llm.as_ref().is_some_and(|l| l.is_jev())
+    }
+
     /// `(provider label, model id)` of the attached LLM tier, if any (#111).
     pub fn llm_identity(&self) -> Option<(&'static str, String)> {
         self.llm

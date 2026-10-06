@@ -52,7 +52,8 @@ pub(crate) fn llm_eligible(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LlmUsageTotals {
-    /// LLM calls made.
+    /// LLM-tier calls in the run, one per eligible commit, including
+    /// `skipped` ones that sent no request (#111).
     pub calls: usize,
     /// Answers that replaced the rule verdict.
     pub adopted: usize,
@@ -65,12 +66,18 @@ pub struct LlmUsageTotals {
     pub out_of_set: usize,
     /// Calls with no usable reply.
     pub failed: usize,
+    /// Calls that sent no request: spend cap reached or payload dump
+    /// (#111, `source: jev`).
+    pub skipped: usize,
     /// Calls whose provider reported token usage.
     pub calls_with_usage: usize,
     /// Sum of reported input tokens.
     pub input_tokens: u64,
     /// Sum of reported output tokens.
     pub output_tokens: u64,
+    /// SHAs of the `skipped` calls, in commit order, so the caller can
+    /// re-send exactly those commits with `--force --shas` (#111).
+    pub skipped_shas: Vec<String>,
 }
 
 impl LlmUsageTotals {
@@ -81,6 +88,7 @@ impl LlmUsageTotals {
             NOT_ADOPTED => self.not_adopted += 1,
             o if o == LlmOutcome::Abstained.as_str() => self.abstained += 1,
             o if o == LlmOutcome::OutOfSet.as_str() => self.out_of_set += 1,
+            o if o == LlmOutcome::Skipped.as_str() => self.skipped += 1,
             _ => self.failed += 1,
         }
         if let Some(u) = usage {
@@ -99,9 +107,12 @@ const NOT_ADOPTED: &str = "not_adopted";
 /// One call's accounting record, written to `llm_usage`.
 pub(super) struct UsageRow {
     idx: usize,
-    /// `adopted`, `not_adopted`, `abstained`, `out_of_set` or `failed`.
+    /// `adopted`, `not_adopted`, `abstained`, `out_of_set`, `failed` or
+    /// `skipped`.
     outcome: &'static str,
     usage: Option<LlmUsage>,
+    /// The model the reply named, when it named one (#111).
+    model: Option<String>,
 }
 
 /// Run the LLM on every eligible verdict and fold adopted answers back in.
@@ -130,9 +141,7 @@ pub(super) async fn run_llm_fallback(
             continue;
         }
         // #111: merges are excluded from metrics and the eval, so an LLM call
-        // on one is spend with no use. The count goes to the log only:
-        // `LlmUsageTotals` is a public struct literal and cannot gain a field
-        // in 9.x (#137).
+        // on one is spend with no use. The count goes to the log.
         if c.is_merge {
             skipped_merges += 1;
         } else {
@@ -187,8 +196,16 @@ pub(super) async fn run_llm_fallback(
             idx,
             outcome,
             usage: call.usage,
+            model: call.model,
         });
     }
+    // #111: commit order, whatever order the calls finished in.
+    rows.sort_by_key(|r| r.idx);
+    totals.skipped_shas = rows
+        .iter()
+        .filter(|r| r.outcome == LlmOutcome::Skipped.as_str())
+        .map(|r| commits[r.idx].sha.clone())
+        .collect();
     (totals, rows)
 }
 
@@ -227,7 +244,8 @@ pub(super) fn record_usage(
                 commit.id,
                 commit.sha,
                 identity.0,
-                identity.1,
+                // #111: the model the reply named wins over the configured id.
+                row.model.as_deref().unwrap_or(identity.1),
                 row.outcome,
                 row.usage.map(|u| u.input_tokens as i64),
                 row.usage.map(|u| u.output_tokens as i64),

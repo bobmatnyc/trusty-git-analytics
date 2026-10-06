@@ -20,7 +20,8 @@ const IDENTITY_TRAILERS: [&str; 8] = [
     "cc",
 ];
 
-fn is_identity_trailer(line: &str) -> bool {
+/// Whether `line` is a `Token: value` trailer naming a person.
+pub(crate) fn is_identity_trailer(line: &str) -> bool {
     line.trim_start().split_once(':').is_some_and(|(token, _)| {
         let token = token.trim_end();
         IDENTITY_TRAILERS

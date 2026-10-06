@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 
 /// LLM provider selection for the classification LLM tier.
 ///
-/// Why: operators need to switch between OpenRouter, AWS Bedrock, and the
-/// direct Anthropic API without changing binary flags. An enum keeps the set
-/// of valid values closed and type-safe.
-/// What: three variants — `Openrouter`, `Bedrock`, and `AnthropicApi`.
+/// Why: operators need to switch between OpenRouter, AWS Bedrock, the
+/// direct Anthropic API and TypeSafe Jev without changing binary flags. An
+/// enum keeps the set of valid values closed and type-safe.
+/// What: `Openrouter`, `Bedrock`, `AnthropicApi` and `Jev` (#111).
 /// Serde renames map to lowercase kebab-case strings matching the YAML schema.
 /// Test: deserialization is covered by `llm_config_*` unit tests in this
 /// module. Provider-specific behaviour is covered by `classify::tiers::llm`.
@@ -43,6 +43,83 @@ pub enum LlmSource {
     /// [`LlmConfig::api_key_env`] (set it to e.g. `ANTHROPIC_API_KEY`).
     #[serde(rename = "anthropic-api")]
     AnthropicApi,
+    /// Route through TypeSafe's Jev decision model
+    /// (`POST https://api.typesafe.ai/v1/systemone`, #111).
+    ///
+    /// Requires a key in the environment variable named by
+    /// [`LlmConfig::api_key_env`]; left at its default, that is
+    /// [`JEV_API_KEY_ENV`]. Every commit message is pseudonymized before it
+    /// is sent; see [`JevOptions`].
+    Jev,
+}
+
+/// Environment variable read for `source: jev` when `api_key_env` is left at
+/// its default (#111).
+pub const JEV_API_KEY_ENV: &str = "TYPESAFE_API_KEY";
+
+/// Default per-run spend cap for `source: jev`, in US dollars (#111).
+pub const JEV_DEFAULT_BUDGET_USD: f64 = 0.25;
+
+/// Default compiled-size cap of the Jev name matcher, in bytes (#111).
+pub const JEV_DEFAULT_NAME_MATCHER_BYTES: usize = 64 << 20;
+
+/// Settings that apply only to `source: jev` (`llm.jev:` in YAML, #111).
+///
+/// Why: Jev is a third-party hosted model, so what leaves the host and what
+/// a run may spend both need an operator-owned knob.
+/// What: the per-run spend cap, extra terms the pseudonymizer must replace,
+/// and an optional directory that turns the run into a payload dump: each
+/// outbound request body is written there and nothing is sent.
+/// Test: `core::config::llm::tests::jev_source_and_options_parse`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct JevOptions {
+    /// Per-run spend cap in US dollars (default [`JEV_DEFAULT_BUDGET_USD`]).
+    /// No call starts once it could push the run's spend past this cap.
+    #[serde(default = "default_jev_budget_usd")]
+    pub budget_usd: f64,
+    /// Extra operator terms (e.g. internal service names) replaced by
+    /// `TERM_n` before a message is sent; matched case-insensitively as
+    /// whole words. Empty by default.
+    #[serde(default)]
+    pub sensitive_terms: Vec<String>,
+    /// When set, write each outbound request body as a JSON file in this
+    /// directory and send nothing; no API key is needed. Calls are recorded
+    /// as `skipped`. Point `tga classify` at a scratch database copy.
+    #[serde(default)]
+    pub payload_dump_dir: Option<std::path::PathBuf>,
+    /// Extra operator regexes for internal record ids; each match is
+    /// replaced by `ID_n` before any other rule runs (#111). An invalid
+    /// regex fails the run before anything is sent. Empty by default.
+    #[serde(default)]
+    pub id_patterns: Vec<String>,
+    /// Compiled-size cap of the name matcher, in bytes (default
+    /// [`JEV_DEFAULT_NAME_MATCHER_BYTES`], 64 MiB). A run whose names do not
+    /// fit fails before anything is sent; raise it for a very large roster
+    /// (#111).
+    #[serde(default = "default_jev_name_matcher_bytes")]
+    pub name_matcher_bytes: usize,
+}
+
+fn default_jev_budget_usd() -> f64 {
+    JEV_DEFAULT_BUDGET_USD
+}
+
+fn default_jev_name_matcher_bytes() -> usize {
+    JEV_DEFAULT_NAME_MATCHER_BYTES
+}
+
+impl Default for JevOptions {
+    fn default() -> Self {
+        Self {
+            budget_usd: JEV_DEFAULT_BUDGET_USD,
+            sensitive_terms: Vec::new(),
+            payload_dump_dir: None,
+            id_patterns: Vec::new(),
+            name_matcher_bytes: JEV_DEFAULT_NAME_MATCHER_BYTES,
+        }
+    }
 }
 
 /// Anthropic `output_config.effort` level for the LLM tier (#131).
@@ -127,7 +204,7 @@ pub enum LlmFallbackScope {
 pub struct LlmConfig {
     /// LLM provider to use.
     ///
-    /// Valid values (YAML): `openrouter`, `bedrock`, `anthropic-api`.
+    /// Valid values (YAML): `openrouter`, `bedrock`, `anthropic-api`, `jev`.
     /// Defaults to `openrouter`.
     #[serde(default)]
     pub source: LlmSource,
@@ -172,10 +249,31 @@ pub struct LlmConfig {
     /// `high`. Ignored by the other sources.
     #[serde(default)]
     pub effort: Option<LlmEffort>,
+
+    /// `source: jev` settings (#111); ignored by the other sources.
+    #[serde(default)]
+    pub jev: JevOptions,
 }
 
 fn default_api_key_env() -> String {
     "OPENROUTER_API_KEY".to_string()
+}
+
+impl LlmConfig {
+    /// The environment variable the configured source reads its key from.
+    ///
+    /// Why (#111): `api_key_env` defaults to `OPENROUTER_API_KEY` for every
+    /// source, and a Jev run must not send an OpenRouter key to TypeSafe.
+    /// What: for `source: jev` with `api_key_env` left at that default,
+    /// returns [`JEV_API_KEY_ENV`]; otherwise `api_key_env` as written.
+    /// Test: `core::config::llm::tests::jev_source_and_options_parse`.
+    pub fn effective_api_key_env(&self) -> &str {
+        if self.source == LlmSource::Jev && self.api_key_env == default_api_key_env() {
+            JEV_API_KEY_ENV
+        } else {
+            &self.api_key_env
+        }
+    }
 }
 
 impl Default for LlmConfig {
@@ -186,6 +284,7 @@ impl Default for LlmConfig {
             region: None,
             model: None,
             effort: None,
+            jev: JevOptions::default(),
         }
     }
 }
@@ -210,5 +309,42 @@ mod tests {
         assert_eq!(scope, LlmFallbackScope::Unanswered);
         assert_eq!(LlmFallbackScope::default(), LlmFallbackScope::LowConfidence);
         assert!(serde_yaml::from_str::<LlmFallbackScope>("abstentions").is_err());
+    }
+
+    /// Why (#111): `source: jev` must parse, read `TYPESAFE_API_KEY` unless
+    /// the operator names another variable, and default its budget, term
+    /// list and dump mode so an existing config needs no new keys.
+    /// What: parses a minimal and a full `jev` section, checks the defaults,
+    /// the key variable, and that a typo under `jev:` is rejected.
+    /// Test: this test.
+    #[test]
+    fn jev_source_and_options_parse() {
+        let min: LlmConfig = serde_yaml::from_str("source: jev\n").expect("parse");
+        assert_eq!(min.source, LlmSource::Jev);
+        assert_eq!(min.effective_api_key_env(), JEV_API_KEY_ENV);
+        assert_eq!(min.jev, JevOptions::default());
+        assert_eq!(min.jev.budget_usd, JEV_DEFAULT_BUDGET_USD);
+        assert!(min.jev.sensitive_terms.is_empty());
+        assert!(min.jev.payload_dump_dir.is_none());
+        assert!(min.jev.id_patterns.is_empty());
+        assert_eq!(min.jev.name_matcher_bytes, JEV_DEFAULT_NAME_MATCHER_BYTES);
+
+        let full: LlmConfig = serde_yaml::from_str(
+            "source: jev\napi_key_env: MY_JEV_KEY\njev:\n  budget_usd: 0.1\n  \
+             sensitive_terms: [ledgerd, paygate]\n  payload_dump_dir: /tmp/jev\n",
+        )
+        .expect("parse");
+        assert_eq!(full.effective_api_key_env(), "MY_JEV_KEY");
+        assert_eq!(full.jev.budget_usd, 0.1);
+        assert_eq!(full.jev.sensitive_terms, ["ledgerd", "paygate"]);
+        assert_eq!(
+            full.jev.payload_dump_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/jev"))
+        );
+        assert!(serde_yaml::from_str::<LlmConfig>("source: jev\njev:\n  budget: 1\n").is_err());
+
+        // Other sources keep reading `api_key_env` as written.
+        let or = LlmConfig::default();
+        assert_eq!(or.effective_api_key_env(), "OPENROUTER_API_KEY");
     }
 }

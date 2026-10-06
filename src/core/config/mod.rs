@@ -52,7 +52,10 @@ pub mod validator;
 
 pub use aliases::{AliasFile, DeveloperAliasEntry};
 pub use azdo::AzureDevOpsConfig;
-pub use llm::{LlmConfig, LlmEffort, LlmFallbackScope, LlmSource};
+pub use llm::{
+    JevOptions, LlmConfig, LlmEffort, LlmFallbackScope, LlmSource, JEV_API_KEY_ENV,
+    JEV_DEFAULT_BUDGET_USD, JEV_DEFAULT_NAME_MATCHER_BYTES,
+};
 pub use validator::{ConfigError, ConfigValidator};
 
 /// Top-level configuration root.
@@ -1889,6 +1892,22 @@ mod tests {
         let yaml = "source: anthropic-api\n";
         let llm: LlmConfig = serde_yaml::from_str(yaml).expect("parse llm config");
         assert_eq!(llm.source, LlmSource::AnthropicApi);
+    }
+
+    /// Why (#111): a whole config with `llm: { source: jev }` must load,
+    /// with the Jev options nested under `llm.jev`.
+    /// What: parse a `Config` naming the jev source and one sensitive term.
+    /// Test: pure deserialization.
+    #[test]
+    fn llm_source_jev_parses_in_a_full_config() {
+        let yaml =
+            "repositories: []\nllm:\n  source: jev\n  jev:\n    sensitive_terms: [ledgerd]\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse config");
+        let llm = cfg.llm.expect("llm section");
+        assert_eq!(llm.source, LlmSource::Jev);
+        assert_eq!(llm.effective_api_key_env(), JEV_API_KEY_ENV);
+        assert_eq!(llm.jev.sensitive_terms, ["ledgerd"]);
+        assert_eq!(llm.jev.budget_usd, JEV_DEFAULT_BUDGET_USD);
     }
 
     /// Why: single-string `rules_file:` (old form) must still parse via the

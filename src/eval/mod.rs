@@ -32,8 +32,9 @@ pub mod subsample;
 // #111: resolve each sample row's merge flag, from the row or a tga DB.
 mod merges;
 mod population;
-// #111: strip identity trailers and e-mails from the rater sheet.
-mod redact;
+// #111: strip identity trailers and e-mails from the rater sheet; the Jev
+// pseudonymizer reuses its trailer test.
+pub(crate) mod redact;
 mod report_md;
 // #111: the verdict resolution `sample` and `repredict` share.
 mod verdict;

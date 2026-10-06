@@ -145,6 +145,12 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
             "Classified {}/{} commits",
             classify_stats.classified, classify_stats.total_commits
         );
+        // #111: a skipped Jev call names its recovery command here too.
+        crate::commands::classify::print_skipped_recovery(
+            &classify_stats.llm_usage,
+            &cfg.source_path,
+            db,
+        )?;
     } else {
         tracing::info!("stage 2: classify (skipped)");
     }

@@ -67,10 +67,11 @@ an `llm:` section emits a `tracing::warn!` deprecation message.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `source` | enum | `openrouter` | LLM provider: `openrouter`, `bedrock`, or `anthropic-api` |
-| `api_key_env` | string | `OPENROUTER_API_KEY` | **Name** of the env var holding the API key (never the key itself). Ignored for `bedrock`. |
+| `source` | enum | `openrouter` | LLM provider: `openrouter`, `bedrock`, `anthropic-api`, or `jev` |
+| `api_key_env` | string | `OPENROUTER_API_KEY` (`TYPESAFE_API_KEY` for `jev`) | **Name** of the env var holding the API key (never the key itself). Ignored for `bedrock`. |
 | `region` | string | None | AWS region (Bedrock only). When absent, the AWS SDK resolves the region from the environment (`AWS_DEFAULT_REGION`, profile, etc.). |
 | `model` | string | provider-appropriate default | Provider-specific model id (see below). |
+| `jev` | map | see below | `source: jev` settings: `budget_usd`, `sensitive_terms`, `payload_dump_dir`, `id_patterns`, `name_matcher_bytes`. Ignored by the other sources. |
 
 #### Source variants
 
@@ -143,6 +144,150 @@ llm:
 
 This source is available in the default `cargo install tga` build — no feature flags required.
 
+**`jev`** (added v10.1.0, #111)
+
+Calls TypeSafe's Jev decision model (`POST https://api.typesafe.ai/v1/systemone`)
+with bearer auth. Each commit becomes one `choice` question: the criteria are
+the configured categories (with their `description` when the rules file gives
+one) plus the reserved abstain codes `NO_MATCH` and `INSUFFICIENT_INFORMATION`.
+When the rules extend the built-ins, the criteria are every category the loaded
+rules can emit. A category may not be named `NO_MATCH` or
+`INSUFFICIENT_INFORMATION`.
+
+- **Key:** read from the variable named by `api_key_env`. Left at its default,
+  that is `TYPESAFE_API_KEY`. Unset or empty → `tga classify` exits non-zero
+  before writing any DB rows (unless `payload_dump_dir` is set).
+- **Verdicts:** an abstain code → `abstained`; a code outside the configured
+  set → `out_of_set`; a configured code → the verdict, with confidence equal
+  to that code's probability. A transport error, an HTTP error after retries
+  (429 and 5xx are retried twice with backoff), or a reply that fails
+  validation → `failed`. None of these replace the rule verdict. Each call's
+  usage is written to `llm_usage` with provider `jev`. Merge commits are never
+  sent, as for every source.
+- **Pseudonymization:** before a message is sent, tga replaces e-mail
+  addresses (`EMAIL_n`), people named in git trailers (`Co-authored-by`,
+  `Signed-off-by`, `Reviewed-by`, `Acked-by`, `Tested-by`, `Reported-by`,
+  `Helped-by`, `cc`), `@` mentions and roster names from `team:` and
+  `developer_aliases` (`PERSON_n`), ticket keys such as `ABC-123`
+  (`TICKET_n`), URLs (`URL_n`), host names, domains and IPv4 addresses
+  (`HOST_n`), file paths and source file names (`PATH_n`), repository names,
+  directory names and owners from `repositories:` (`REPO_n`), and every
+  `jev.sensitive_terms` entry (`TERM_n`). Numbers are assigned in first-seen
+  order and are stable for the run; other text is sent unchanged. The
+  pseudonym → original map stays in memory and is never sent or logged.
+  Every person in the database is a known person, not only the run's
+  authors: `commits` author names and address local-parts, `authors`
+  canonical names, addresses and aliases, `pull_requests.author`,
+  `pr_reviewers.reviewer_id` and `display_name`, `linear_issues.assignee`
+  Jira changelog and comment authors (`fact_ticket_transitions.author`,
+  `fact_jira_comment_detail.author`), reporters (`fact_pm_effort.pm_name`)
+  and the `author_email` local-parts of the weekly fact tables. A known
+  name is matched whole; a multi-word display name is also matched by its
+  parts, including hyphen parts and either apostrophe (`O'Brien`,
+  `O’Brien`). A single-token login is matched whole only, and bot accounts
+  (`x[bot]`, `x-bot`) are not people. Classification vocabulary is never a
+  name: the category names and descriptions, the keywords and pattern
+  words of the loaded rules, and a built-in list of generic and technical
+  words (`test`, `dev`, `admin`, `ci`, `build`, `deploy`, `role`, …). A
+  single-word identity made of such words (`test`, `deploy-bot`) is not
+  learned, and a name part that is one is never matched alone; the person
+  is still hidden by their full name and address. A part that is a common
+  given name (`Frank`, `Will`) is matched only in Titlecase and not at the
+  start of a sentence or list item, so `frank` and `Mark as done` stay.
+  Values of
+  `-with`, `-to` and role trailers (`Tested with:`, `Owner:`) are replaced
+  on their own line, but teach the run a name only when they look like one
+  (`Jane Roe`, `jroe-acme`); `Tested with: chrome and firefox` teaches
+  nothing.
+- **Categories:** option keys are pseudonym codes (`CAT_1`…). Each code's
+  criterion text is the category's description, or — when it has none — the
+  category name itself, sent verbatim: it is operator configuration, not
+  commit text, and is never tokenised. Do not put customer or people names
+  in category descriptions.
+- **Paths:** every slash-joined token is a path (`PATH_n`) — two-segment
+  directories (`billing/invoices`), branch names (`feature/foo-bar`,
+  `release/2026-09`), `.github/workflows/…` and deeper paths, all-caps
+  pairs (`CI/CD`, `I/O`) included — unless it is prose: all segments digits
+  (`1/2`, `2026/09/25`), two segments where one is a single lowercase
+  character (`w/o`, `n/a`), or one of the fixed pairs `and/or`,
+  `read/write`, `client/server`, `input/output`, `true/false`, `yes/no`,
+  `on/off`, `pass/fail` (either order, any case).
+- **File names:** a bare `name.ext` with a known source, config, data or doc
+  extension becomes `PATH_n.<ext>` (`invoice_sync.py`, `PriceTable.tsx`,
+  `README.md`, `Cargo.toml`); build files (`Makefile`, `Dockerfile`,
+  `Dockerfile.prod`, `CODEOWNERS`) become `PATH_n`. The run also learns
+  every basename in `files.path` (the files each collected commit touched)
+  and, when identifier-like (`invoice_sync`, `PriceTable`), its stem, so a
+  file with no or an unusual extension is caught too; an extension-less
+  basename that is classification vocabulary (`build`) is skipped.
+- **Ticket keys:** uppercase keys always; lowercase keys with any number of
+  digits (`abc-1`, `[abc-1]`, `abc-1_fix`, `build_abc-7`) unless the prefix
+  is a version or ordinal word (`python-3`, `step-2`) or classification
+  vocabulary (`fix-1`).
+- **Spend cap:** `jev.budget_usd` (default `0.25`) caps one run's running
+  total. Input costs $0.042 per million tokens; output tokens cost $0 and
+  never count against the cap. Before each call tga reserves the request's
+  byte length plus 1024 input tokens, times the three attempts. After the
+  call it charges the reported input plus that per-attempt bound for every
+  earlier attempt sent (a timed-out or failed attempt may still be billed),
+  so retries never push the run past the cap. Once a reservation would pass
+  the cap, that call and every later call in the run are recorded as
+  `skipped` and nothing more is sent.
+- **Model:** tga pins `jev-1.13.0`. Any other `llm.model` is a
+  configuration error, and a reply that names another model is recorded as
+  `failed` with the served model in `llm_usage.model`. Each commit is one
+  `category` question; the second "mixed" question is not sent.
+- **Fail closed:** a message the pseudonymizer cannot process is recorded as
+  `failed` and not sent; after a failed name-matcher rebuild every later
+  message in the run fails the same way.
+- **More redaction:** trailers in any case and spacing whose token ends in
+  `by`, `with` or `to` (`Approved by:`, `Paired-with:`, `Thanks-to:`) or is
+  `Reviewer`, `Author`, `Owner`, `Assignee` or `Approver` (singular or
+  plural), with or without an address; Phabricator `Reviewers:`,
+  `Reviewed By:`, `Subscribers:` and `Auditors:` username lists, including
+  a list wrapped onto an indented next line; trailers behind list or quote
+  markers; bracketed and any-case ticket keys (`[abc-123]`,
+  `PROJ-12_fix`, `feature/proj-12`); record ids of 1–4 letters and 4+
+  digits (`H1234` → `ID_n`); `jev.id_patterns` regexes (`ID_n`); IPv6
+  addresses; host names in any case when the last label is a known TLD
+  (`DB1.CORP.ACME.COM`).
+- **Hosts on word suffixes:** a dotted name of two or more labels, in any
+  case, ending in `local`, `prod`, `staging`, `stage`, `qa`, `uat`, `int`,
+  `private`, `office`, `home`, `cloud`, `dev`, `app`, `in`, `it`, `at`,
+  `be`, `me`, `us`, `no`, `so`, `to`, `info`, `tech`, `site`, `online`,
+  `global` or `test` is a host (`acme.dev`, `ledger.prod`, `ACME.LOCAL`)
+  unless another label is a code or member word (`config`, `env`,
+  `window`, `this`, `process`, `self`, …): `config.dev`, `window.app` and
+  `process.env.dev` stay. A name followed by `(` or with a camelCase label
+  (`fooBar.baz`) is code and stays, as does `f64::MAX`.
+- **Name matcher size:** `jev.name_matcher_bytes` (default `67108864`,
+  64 MiB) caps the compiled matcher of learned names and file names. A run
+  whose names do not fit fails before anything is sent. Measured: about
+  18,000 two-word names fit the default; 50,000 fit `268435456` (256 MiB),
+  which builds in about one second in a release build. A repository with
+  many files may need a larger value.
+- **Payload dump:** with `jev.payload_dump_dir` set, tga writes each exact
+  outbound request body to `<dir>/jev-request-<hash>.json`, sends nothing, and
+  records the calls as `skipped`; no key is needed. Next to each body it
+  writes `<dir>/jev-request-<hash>.tokens.json`, `{"tokens": {"PERSON_1":
+  "<original>", …}}` for every pseudonym in that message, so a scanner can
+  measure which words each token replaced. That map holds the originals:
+  keep the dump directory on the host. `tga classify` still writes
+  the rule verdicts, so point it at a scratch copy of the database. A relative
+  path resolves against the config file's directory.
+
+```yaml
+llm:
+  source: jev
+  # api_key_env: TYPESAFE_API_KEY     # the default for this source
+  # model: jev-1.13.0                 # pinned; any other value is an error
+  jev:
+    budget_usd: 0.25                  # per-run spend cap (default)
+    sensitive_terms: [ledgerd, paygate]   # extra names to hide (default: none)
+    # payload_dump_dir: ./jev-payloads   # write bodies, send nothing
+    # name_matcher_bytes: 268435456      # raise for ~50k people (default 64 MiB)
+```
+
 #### Self-enabling behavior (added v2.3.0)
 
 When a valid `llm:` section is present in the config, the LLM classification tier
@@ -164,6 +309,7 @@ comment out the `llm:` block.
 | `openrouter` | `gpt-4o-mini` |
 | `bedrock` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `anthropic-api` | `claude-3-5-haiku-latest` |
+| `jev` | `jev-1.13.0` |
 
 #### Security note
 

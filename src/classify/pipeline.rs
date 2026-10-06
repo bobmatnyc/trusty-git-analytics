@@ -9,11 +9,9 @@ use crate::classify::classifier::{ClassificationEngine, ClassificationEngineConf
 use crate::classify::errors::Result;
 use crate::classify::rules::default_rules;
 use crate::classify::sources::ExternalSourceResolver;
-use crate::classify::tiers::bedrock::DEFAULT_BEDROCK_MODEL;
-use crate::classify::tiers::llm::ANTHROPIC_DEFAULT_MODEL;
 use crate::classify::tiers::ClassificationResult;
 use crate::classify::trace::RuleSources;
-use crate::core::config::{Config, LlmSource};
+use crate::core::config::Config;
 use crate::core::db::Database;
 use crate::core::models::ClassificationMethod;
 
@@ -24,7 +22,7 @@ const DEFAULT_MIN_COVERAGE_PCT: f64 = 20.0;
 
 /// Rule categories (deduplicated, rule order) followed by any `categories:`
 /// entry no rule names, with the entries' descriptions attached (#131).
-fn configured_categories(
+pub(super) fn configured_categories(
     ruleset: crate::classify::rules::RuleSet,
 ) -> Vec<crate::classify::rules::CategoryDef> {
     use crate::classify::rules::CategoryDef;
@@ -106,7 +104,7 @@ pub struct RepoCoverage {
 /// builder methods.
 /// Test: covered by `classify::tests::pipeline_runs_against_in_memory_db`.
 pub struct ClassificationPipeline {
-    config: Config,
+    pub(super) config: Config,
     /// When `true`, re-classify commits that already carry a verdict.
     ///
     /// Defaults to `false` (skip-if-classified). See [`Self::with_force`].
@@ -283,19 +281,14 @@ impl ClassificationPipeline {
                 // Model resolution order:
                 //  1. Explicit `llm.model` in the `llm:` section.
                 //  2. Legacy `classification.llm_model` (migration compat).
-                //  3. Source-aware default: bedrock → DEFAULT_BEDROCK_MODEL,
-                //     anthropic-api → ANTHROPIC_DEFAULT_MODEL,
-                //     openrouter → "gpt-4o-mini".
+                //  3. Source-aware default: `llm::default_model_for`.
                 //
                 // Why: using `gpt-4o-mini` as the universal fallback causes
                 // invalid-model errors for `bedrock` and `anthropic-api` sources
                 // when `llm.model` is unset. Each provider requires a model id
                 // from its own namespace.
-                let source_default = match llm_cfg.source {
-                    LlmSource::Bedrock => DEFAULT_BEDROCK_MODEL,
-                    LlmSource::AnthropicApi => ANTHROPIC_DEFAULT_MODEL,
-                    LlmSource::Openrouter => "gpt-4o-mini",
-                };
+                let source_default =
+                    crate::classify::tiers::llm::default_model_for(&llm_cfg.source);
                 let model = llm_cfg
                     .model
                     .as_deref()
@@ -368,6 +361,8 @@ impl ClassificationPipeline {
                 Some(categories) => llm_classifier.with_allowed_categories(categories),
                 None => llm_classifier,
             };
+            // #111: Jev also needs its category set and the names to hide.
+            let llm_classifier = self.attach_jev_context(llm_classifier)?;
             engine.attach_llm(llm_classifier);
         }
 
@@ -392,7 +387,7 @@ impl ClassificationPipeline {
     /// Load and merge `classification.rules_files`, or the built-ins when
     /// none are configured (#445 batch C). The last file's `extend_defaults`
     /// flag wins; with it set, custom rules override defaults by id.
-    fn load_ruleset(&self) -> Result<(crate::classify::rules::RuleSet, RuleSources)> {
+    pub(super) fn load_ruleset(&self) -> Result<(crate::classify::rules::RuleSet, RuleSources)> {
         use crate::classify::rules::load_rules_multi_with_sources;
         let paths: Vec<&std::path::Path> = self
             .config
@@ -744,6 +739,8 @@ impl ClassificationPipeline {
                      fallback will short-circuit silently"
                 );
             }
+            // #111: Jev learns every author and message of the run first.
+            super::pipeline_jev::prepare_jev(&engine, db, &commits)?;
             let cls = self.config.classification.as_ref();
             (llm_totals, usage_rows) = super::pipeline_llm::run_llm_fallback(
                 &engine,

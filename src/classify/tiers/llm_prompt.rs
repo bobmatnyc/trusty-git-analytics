@@ -37,6 +37,9 @@ pub enum LlmOutcome {
     OutOfSet,
     /// No usable reply: transport error, non-2xx, refusal, or unparseable text.
     Failed,
+    /// No request was sent: the run's spend cap was reached, or the call
+    /// only wrote its payload to a dump directory (#111, `source: jev`).
+    Skipped,
 }
 
 impl LlmOutcome {
@@ -47,6 +50,7 @@ impl LlmOutcome {
             Self::Abstained => "abstained",
             Self::OutOfSet => "out_of_set",
             Self::Failed => "failed",
+            Self::Skipped => "skipped",
         }
     }
 }
@@ -71,6 +75,9 @@ pub struct LlmCall {
     pub usage: Option<LlmUsage>,
     /// How the call ended.
     pub outcome: LlmOutcome,
+    /// The model id the provider's reply named, when it named one (#111:
+    /// Jev); `llm_usage.model` records it in place of the configured id.
+    pub model: Option<String>,
 }
 
 // #137: `LlmCall` is `#[non_exhaustive]`. One named constructor per outcome,
@@ -83,6 +90,7 @@ impl LlmCall {
             verdict: Some(verdict),
             usage,
             outcome: LlmOutcome::Answered,
+            model: None,
         }
     }
 
@@ -92,6 +100,7 @@ impl LlmCall {
             verdict: None,
             usage,
             outcome: LlmOutcome::Abstained,
+            model: None,
         }
     }
 
@@ -101,6 +110,7 @@ impl LlmCall {
             verdict: None,
             usage,
             outcome: LlmOutcome::OutOfSet,
+            model: None,
         }
     }
 
@@ -110,7 +120,24 @@ impl LlmCall {
             verdict: None,
             usage,
             outcome: LlmOutcome::Failed,
+            model: None,
         }
+    }
+
+    /// A call that sent no request (#111); it never carries a verdict.
+    pub fn skipped() -> Self {
+        Self {
+            verdict: None,
+            usage: None,
+            outcome: LlmOutcome::Skipped,
+            model: None,
+        }
+    }
+
+    /// This call with the model id the provider's reply named (#111).
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
     }
 }
 

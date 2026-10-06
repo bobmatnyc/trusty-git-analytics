@@ -177,6 +177,24 @@ async fn anthropic_usage_is_recorded() {
     assert_eq!(llm.model(), "claude-sonnet-5");
 }
 
+/// Why (#111, owner default): only the Jev source pseudonymizes; every
+/// other provider receives the commit message as written.
+/// What: a message with an e-mail, a ticket key and a path reaches the
+/// mock Anthropic endpoint byte for byte.
+/// Test: this test.
+#[tokio::test]
+async fn non_jev_providers_receive_the_real_message() {
+    let server = anthropic_server("feature").await;
+    let message = "fix ACME-42 for jane.doe@corp.example.com in src/billing/ledger.rs";
+    anthropic_llm(&server).classify_detailed(message).await;
+    let sent = sent_body(&server).await["messages"].to_string();
+    assert!(sent.contains(message), "{sent}");
+    assert!(
+        !sent.contains("EMAIL_") && !sent.contains("TICKET_"),
+        "{sent}"
+    );
+}
+
 /// Why (#111): the OpenAI-compatible path reports `prompt_tokens` /
 /// `completion_tokens`.
 /// What: mock chat-completions reply with `usage`.
