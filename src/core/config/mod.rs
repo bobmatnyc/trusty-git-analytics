@@ -1528,11 +1528,15 @@ impl Config {
     /// - [`TgaError::IoError`] if the file cannot be read.
     /// - [`TgaError::SerdeYamlError`] if YAML parsing fails.
     /// - [`TgaError::ConfigError`] if any user-supplied `ticket_regex`
-    ///   (JIRA, GitHub, Linear) is not a valid regular expression.
+    ///   (JIRA, GitHub, Linear) is not a valid regular expression, or a
+    ///   top-level key is `jev`, starts with `llm.`, or names a `llm.jev:`
+    ///   option (#111).
     pub fn load(path: &Path) -> Result<Config> {
         let resolved = expand_path(path);
         tracing::debug!(path = %resolved.display(), "loading config");
         let text = std::fs::read_to_string(&resolved)?;
+        // #111: a misplaced `jev:` or `llm.*` key must not load silently.
+        llm::reject_misplaced_top_level_keys(&text)?;
         let mut cfg: Config = serde_yaml::from_str(&text)?;
         // #111: relative paths in the file are relative to the file, not CWD.
         if let Some(dir) = resolved.parent() {

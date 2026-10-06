@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::errors::{Result, TgaError};
+
 /// LLM provider selection for the classification LLM tier.
 ///
 /// Why: operators need to switch between OpenRouter, AWS Bedrock, the
@@ -277,6 +279,46 @@ fn default_api_key_env() -> String {
     "OPENROUTER_API_KEY".to_string()
 }
 
+/// [`JevOptions`] field names; a top-level key with one of these names is a
+/// misplaced `llm.jev:` option (#111).
+const JEV_OPTION_KEYS: [&str; 6] = [
+    "obfuscate",
+    "payload_dump_dir",
+    "sensitive_terms",
+    "id_patterns",
+    "name_matcher_bytes",
+    "budget_usd",
+];
+
+/// Reject a top-level config key that belongs under `llm:` or `llm.jev:`.
+///
+/// Why (#111, delta review HIGH): `Config` ignores unknown top-level keys
+/// for Python compatibility, so a misplaced Jev block loaded with
+/// `obfuscate` left off and real text was sent.
+/// What: for a YAML mapping, fails on the key `jev`, any key starting with
+/// `llm.`, or a [`JevOptions`] field name, naming the key and where it
+/// belongs. Every other key, and text that is not a mapping or does not
+/// parse, passes; the typed parse reports those.
+/// Test: `tests::misplaced_top_level_jev_keys_fail_the_config_load`.
+pub(super) fn reject_misplaced_top_level_keys(text: &str) -> Result<()> {
+    let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str(text) else {
+        return Ok(());
+    };
+    for key in map.keys().filter_map(serde_yaml::Value::as_str) {
+        let belongs = if key == "jev" || JEV_OPTION_KEYS.contains(&key) {
+            "it belongs under `llm.jev:`"
+        } else if key.starts_with("llm.") {
+            "YAML does not split a dotted key; write it nested under `llm:`"
+        } else {
+            continue;
+        };
+        return Err(TgaError::ConfigError(format!(
+            "top-level key `{key}` is not read; {belongs}"
+        )));
+    }
+    Ok(())
+}
+
 impl LlmConfig {
     /// The environment variable the configured source reads its key from.
     ///
@@ -409,5 +451,67 @@ mod tests {
         .expect("write");
         let cfg = crate::core::config::Config::load(&path).expect("documented shape");
         assert!(cfg.llm.expect("llm").jev.payload_dump_dir.is_some());
+    }
+
+    /// Why (#111, delta review HIGH): `Config` tolerates unknown top-level
+    /// keys, so a top-level `jev:` block, a dotted `llm.jev.obfuscate:` key
+    /// or a bare `obfuscate:` loaded with `obfuscate` left off, and real
+    /// text reached TypeSafe.
+    /// What: each placement fails [`crate::core::config::Config::load`]
+    /// with an error naming the key and where it belongs; another unknown
+    /// top-level key still loads.
+    /// Test: this test.
+    #[test]
+    fn misplaced_top_level_jev_keys_fail_the_config_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let load = |yaml: &str| {
+            std::fs::write(&path, yaml).expect("write");
+            crate::core::config::Config::load(&path)
+        };
+        let jev_keys = [
+            "obfuscate: true",
+            "payload_dump_dir: ./dump",
+            "sensitive_terms: [ledgerd]",
+            "id_patterns: ['Q\\d+']",
+            "name_matcher_bytes: 1024",
+            "budget_usd: 0.1",
+        ];
+        let mut cases: Vec<(String, &str, &str)> = vec![
+            (
+                "llm:\n  source: jev\njev:\n  obfuscate: true\n".into(),
+                "jev",
+                "llm.jev",
+            ),
+            (
+                "llm:\n  source: jev\nllm.jev.obfuscate: true\n".into(),
+                "llm.jev.obfuscate",
+                "nested",
+            ),
+            ("llm.source: jev\n".into(), "llm.source", "nested"),
+        ];
+        for key in jev_keys {
+            let name = key.split(':').next().expect("key");
+            cases.push((format!("llm:\n  source: jev\n{key}\n"), name, "llm.jev"));
+        }
+        let mut loaded = Vec::new();
+        for (yaml, key, belongs) in &cases {
+            match load(yaml) {
+                Ok(_) => loaded.push(*key),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(e.contains(&format!("`{key}`")), "{key}: {e}");
+                    assert!(e.contains(belongs), "{key}: {e}");
+                }
+            }
+        }
+        assert!(loaded.is_empty(), "misplaced keys loaded: {loaded:?}");
+
+        // Documented Python sections `Config` does not model keep loading.
+        let cfg = load(
+            "llm:\n  source: jev\n  jev:\n    obfuscate: true\nvelocity: {}\nquality_report: {}\n",
+        )
+        .expect("unknown top-level key tolerated");
+        assert!(cfg.llm.expect("llm").jev.obfuscate);
     }
 }
