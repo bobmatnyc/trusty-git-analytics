@@ -614,6 +614,30 @@ impl ClassificationEngine {
         Some(call)
     }
 
+    /// Hand the LLM tier the run's messages, in commit order, and the names
+    /// the database records before the concurrent calls start (#111: every
+    /// name is known to the Jev pseudonymizer before its first request).
+    ///
+    /// # Errors
+    ///
+    /// The Jev name matcher cannot be built.
+    pub(crate) fn llm_prepare(
+        &self,
+        messages: &[&str],
+        names: &crate::classify::tiers::jev_obfuscate::RunNames,
+    ) -> std::result::Result<(), crate::classify::tiers::jev_error::JevError> {
+        match &self.llm {
+            Some(llm) => llm.prepare_batch(messages, names),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the attached LLM tier routes through Jev with
+    /// `llm.jev.obfuscate` on, so it must learn the run's names (#111).
+    pub(crate) fn llm_jev_obfuscates(&self) -> bool {
+        self.llm.as_ref().is_some_and(|l| l.jev_obfuscates())
+    }
+
     /// `(provider label, model id)` of the attached LLM tier, if any (#111).
     pub fn llm_identity(&self) -> Option<(&'static str, String)> {
         self.llm
@@ -752,6 +776,7 @@ mod tests {
                 confidence: 0.9,
             }],
             categories: Vec::new(),
+            buckets: None,
         };
         let engine = ClassificationEngine::new(ruleset, ClassificationEngineConfig::default())
             .expect("engine builds");

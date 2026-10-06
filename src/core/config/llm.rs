@@ -8,12 +8,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::errors::{Result, TgaError};
+
 /// LLM provider selection for the classification LLM tier.
 ///
-/// Why: operators need to switch between OpenRouter, AWS Bedrock, and the
-/// direct Anthropic API without changing binary flags. An enum keeps the set
-/// of valid values closed and type-safe.
-/// What: three variants — `Openrouter`, `Bedrock`, and `AnthropicApi`.
+/// Why: operators need to switch between OpenRouter, AWS Bedrock, the
+/// direct Anthropic API and TypeSafe Jev without changing binary flags. An
+/// enum keeps the set of valid values closed and type-safe.
+/// What: `Openrouter`, `Bedrock`, `AnthropicApi` and `Jev` (#111).
 /// Serde renames map to lowercase kebab-case strings matching the YAML schema.
 /// Test: deserialization is covered by `llm_config_*` unit tests in this
 /// module. Provider-specific behaviour is covered by `classify::tiers::llm`.
@@ -43,6 +45,95 @@ pub enum LlmSource {
     /// [`LlmConfig::api_key_env`] (set it to e.g. `ANTHROPIC_API_KEY`).
     #[serde(rename = "anthropic-api")]
     AnthropicApi,
+    /// Route through TypeSafe's Jev decision model
+    /// (`POST https://api.typesafe.ai/v1/systemone`, #111).
+    ///
+    /// Requires a key in the environment variable named by
+    /// [`LlmConfig::api_key_env`]; left at its default, that is
+    /// [`JEV_API_KEY_ENV`]. Every commit message is pseudonymized before it
+    /// is sent; see [`JevOptions`].
+    Jev,
+}
+
+/// Environment variable read for `source: jev` when `api_key_env` is left at
+/// its default (#111).
+pub const JEV_API_KEY_ENV: &str = "TYPESAFE_API_KEY";
+
+/// Default per-run spend cap for `source: jev`, in US dollars (#111).
+pub const JEV_DEFAULT_BUDGET_USD: f64 = 0.25;
+
+/// Default heap-byte cap of the Jev name matcher (#111).
+pub const JEV_DEFAULT_NAME_MATCHER_BYTES: usize = 64 << 20;
+
+/// Settings that apply only to `source: jev` (`llm.jev:` in YAML, #111).
+///
+/// Why: Jev is a third-party hosted model, so what leaves the host and what
+/// a run may spend both need an operator-owned knob.
+/// What: the per-run spend cap, the opt-in pseudonymizer (`obfuscate`) and
+/// the extra terms it must replace, and an optional directory that turns the run into a payload dump: each
+/// outbound request body is written there and nothing is sent.
+/// Test: `core::config::llm::tests::jev_source_and_options_parse`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct JevOptions {
+    /// Per-run spend cap in US dollars (default [`JEV_DEFAULT_BUDGET_USD`]).
+    /// No call starts once it could push the run's spend past this cap.
+    #[serde(default = "default_jev_budget_usd")]
+    pub budget_usd: f64,
+    /// Extra operator terms (e.g. internal service names) replaced by
+    /// `TERM_n` before a message is sent; matched case-insensitively as
+    /// whole words. Empty by default.
+    #[serde(default)]
+    pub sensitive_terms: Vec<String>,
+    /// When set, write each outbound request body as a JSON file in this
+    /// directory and send nothing; no API key is needed. Calls are recorded
+    /// as `skipped`. Point `tga classify` at a scratch database copy.
+    #[serde(default)]
+    pub payload_dump_dir: Option<std::path::PathBuf>,
+    /// Extra operator regexes for internal record ids; each match is
+    /// replaced by `ID_n` before any other rule runs (#111). An invalid
+    /// regex fails the run before anything is sent. Empty by default.
+    #[serde(default)]
+    pub id_patterns: Vec<String>,
+    /// Heap bytes the compiled name matcher may hold (default
+    /// [`JEV_DEFAULT_NAME_MATCHER_BYTES`], 64 MiB; about 66 bytes per name,
+    /// so roughly a million names). A run whose names do not fit fails
+    /// before anything is sent; raise it for a larger name set (#111).
+    #[serde(default = "default_jev_name_matcher_bytes")]
+    pub name_matcher_bytes: usize,
+    /// Pseudonymize each message before it is sent (default `false`).
+    ///
+    /// #111 (owner ruling 2026-10-06): Jev receives the commit message as
+    /// stored unless this is `true`. `false` skips the pseudonymizer, the
+    /// name, trailer and repository learning (with its database scans) and
+    /// the name-matcher build; `sensitive_terms`, `id_patterns` and
+    /// `name_matcher_bytes` then have no effect. `true` replaces names
+    /// before sending and fails the run closed when the matcher cannot be
+    /// built.
+    #[serde(default)]
+    pub obfuscate: bool,
+}
+
+fn default_jev_budget_usd() -> f64 {
+    JEV_DEFAULT_BUDGET_USD
+}
+
+fn default_jev_name_matcher_bytes() -> usize {
+    JEV_DEFAULT_NAME_MATCHER_BYTES
+}
+
+impl Default for JevOptions {
+    fn default() -> Self {
+        Self {
+            budget_usd: JEV_DEFAULT_BUDGET_USD,
+            sensitive_terms: Vec::new(),
+            payload_dump_dir: None,
+            id_patterns: Vec::new(),
+            name_matcher_bytes: JEV_DEFAULT_NAME_MATCHER_BYTES,
+            obfuscate: false,
+        }
+    }
 }
 
 /// Anthropic `output_config.effort` level for the LLM tier (#131).
@@ -122,12 +213,18 @@ pub enum LlmFallbackScope {
 ///
 /// `#[non_exhaustive]` (#137): outside this crate, start from
 /// [`LlmConfig::default`] and assign fields.
+///
+/// #111 (critic HIGH 3): an unknown key is a load error, so a `jev:`
+/// option written one level too high (`llm.payload_dump_dir`) can never be
+/// ignored and turn a payload dump into live requests.
+/// Test: `tests::misplaced_llm_keys_fail_the_config_load`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct LlmConfig {
     /// LLM provider to use.
     ///
-    /// Valid values (YAML): `openrouter`, `bedrock`, `anthropic-api`.
+    /// Valid values (YAML): `openrouter`, `bedrock`, `anthropic-api`, `jev`.
     /// Defaults to `openrouter`.
     #[serde(default)]
     pub source: LlmSource,
@@ -172,10 +269,80 @@ pub struct LlmConfig {
     /// `high`. Ignored by the other sources.
     #[serde(default)]
     pub effort: Option<LlmEffort>,
+
+    /// `source: jev` settings (#111); ignored by the other sources.
+    #[serde(default)]
+    pub jev: JevOptions,
 }
 
 fn default_api_key_env() -> String {
     "OPENROUTER_API_KEY".to_string()
+}
+
+/// [`JevOptions`] field names; a top-level key with one of these names is a
+/// misplaced `llm.jev:` option (#111).
+const JEV_OPTION_KEYS: [&str; 6] = [
+    "obfuscate",
+    "payload_dump_dir",
+    "sensitive_terms",
+    "id_patterns",
+    "name_matcher_bytes",
+    "budget_usd",
+];
+
+/// Reject a top-level config key that belongs under `llm:` or `llm.jev:`.
+///
+/// Why (#111, delta review HIGH): `Config` ignores unknown top-level keys
+/// for Python compatibility, so a misplaced Jev block loaded with
+/// `obfuscate` left off and real text was sent.
+/// What: for a YAML mapping, fails on the key `jev`, any key starting with
+/// `llm.`, or a [`JevOptions`] field name, naming the key and where it
+/// belongs. Keys are read as text, as the typed parse reads them, so a
+/// tagged or non-string scalar key is checked by its text. Every other key
+/// passes. Text passes unchecked only when it is not a mapping with
+/// scalar keys (a sequence, a map or sequence key, or a syntax error);
+/// the typed parse fails on all of those, so nothing loads unchecked.
+/// Test: `tests::misplaced_top_level_jev_keys_fail_the_config_load`,
+/// `tests::misplaced_top_level_jev_key_fails_beside_a_duplicate_key`,
+/// `tests::misplaced_top_level_jev_key_fails_beside_a_tagged_key`.
+pub(super) fn reject_misplaced_top_level_keys(text: &str) -> Result<()> {
+    // #111: a `Value` parse rejects a duplicate key at any depth that the
+    // typed parse accepts; read only top-level keys, last one winning.
+    // String keys: a `Value` key failed on `!!int abc`, which loads.
+    type TopLevel = std::collections::HashMap<String, serde::de::IgnoredAny>;
+    let Ok(map) = serde_yaml::from_str::<TopLevel>(text) else {
+        return Ok(());
+    };
+    for key in map.keys().map(String::as_str) {
+        let belongs = if key == "jev" || JEV_OPTION_KEYS.contains(&key) {
+            "it belongs under `llm.jev:`"
+        } else if key.starts_with("llm.") {
+            "YAML does not split a dotted key; write it nested under `llm:`"
+        } else {
+            continue;
+        };
+        return Err(TgaError::ConfigError(format!(
+            "top-level key `{key}` is not read; {belongs}"
+        )));
+    }
+    Ok(())
+}
+
+impl LlmConfig {
+    /// The environment variable the configured source reads its key from.
+    ///
+    /// Why (#111): `api_key_env` defaults to `OPENROUTER_API_KEY` for every
+    /// source, and a Jev run must not send an OpenRouter key to TypeSafe.
+    /// What: for `source: jev` with `api_key_env` left at that default,
+    /// returns [`JEV_API_KEY_ENV`]; otherwise `api_key_env` as written.
+    /// Test: `core::config::llm::tests::jev_source_and_options_parse`.
+    pub fn effective_api_key_env(&self) -> &str {
+        if self.source == LlmSource::Jev && self.api_key_env == default_api_key_env() {
+            JEV_API_KEY_ENV
+        } else {
+            &self.api_key_env
+        }
+    }
 }
 
 impl Default for LlmConfig {
@@ -186,6 +353,7 @@ impl Default for LlmConfig {
             region: None,
             model: None,
             effort: None,
+            jev: JevOptions::default(),
         }
     }
 }
@@ -210,5 +378,233 @@ mod tests {
         assert_eq!(scope, LlmFallbackScope::Unanswered);
         assert_eq!(LlmFallbackScope::default(), LlmFallbackScope::LowConfidence);
         assert!(serde_yaml::from_str::<LlmFallbackScope>("abstentions").is_err());
+    }
+
+    /// Why (#111): `source: jev` must parse, read `TYPESAFE_API_KEY` unless
+    /// the operator names another variable, and default its budget, term
+    /// list, dump mode and `obfuscate` (off) so an existing config needs no
+    /// new keys.
+    /// What: parses a minimal and a full `jev` section, checks the defaults,
+    /// the key variable, and that a typo under `jev:` is rejected.
+    /// Test: this test.
+    #[test]
+    fn jev_source_and_options_parse() {
+        let min: LlmConfig = serde_yaml::from_str("source: jev\n").expect("parse");
+        assert_eq!(min.source, LlmSource::Jev);
+        assert_eq!(min.effective_api_key_env(), JEV_API_KEY_ENV);
+        assert_eq!(min.jev, JevOptions::default());
+        assert_eq!(min.jev.budget_usd, JEV_DEFAULT_BUDGET_USD);
+        assert!(min.jev.sensitive_terms.is_empty());
+        assert!(min.jev.payload_dump_dir.is_none());
+        assert!(min.jev.id_patterns.is_empty());
+        assert_eq!(min.jev.name_matcher_bytes, JEV_DEFAULT_NAME_MATCHER_BYTES);
+        // #111 (owner ruling 2026-10-06): real commit text unless opted in.
+        assert!(!min.jev.obfuscate);
+
+        let full: LlmConfig = serde_yaml::from_str(
+            "source: jev\napi_key_env: MY_JEV_KEY\njev:\n  budget_usd: 0.1\n  \
+             sensitive_terms: [ledgerd, paygate]\n  payload_dump_dir: /tmp/jev\n  \
+             obfuscate: true\n",
+        )
+        .expect("parse");
+        assert!(full.jev.obfuscate);
+        assert_eq!(full.effective_api_key_env(), "MY_JEV_KEY");
+        assert_eq!(full.jev.budget_usd, 0.1);
+        assert_eq!(full.jev.sensitive_terms, ["ledgerd", "paygate"]);
+        assert_eq!(
+            full.jev.payload_dump_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/jev"))
+        );
+        assert!(serde_yaml::from_str::<LlmConfig>("source: jev\njev:\n  budget: 1\n").is_err());
+
+        // Other sources keep reading `api_key_env` as written.
+        let or = LlmConfig::default();
+        assert_eq!(or.effective_api_key_env(), "OPENROUTER_API_KEY");
+    }
+
+    /// Why (#111, critic HIGH 3): a `jev:` option written one level too high
+    /// was ignored, so `llm: {source: jev, payload_dump_dir: ...}` sent live
+    /// requests instead of writing a dump.
+    /// What: each `jev:` option, and a typo, placed directly under `llm:` is
+    /// a parse error naming the key, both for the section alone and through
+    /// [`crate::core::config::Config::load`]; the documented shape loads.
+    /// Test: this test.
+    #[test]
+    fn misplaced_llm_keys_fail_the_config_load() {
+        for key in [
+            "payload_dump_dir: ./dump",
+            "budget_usd: 0.1",
+            "sensitive_terms: [ledgerd]",
+            "id_patterns: ['Q\\d+']",
+            "name_matcher_bytes: 1024",
+            "obfuscate: true",
+            "modle: jev-1.13.0",
+        ] {
+            let e = serde_yaml::from_str::<LlmConfig>(&format!("source: jev\n{key}\n"))
+                .expect_err(key)
+                .to_string();
+            let name = key.split(':').next().expect("key");
+            assert!(e.contains(name), "{key}: {e}");
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "llm:\n  source: jev\n  payload_dump_dir: ./dump\n").expect("write");
+        assert!(
+            crate::core::config::Config::load(&path).is_err(),
+            "a misplaced payload_dump_dir loaded"
+        );
+        std::fs::write(
+            &path,
+            "llm:\n  source: jev\n  jev:\n    payload_dump_dir: ./dump\n",
+        )
+        .expect("write");
+        let cfg = crate::core::config::Config::load(&path).expect("documented shape");
+        assert!(cfg.llm.expect("llm").jev.payload_dump_dir.is_some());
+    }
+
+    /// Why (#111, delta review HIGH): `Config` tolerates unknown top-level
+    /// keys, so a top-level `jev:` block, a dotted `llm.jev.obfuscate:` key
+    /// or a bare `obfuscate:` loaded with `obfuscate` left off, and real
+    /// text reached TypeSafe.
+    /// What: each placement fails [`crate::core::config::Config::load`]
+    /// with an error naming the key and where it belongs; another unknown
+    /// top-level key still loads.
+    /// Test: this test.
+    #[test]
+    fn misplaced_top_level_jev_keys_fail_the_config_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let load = |yaml: &str| {
+            std::fs::write(&path, yaml).expect("write");
+            crate::core::config::Config::load(&path)
+        };
+        let jev_keys = [
+            "obfuscate: true",
+            "payload_dump_dir: ./dump",
+            "sensitive_terms: [ledgerd]",
+            "id_patterns: ['Q\\d+']",
+            "name_matcher_bytes: 1024",
+            "budget_usd: 0.1",
+        ];
+        let mut cases: Vec<(String, &str, &str)> = vec![
+            (
+                "llm:\n  source: jev\njev:\n  obfuscate: true\n".into(),
+                "jev",
+                "llm.jev",
+            ),
+            (
+                "llm:\n  source: jev\nllm.jev.obfuscate: true\n".into(),
+                "llm.jev.obfuscate",
+                "nested",
+            ),
+            ("llm.source: jev\n".into(), "llm.source", "nested"),
+        ];
+        for key in jev_keys {
+            let name = key.split(':').next().expect("key");
+            cases.push((format!("llm:\n  source: jev\n{key}\n"), name, "llm.jev"));
+        }
+        let mut loaded = Vec::new();
+        for (yaml, key, belongs) in &cases {
+            match load(yaml) {
+                Ok(_) => loaded.push(*key),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(e.contains(&format!("`{key}`")), "{key}: {e}");
+                    assert!(e.contains(belongs), "{key}: {e}");
+                }
+            }
+        }
+        assert!(loaded.is_empty(), "misplaced keys loaded: {loaded:?}");
+
+        // Documented Python sections `Config` does not model keep loading.
+        let cfg = load(
+            "llm:\n  source: jev\n  jev:\n    obfuscate: true\nvelocity: {}\nquality_report: {}\n",
+        )
+        .expect("unknown top-level key tolerated");
+        assert!(cfg.llm.expect("llm").jev.obfuscate);
+    }
+
+    /// #111: a duplicate key the typed parse accepts must not skip the check.
+    #[test]
+    fn misplaced_top_level_jev_key_fails_beside_a_duplicate_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let load = |yaml: &str| {
+            std::fs::write(&path, yaml).expect("write");
+            crate::core::config::Config::load(&path)
+        };
+        let misplaced = "jev:\n  obfuscate: true\n";
+        let cases = [
+            ("top level", "velocity: {}\nvelocity: {}\n"),
+            (
+                "developer_aliases",
+                "developer_aliases:\n  Ann: [a@x.io]\n  Ann: [b@x.io]\n",
+            ),
+            ("ignored section", "velocity:\n  window: 1\n  window: 2\n"),
+        ];
+        let mut loaded = Vec::new();
+        for (name, dup) in cases {
+            match load(&format!("llm:\n  source: jev\n{dup}{misplaced}")) {
+                Ok(_) => loaded.push(name),
+                Err(e) => assert!(e.to_string().contains("`jev`"), "{name}: {e}"),
+            }
+        }
+        assert!(
+            loaded.is_empty(),
+            "loaded despite misplaced `jev`: {loaded:?}"
+        );
+
+        // Text the key-only parse rejects still fails the typed parse.
+        for yaml in [
+            "- jev:\n    obfuscate: true\n",
+            "jev: {obfuscate: true}\nllm: [\n",
+        ] {
+            assert!(load(yaml).is_err(), "loaded: {yaml:?}");
+        }
+    }
+
+    /// Why (#111): a key whose tag its text does not fit (`!!int abc`)
+    /// failed the key-only parse, which then checked nothing, while the
+    /// typed parse read the key as text and loaded.
+    /// What: a misplaced `jev:` beside such a key, or itself tagged, fails
+    /// the load; non-string scalar keys alone still load.
+    /// Test: this test.
+    #[test]
+    fn misplaced_top_level_jev_key_fails_beside_a_tagged_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let load = |yaml: &str| {
+            std::fs::write(&path, yaml).expect("write");
+            crate::core::config::Config::load(&path)
+        };
+        let mut loaded = Vec::new();
+        for (name, extra) in [
+            ("int tag", "!!int abc: 1\njev:\n  obfuscate: true\n"),
+            ("bool tag", "!!bool xyz: 1\njev:\n  obfuscate: true\n"),
+            ("tagged jev", "!foo jev: {obfuscate: true}\n"),
+            (
+                "scalar keys",
+                "1: a\n~: b\ntrue: c\njev:\n  obfuscate: true\n",
+            ),
+        ] {
+            match load(&format!("llm:\n  source: jev\n{extra}")) {
+                Ok(_) => loaded.push(name),
+                Err(e) => assert!(e.to_string().contains("`jev`"), "{name}: {e}"),
+            }
+        }
+        assert!(
+            loaded.is_empty(),
+            "loaded despite misplaced `jev`: {loaded:?}"
+        );
+
+        let cfg = load("llm:\n  source: jev\n  jev:\n    obfuscate: true\n1: a\n~: b\ntrue: c\n")
+            .expect("non-string scalar keys are not refused");
+        assert!(cfg.llm.expect("llm").jev.obfuscate);
+
+        // A map or sequence key fails the key-only parse and the typed one.
+        for key in ["? {a: 1}\n: x\n", "? [a]\n: x\n"] {
+            let yaml = format!("{key}jev: {{obfuscate: true}}\n");
+            assert!(load(&yaml).is_err(), "loaded: {yaml:?}");
+        }
     }
 }

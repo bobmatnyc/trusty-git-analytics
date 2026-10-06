@@ -7,7 +7,11 @@
 > name. Separately, for the Bedrock options measured or priced below: AWS
 > processes routed commit text under the operator's AWS agreement, and per
 > Bedrock's data terms the model provider does not receive it (see
-> [`cost-benefit.md`](cost-benefit.md) for the per-option detail).
+> [`cost-benefit.md`](cost-benefit.md) for the per-option detail). For
+> `llm.source: jev`, TypeSafe receives each routed commit message as
+> stored, names included, by default; pseudonymization is opt-in through
+> `llm.jev.obfuscate: true` (owner ruling 2026-10-06; see
+> [`configuration.md`](../../requirements/configuration.md)).
 
 ## 1. Purpose and scope
 
@@ -135,13 +139,13 @@ llm:
 - **OpenRouter / Anthropic API:** `api_key_env` names the environment
   variable holding the key; the key itself is never written to the config.
 
-### Jev (planned)
+### Jev
 
-Jev is not wired into `tga` yet. The plan is a fourth `llm.source: jev`
-value that, like `openrouter` and `anthropic-api`, reads its API key from
-the environment variable named by `api_key_env` — no change to the shape of
-the `llm:` section. An engineer implements this separately; this report
-only measures the cost of doing so (§4) once that key exists.
+`llm.source: jev` is wired (#111). Like `openrouter` and `anthropic-api`, it
+reads its API key from the environment variable named by `api_key_env`
+(`TYPESAFE_API_KEY` by default). By default Jev receives the commit message
+as stored; `llm.jev.obfuscate: true` pseudonymizes it first (owner ruling
+2026-10-06). This report measures the cost (§4) once a key exists.
 
 ## 6. Limits
 

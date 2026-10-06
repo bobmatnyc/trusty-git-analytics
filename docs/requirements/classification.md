@@ -109,7 +109,8 @@ eight top-level categories:
 
 A rules file (`classification.rules_files`, alias `rules_file`) defines the
 categories its rules emit; with `extend_defaults: false` it replaces the
-built-in ruleset. `classification.custom_categories` adds or overrides
+built-in ruleset. It may also carry the consumer's bucket map under a
+top-level `buckets:` key (#111). `classification.custom_categories` adds or overrides
 taxonomy entries. tga hardcodes no deployment's category list.
 
 ### Eval scheme v2 (#111)
@@ -124,6 +125,15 @@ file emits `upkeep`. `tga eval score
 --config` accepts every category the config's rules or taxonomy name.
 `unclear`, `mixed` and `release_merge` are always valid, are counted per
 label, and score as no answer. See `docs/eval-harness.md`.
+
+Each v2 category also has a bucket: Maintenance (`bug_fix`, `devops`,
+`security`, `qa`, `upkeep`), Value Creation (`new_feature`, `integration`,
+`content_design`), Foundational Investment (`platform_infrastructure`,
+`data_science`) and Internal Tooling (`internal_tooling`). The bucket is the
+primary level and the fine category the secondary. The map is configuration
+the consumer owns: `classification.buckets`, else the rules file's
+`buckets:`, else tga's built-in fallback (see `configuration.md`). It is not
+part of `TopLevelCategory`; `tga eval score` reports accuracy at both levels.
 
 The scheme v2 accuracy measurement and a cost-benefit analysis of the LLM
 tiers (Bedrock Haiku 4.5, Bedrock Sonnet 5, and the planned Jev option) are

@@ -238,6 +238,7 @@ impl fmt::Debug for ClassificationConfig {
             no_external,
             checkpoint_every,
             sources,
+            buckets,
         } = self;
         f.debug_struct("ClassificationConfig")
             .field("rules_files", rules_files)
@@ -256,6 +257,7 @@ impl fmt::Debug for ClassificationConfig {
             .field("no_external", no_external)
             .field("checkpoint_every", checkpoint_every)
             .field("sources", sources)
+            .field("buckets", buckets)
             .finish()
     }
 }

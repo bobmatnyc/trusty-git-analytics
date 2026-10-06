@@ -14,10 +14,14 @@
 pub mod classifier;
 pub mod errors;
 pub mod pipeline;
+// #111: the two-level bucket map as the pipeline applies it.
+pub mod pipeline_buckets;
 pub(super) mod pipeline_db;
 pub(super) mod pipeline_external;
 // #111: the LLM fallback step and its token accounting.
 pub(crate) mod pipeline_llm;
+// #111: Jev category set and names to pseudonymize.
+mod pipeline_jev;
 pub mod rules;
 pub mod sources;
 pub mod taxonomy;

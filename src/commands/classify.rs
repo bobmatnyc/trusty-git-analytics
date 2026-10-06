@@ -1,7 +1,8 @@
 //! `tga classify` — stage 2 (classification cascade) entry point.
 
+use tga::classify::pipeline_buckets::bucket_counts;
 use tga::classify::ClassificationPipeline;
-use tga::core::config::{ClassificationConfig, Config};
+use tga::core::config::{BucketMap, BucketSource, ClassificationConfig, Config};
 use tga::core::db::{CheckpointMode, Database};
 
 use crate::commands::args::ClassifyArgs;
@@ -78,6 +79,7 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
         );
     }
 
+    let cfg_source = cfg.source_path.clone();
     let pipeline = ClassificationPipeline::new(cfg)
         .with_shas(shas)
         .with_force(args.force)
@@ -97,6 +99,8 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
         return Ok(());
     }
 
+    // #111: check the bucket map before any write; it is a derived view.
+    let (buckets, bucket_source) = pipeline.bucket_map_with_source()?;
     let stats = pipeline.run(db).await?;
 
     // Issue #298: call PRAGMA wal_checkpoint(TRUNCATE) on clean exit to flush
@@ -124,8 +128,100 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
             println!("  {category}: {count}");
         }
     }
+    print_buckets(&buckets, bucket_source, &stats.by_category);
     print_llm_usage(&stats.llm_usage);
+    print_skipped_recovery(&stats.llm_usage, &cfg_source, db)?;
     Ok(())
+}
+
+/// #111: the per-category counts rolled up to the bucket map in effect, a
+/// derived view; nothing is stored. The header names the map's source.
+fn print_buckets(
+    buckets: &BucketMap,
+    source: BucketSource,
+    by_category: &std::collections::HashMap<String, usize>,
+) {
+    let rows = bucket_counts(
+        buckets,
+        by_category.iter().map(|(c, &n)| (c.as_str(), n as u64)),
+    );
+    if rows.is_empty() {
+        return;
+    }
+    println!("By bucket (map from {}):", source.describe());
+    for row in rows {
+        let parts: Vec<String> = row
+            .categories
+            .iter()
+            .map(|(c, n)| format!("{c} {n}"))
+            .collect();
+        println!("  {}: {} ({})", row.bucket, row.total, parts.join(", "));
+    }
+}
+
+/// When LLM calls were skipped (spend cap or payload dump), write their SHAs
+/// to a file and print the exact command that re-sends them (#111).
+///
+/// Why: a skipped commit keeps its rule verdict and so has a
+/// `classification_id`; a plain re-run never revisits it.
+/// What: writes `tga-llm-skipped.txt` next to the database (the working
+/// directory for an in-memory one) and prints the skipped count with
+/// `tga [--config C] [--database D] classify --force --shas <file>`.
+/// Test: `tests/jev_skipped_recovery.rs`.
+///
+/// # Errors
+///
+/// The SHA file cannot be written.
+pub(crate) fn print_skipped_recovery(
+    u: &tga::classify::LlmUsageTotals,
+    config_path: &Option<std::path::PathBuf>,
+    db: &Database,
+) -> anyhow::Result<()> {
+    if u.skipped == 0 || u.skipped_shas.is_empty() {
+        return Ok(());
+    }
+    let db_path = db
+        .connection()
+        .path()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from);
+    let dir = db_path
+        .as_deref()
+        .and_then(|p| p.parent())
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let file = dir.join("tga-llm-skipped.txt");
+    std::fs::write(&file, format!("{}\n", u.skipped_shas.join("\n")))
+        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", file.display()))?;
+    let mut cmd = String::from("tga");
+    if let Some(c) = config_path {
+        cmd.push_str(&format!(" --config {}", shell_quote(c)));
+    }
+    if let Some(d) = &db_path {
+        cmd.push_str(&format!(" --database {}", shell_quote(d)));
+    }
+    cmd.push_str(&format!(" classify --force --shas {}", shell_quote(&file)));
+    println!(
+        "LLM skipped {} commit(s) (spend cap or payload dump); they kept their rule verdict. \
+         Re-send them with:\n  {cmd}",
+        u.skipped_shas.len()
+    );
+    Ok(())
+}
+
+/// Single-quote `p` for a POSIX shell when it holds anything but
+/// `[A-Za-z0-9_./-]`.
+fn shell_quote(p: &std::path::Path) -> String {
+    let s = p.display().to_string();
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c))
+    {
+        s
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 
 /// Print the run's LLM call count and token totals (#111).
@@ -139,8 +235,9 @@ fn print_llm_usage(u: &tga::classify::LlmUsageTotals) {
         return;
     }
     println!(
-        "LLM calls: {} (adopted {}, not adopted {}, abstained {}, out-of-set {}, failed {})",
-        u.calls, u.adopted, u.not_adopted, u.abstained, u.out_of_set, u.failed
+        "LLM calls: {} (adopted {}, not adopted {}, abstained {}, out-of-set {}, failed {}, \
+         skipped {})",
+        u.calls, u.adopted, u.not_adopted, u.abstained, u.out_of_set, u.failed, u.skipped
     );
     println!(
         "LLM tokens: input {}, output {} ({} of {} calls reported usage)",

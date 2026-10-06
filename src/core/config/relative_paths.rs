@@ -23,7 +23,8 @@ use super::Config;
 /// Rewrite `config`'s relative path fields against `config_dir`.
 ///
 /// Why: see the module doc. What: anchors `classification.rules_files`,
-/// `output.directory`, `cache.directory` and `dora.datadog_dir`; absolute and
+/// `output.directory`, `cache.directory`, `dora.datadog_dir` and
+/// `llm.jev.payload_dump_dir`; absolute and
 /// `~` paths are only `~`-expanded. Repository paths are not touched.
 /// Test: `tests::relative_paths_anchor_to_the_config_dir`,
 /// `tests::repository_paths_stay_as_written`.
@@ -43,6 +44,14 @@ pub(crate) fn anchor_relative_paths(config: &mut Config, config_dir: &Path, home
         anchor(dir);
     }
     if let Some(dir) = config.dora.as_mut().and_then(|d| d.datadog_dir.as_mut()) {
+        anchor(dir);
+    }
+    // #111: the Jev payload-dump directory is "next to this config" too.
+    if let Some(dir) = config
+        .llm
+        .as_mut()
+        .and_then(|l| l.jev.payload_dump_dir.as_mut())
+    {
         anchor(dir);
     }
 }
@@ -65,7 +74,8 @@ mod tests {
         let mut cfg = parse(
             "classification:\n  rules_files: [rules.yaml, /etc/r.yaml, \"~/r.yaml\"]\n\
              output:\n  directory: out\ncache:\n  directory: .cache\n\
-             dora:\n  datadog_dir: incidents\n",
+             dora:\n  datadog_dir: incidents\n\
+             llm:\n  source: jev\n  jev:\n    payload_dump_dir: jev-payloads\n",
         );
         anchor_relative_paths(&mut cfg, Path::new("/cfg"), Some(Path::new("/home/u")));
         let rules = &cfg.classification.as_ref().expect("section").rules_files;
@@ -83,6 +93,8 @@ mod tests {
         assert_eq!(cache, Some(PathBuf::from("/cfg/.cache")));
         let dd = cfg.dora.and_then(|d| d.datadog_dir);
         assert_eq!(dd, Some(PathBuf::from("/cfg/incidents")));
+        let dump = cfg.llm.and_then(|l| l.jev.payload_dump_dir);
+        assert_eq!(dump, Some(PathBuf::from("/cfg/jev-payloads")));
     }
 
     /// Why: #111 review — a repository's stored name and GitHub slug derive

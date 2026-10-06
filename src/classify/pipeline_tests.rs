@@ -728,17 +728,15 @@ async fn pipeline_external_sources_dedupe_distinct_messages_same_ticket() {
 #[test]
 fn source_aware_default_model_selection() {
     use crate::classify::tiers::bedrock::DEFAULT_BEDROCK_MODEL;
-    use crate::classify::tiers::llm::ANTHROPIC_DEFAULT_MODEL;
+    use crate::classify::tiers::jev::JEV_MODEL;
+    use crate::classify::tiers::llm::{default_model_for, ANTHROPIC_DEFAULT_MODEL};
     use crate::core::config::{LlmConfig, LlmSource};
 
-    // Helper: resolve the source_default the same way `build_engine` does.
+    // #111: the helper `build_engine` calls, not a copy of its match.
     fn default_for(source: LlmSource) -> &'static str {
-        match source {
-            LlmSource::Bedrock => DEFAULT_BEDROCK_MODEL,
-            LlmSource::AnthropicApi => ANTHROPIC_DEFAULT_MODEL,
-            LlmSource::Openrouter => "gpt-4o-mini",
-        }
+        default_model_for(&source)
     }
+    assert_eq!(default_for(LlmSource::Jev), JEV_MODEL);
 
     // bedrock source + no model → DEFAULT_BEDROCK_MODEL
     let bedrock_cfg = LlmConfig {
@@ -790,6 +788,7 @@ fn source_aware_default_model_selection() {
         LlmSource::Bedrock,
         LlmSource::AnthropicApi,
         LlmSource::Openrouter,
+        LlmSource::Jev,
     ] {
         let explicit_cfg = LlmConfig {
             source: source.clone(),

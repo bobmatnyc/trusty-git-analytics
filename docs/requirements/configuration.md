@@ -10,6 +10,7 @@ The configuration file is YAML, matching the schema used by the Python predecess
 repositories: []          # list[RepositoryConfig], required
 database: ~               # path  — SQLite DB override (added v2.2.2, issue #406)
 llm: {}                   # LlmConfig — top-level LLM section (added v2.2.2, issue #407)
+classification: {}        # ClassificationConfig — rules, LLM tier knobs, `buckets` (#111)
 github: {}                # GitHubConfig
 bitbucket: {}             # BitbucketConfig (Cloud only)
 developer_aliases: {}     # dict[str, list[str]] — inline identity alias map
@@ -67,10 +68,15 @@ an `llm:` section emits a `tracing::warn!` deprecation message.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `source` | enum | `openrouter` | LLM provider: `openrouter`, `bedrock`, or `anthropic-api` |
-| `api_key_env` | string | `OPENROUTER_API_KEY` | **Name** of the env var holding the API key (never the key itself). Ignored for `bedrock`. |
+| `source` | enum | `openrouter` | LLM provider: `openrouter`, `bedrock`, `anthropic-api`, or `jev` |
+| `api_key_env` | string | `OPENROUTER_API_KEY` (`TYPESAFE_API_KEY` for `jev`) | **Name** of the env var holding the API key (never the key itself). Ignored for `bedrock`. |
 | `region` | string | None | AWS region (Bedrock only). When absent, the AWS SDK resolves the region from the environment (`AWS_DEFAULT_REGION`, profile, etc.). |
 | `model` | string | provider-appropriate default | Provider-specific model id (see below). |
+| `jev` | map | see below | `source: jev` settings: `budget_usd`, `sensitive_terms`, `payload_dump_dir`, `id_patterns`, `name_matcher_bytes`. Ignored by the other sources. |
+
+Any other key under `llm:` is a load error (#111), as it is under `llm.jev:`.
+A `jev` option written one level too high (`llm.payload_dump_dir`) therefore
+stops the run instead of being ignored.
 
 #### Source variants
 
@@ -143,6 +149,203 @@ llm:
 
 This source is available in the default `cargo install tga` build — no feature flags required.
 
+**`jev`** (added v10.1.0, #111)
+
+Calls TypeSafe's Jev decision model (`POST https://api.typesafe.ai/v1/systemone`)
+with bearer auth. Each commit becomes one `choice` question: the criteria are
+the configured categories (with their `description` when the rules file gives
+one) plus the reserved abstain codes `NO_MATCH` and `INSUFFICIENT_INFORMATION`.
+When the rules extend the built-ins, the criteria are every category the loaded
+rules can emit. A category may not be named `NO_MATCH` or
+`INSUFFICIENT_INFORMATION`.
+
+- **Key:** read from the variable named by `api_key_env`. Left at its default,
+  that is `TYPESAFE_API_KEY`. Unset or empty → `tga classify` exits non-zero
+  before writing any DB rows (unless `payload_dump_dir` is set).
+- **Verdicts:** an abstain code → `abstained`; a code outside the configured
+  set → `out_of_set`; a configured code → the verdict, with confidence equal
+  to that code's probability. A transport error, an HTTP error after retries
+  (429 and 5xx are retried twice with backoff), or a reply that fails
+  validation → `failed`. None of these replace the rule verdict. Each call's
+  usage is written to `llm_usage` with provider `jev`. Merge commits are never
+  sent, as for every source.
+- **Commit text (`jev.obfuscate`, default `false`):** by default Jev
+  receives each commit message exactly as stored in the database, names,
+  addresses, ticket keys and paths included (owner ruling 2026-10-06,
+  #111). The pseudonymizer, the name, trailer and repository learning, the
+  database scans behind it and the name-matcher build are all skipped, so
+  `jev.sensitive_terms`, `jev.id_patterns` and `jev.name_matcher_bytes`
+  have no effect. Set `jev.obfuscate: true` to send pseudonymized text
+  instead; every rule below marked "obfuscation only" then applies. The run
+  log names the mode (`Jev: sending real commit text` or `Jev: sending
+  obfuscated text`), and each `llm_usage` row records it in `text_mode`
+  (`real` or `obfuscated`; `NULL` for other sources).
+- **Pseudonymization (obfuscation only):** before a message is sent, tga replaces e-mail
+  addresses (`EMAIL_n`), people named in git trailers (`Co-authored-by`,
+  `Signed-off-by`, `Reviewed-by`, `Acked-by`, `Tested-by`, `Reported-by`,
+  `Helped-by`, `cc`), `@` mentions and roster names from `team:` and
+  `developer_aliases` (`PERSON_n`), ticket keys such as `ABC-123`
+  (`TICKET_n`), URLs (`URL_n`), host names, domains and IPv4 addresses
+  (`HOST_n`), file paths and source file names (`PATH_n`), repository, org
+  and workspace names (`REPO_n`, see below), and every
+  `jev.sensitive_terms` entry (`TERM_n`). Numbers are assigned in first-seen
+  order and are stable for the run; other text is sent unchanged. The
+  pseudonym → original map stays in memory and is never sent or logged.
+  Every person in the database is a known person, not only the run's
+  authors: `commits` author names and address local-parts, `authors`
+  canonical names, addresses and aliases, `pull_requests.author`,
+  `pr_reviewers.reviewer_id` and `display_name`, `linear_issues.assignee`
+  Jira changelog and comment authors (`fact_ticket_transitions.author`,
+  `fact_jira_comment_detail.author`), reporters (`fact_pm_effort.pm_name`)
+  and the `author_email` local-parts of the weekly fact tables, and every
+  name in an identity trailer of every commit message the database stores,
+  classified or not (#111). `--since`, `--repos` and `--shas` narrow the
+  commits sent, never the names learned. A known
+  name is matched whole; a multi-word display name is also matched by its
+  parts, including hyphen parts and either apostrophe (`O'Brien`,
+  `O’Brien`). A single-token login is matched whole only, and bot accounts
+  (`x[bot]`, `x-bot`) are not people. Classification vocabulary is never a
+  name: the category names and descriptions, the keywords and pattern
+  words of the loaded rules, and a built-in list of generic and technical
+  words (`test`, `dev`, `admin`, `ci`, `build`, `deploy`, `role`, …). A
+  single-word identity made of such words (`test`, `deploy-bot`) is not
+  learned, and a name part that is one is never matched alone; the person
+  is still hidden by their full name and address. A part that is a common
+  given name (`Frank`, `Will`) is matched only in Titlecase and not at the
+  start of a sentence or list item, so `frank` and `Mark as done` stay.
+  Values of
+  `-with`, `-to` and role trailers (`Tested with:`, `Owner:`) are replaced
+  on their own line, but teach the run a name only when they look like one
+  (`Jane Roe`, `jroe-acme`); `Tested with: chrome and firefox` teaches
+  nothing.
+- **Repository, org and workspace names** (`REPO_n`, #111; obfuscation
+  only): from the
+  config, `repositories[].name`, `.org` and the path basename,
+  `github.org`, `github.orgs` and `github.repo`, `bitbucket.workspace`,
+  `bitbucket.workspaces` and `bitbucket.repo_slug`, the Azure DevOps
+  organisation (from `pm.azure_devops.organization_url`) and its `project`
+  and `projects`, the Jira site name (`acme` in
+  `jira.url: https://acme.atlassian.net`), and every
+  `classification.repo_categories` key that is not a glob; from the
+  database, every distinct `repository` in `commits` and `pull_requests`.
+  An `owner/name` slug also gives each part. Names are matched whole, in
+  any case, hyphens included (`port acme-fin invoicing-api client` →
+  `port REPO_1 REPO_2 client`). A database name that is the column default
+  `unknown` or classification vocabulary (`platform`, `docs`) is not
+  learned. Database names share the name matcher, its size cap and its
+  fail-closed rebuild with people.
+- **Stored trailer scan cost (obfuscation only):** the trailer names of stored commits are
+  read in one pass over `commits.message`, skipping messages with no `:`
+  in SQL. Measured on a synthetic 300,000-commit database (a quarter of
+  the messages one-line, a quarter multi-line with no trailer, half with
+  one or two trailers; 2,250 distinct names): the scan takes 0.25 s in a
+  release build (3.5 s in a debug build), and learning the names and
+  rebuilding the matcher 15 ms more. It runs once per Jev run, before the
+  first request.
+- **Categories:** option keys are pseudonym codes (`CAT_1`…). Each code's
+  criterion text is the category's description, or — when it has none — the
+  category name itself, sent verbatim: it is operator configuration, not
+  commit text, and is never tokenised. Do not put customer or people names
+  in category descriptions.
+- **Paths (obfuscation only):** every slash-joined token is a path (`PATH_n`) — two-segment
+  directories (`billing/invoices`), branch names (`feature/foo-bar`,
+  `release/2026-09`), `.github/workflows/…` and deeper paths, all-caps
+  pairs (`CI/CD`, `I/O`) included — unless it is prose: all segments digits
+  (`1/2`, `2026/09/25`), two segments where one is a single lowercase
+  character (`w/o`, `n/a`), or one of the fixed pairs `and/or`,
+  `read/write`, `client/server`, `input/output`, `true/false`, `yes/no`,
+  `on/off`, `pass/fail` (either order, any case).
+- **File names (obfuscation only):** a bare `name.ext` with a known source, config, data or doc
+  extension becomes `PATH_n.<ext>` (`invoice_sync.py`, `PriceTable.tsx`,
+  `README.md`, `Cargo.toml`); build files (`Makefile`, `Dockerfile`,
+  `Dockerfile.prod`, `CODEOWNERS`) become `PATH_n`. The run also learns
+  every basename in `files.path` (the files each collected commit touched)
+  and, when identifier-like (`invoice_sync`, `PriceTable`), its stem, so a
+  file with no or an unusual extension is caught too; an extension-less
+  basename that is classification vocabulary (`build`) is skipped.
+- **Ticket keys (obfuscation only):** uppercase keys always; lowercase keys with any number of
+  digits (`abc-1`, `[abc-1]`, `abc-1_fix`, `build_abc-7`) unless the prefix
+  is a version or ordinal word (`python-3`, `step-2`) or classification
+  vocabulary (`fix-1`).
+- **Spend cap:** `jev.budget_usd` (default `0.25`) caps one run's running
+  total. Input costs $0.042 per million tokens; output tokens cost $0 and
+  never count against the cap. Before each call tga reserves the request's
+  byte length plus 1024 input tokens, times the three attempts. After the
+  call it charges the reported input plus that per-attempt bound for every
+  earlier attempt sent (a timed-out or failed attempt may still be billed),
+  so retries never push the run past the cap. Once a reservation would pass
+  the cap, that call and every later call in the run are recorded as
+  `skipped` and nothing more is sent.
+- **Model:** tga pins `jev-1.13.0`. Any other `llm.model` is a
+  configuration error, and a reply that names another model is recorded as
+  `failed` with the served model in `llm_usage.model`. Each commit is one
+  `category` question; the second "mixed" question is not sent.
+- **Fail closed (obfuscation only):** a message the pseudonymizer cannot process is recorded as
+  `failed` and not sent; after a failed name-matcher rebuild every later
+  message in the run fails the same way.
+- **More redaction (obfuscation only):** trailers in any case and spacing whose token ends in
+  `by`, `with` or `to` (`Approved by:`, `Paired-with:`, `Thanks-to:`) or is
+  `Reviewer`, `Author`, `Owner`, `Assignee` or `Approver` (singular or
+  plural), with or without an address; Phabricator `Reviewers:`,
+  `Reviewed By:`, `Subscribers:` and `Auditors:` username lists, including
+  a list wrapped onto an indented next line; trailers behind list or quote
+  markers; bracketed and any-case ticket keys (`[abc-123]`,
+  `PROJ-12_fix`, `feature/proj-12`); record ids of 1–4 letters and 4+
+  digits (`H1234` → `ID_n`); commit and content hashes and UUIDs (`ID_n`,
+  gate B 2: a hex run of 7 to 31 characters holding both a digit and a
+  letter, any hex run of 32 or more such as a 64-character hash, and a
+  UUID; inside a version string, after `-g`, `@` or `+`, never inside a
+  longer word; words spelled in hex letters such as `decade` or `facade`,
+  and pure-digit numbers under 32 digits such as `20261006`, are kept);
+  `jev.id_patterns` regexes (`ID_n`); IPv6
+  addresses; host names in any case when the last label is a known TLD
+  (`DB1.CORP.ACME.COM`).
+- **Hosts on word suffixes:** (obfuscation only) a dotted name of two or more labels, in any
+  case, ending in `local`, `prod`, `staging`, `stage`, `qa`, `uat`, `int`,
+  `private`, `office`, `home`, `cloud`, `dev`, `app`, `in`, `it`, `at`,
+  `be`, `me`, `us`, `no`, `so`, `to`, `info`, `tech`, `site`, `online`,
+  `global` or `test` is a host (`acme.dev`, `ledger.prod`, `ACME.LOCAL`)
+  unless another label is a code or member word (`config`, `env`,
+  `window`, `this`, `process`, `self`, …): `config.dev`, `window.app` and
+  `process.env.dev` stay. A name followed by `(` or with a camelCase label
+  (`fooBar.baz`) is code and stays, as does `f64::MAX`.
+- **Name matcher size (obfuscation only):** `jev.name_matcher_bytes` (default `67108864`,
+  64 MiB) caps the heap bytes of the compiled matcher of learned names and
+  file names. A run whose names do not fit fails before anything is sent.
+  The matcher is one Aho-Corasick automaton over every name (gate B 2; it
+  was one regex alternation, which needed about 1 GiB for 225,000 names).
+  Measured on a synthetic set shaped like a production database (230,000
+  file paths with their basenames and stems, 80,000 logins, 40,000
+  two-word names with their parts, 20,000 hyphenated `org/repo` names;
+  672,780 names in all): 44,453,564 bytes (42 MiB), built in 1.1 s in a
+  release build and 7.9 s in a debug build; the whole test process peaked
+  at about 400 MB resident. At about 66 bytes per name the default holds
+  roughly a million names.
+- **Payload dump:** with `jev.payload_dump_dir` set, tga writes each exact
+  outbound request body to `<dir>/jev-request-<hash>.json`, sends nothing, and
+  records the calls as `skipped`; no key is needed. It works in both text
+  modes. With obfuscation on, next to each body it
+  writes `<dir>/jev-request-<hash>.tokens.json`, `{"tokens": {"PERSON_1":
+  "<original>", …}}` for every pseudonym in that message, so a scanner can
+  measure which words each token replaced. That map holds the originals:
+  keep the dump directory on the host. In real-text mode no token map is
+  written, and the body itself holds the original message. `tga classify` still writes
+  the rule verdicts, so point it at a scratch copy of the database. A relative
+  path resolves against the config file's directory.
+
+```yaml
+llm:
+  source: jev
+  # api_key_env: TYPESAFE_API_KEY     # the default for this source
+  # model: jev-1.13.0                 # pinned; any other value is an error
+  jev:
+    budget_usd: 0.25                  # per-run spend cap (default)
+    # obfuscate: true                 # pseudonymize first (default: false, real text)
+    # sensitive_terms: [ledgerd, paygate]   # extra names to hide; obfuscation only
+    # payload_dump_dir: ./jev-payloads   # write bodies, send nothing
+    # name_matcher_bytes: 134217728      # raise past ~1M names (default 64 MiB)
+```
+
 #### Self-enabling behavior (added v2.3.0)
 
 When a valid `llm:` section is present in the config, the LLM classification tier
@@ -164,12 +367,96 @@ comment out the `llm:` block.
 | `openrouter` | `gpt-4o-mini` |
 | `bedrock` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `anthropic-api` | `claude-3-5-haiku-latest` |
+| `jev` | `jev-1.13.0` |
 
 #### Security note
 
 `api_key_env` stores the **variable name** (e.g. `OPENROUTER_API_KEY`), never
 the key value. The actual secret is read from the environment at runtime. Never
 commit API keys to the config file.
+
+---
+
+### `classification.buckets` — two-level bucket map (#111)
+
+A classification has two levels. The **primary** is a bucket; the
+**secondary** is the fine category within it. A bucket map maps each bucket
+name to its fine categories, in report order.
+
+The consumer owns the map (owner ruling 2026-10-06): the downstream
+consumer defines the secondary categories, their rules and the
+secondary → primary map, and supplies them as config. tga classifies; its
+built-in map is only a fallback for a consumer that supplies none. The map
+in effect is the first of:
+
+1. `classification.buckets` in the main config;
+2. a top-level `buckets:` map in the rules file (`classification.rules_file`,
+   or the file `--rules` names on `tga classify`, `tga eval score`,
+   `tga eval repredict` and `tga rules list`). With several rules files, a later
+   file's map replaces an earlier one whole;
+3. tga's built-in fallback:
+
+```yaml
+classification:
+  buckets:
+    Maintenance: [bug_fix, devops, security, qa, upkeep]
+    Value Creation: [new_feature, integration, content_design]
+    Foundational Investment: [platform_infrastructure, data_science]
+    Internal Tooling: [internal_tooling]
+```
+
+A rules file carrying its own map:
+
+```yaml
+extend_defaults: false
+rules:
+  - id: defect
+    category: bug_fix
+    keywords: ["fix:"]
+  - id: deps
+    category: upkeep
+    keywords: ["chore(deps)"]
+  - id: feat
+    category: new_feature
+    keywords: ["feat:"]
+categories:
+  - name: bug_fix
+    description: Corrects behaviour that was wrong.
+buckets:
+  Maintenance: [bug_fix, upkeep]
+  Value Creation: [new_feature]
+```
+
+`tga rules list --format json` prints the map in effect and its source
+under `bucket_map` (`{"source": "config" | "rules_file" | "fallback",
+"buckets": {...}}`); `tga classify` and `tga eval score` name the source on
+the console.
+
+- A present map replaces the lower levels whole; to move one category, copy
+  the table and edit it. A rules-file map has the same shape and the same
+  checks as `classification.buckets`.
+- Bucket names are free text. Category names are matched case-insensitively.
+- Load-time errors: no bucket, a blank or duplicate bucket name, a bucket
+  with no categories, a category in two buckets, or a no-answer label
+  (`unclear`, `mixed`, `release_merge`, `uncategorized`) in the map.
+- A map other than the default must name only categories the config knows
+  (its taxonomy and rules files). `content_design` is always accepted. An
+  unknown category is an error at `tga classify`, at `tga eval score`, and
+  when a Jev tier starts; it is never dropped silently. The default map is
+  accepted with any config, so a config with another category scheme still
+  loads; its categories then have no bucket.
+- `unclear`, `mixed` and `release_merge` have no bucket. A predicted
+  `uncategorized`, or any category the map does not name, has no bucket and
+  is wrong at both levels.
+- The pair is derived from the fine category, the same way for every arm
+  (rules, Bedrock, Jev). Nothing is stored and there is no migration:
+  `tga classify` prints a derived "By bucket" breakdown, and `tga eval score`
+  reports primary and secondary accuracy (see `docs/eval-harness.md`).
+- With `llm.source: jev`, the one category question per commit offers the
+  rules' categories and, when the consumer supplies the map (level 1 or 2),
+  every fine category in it. The built-in fallback adds no category to the
+  question: its categories reach Jev only through the rules, as they reach
+  Bedrock and the other sources.
 
 ---
 

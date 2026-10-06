@@ -38,6 +38,8 @@ use crate::core::errors::{Result, TgaError};
 
 pub mod aliases;
 pub mod azdo;
+// #111: the two-level bucket map, `classification.buckets`.
+mod buckets;
 // #5770: hand-written `Debug` for every config section holding a credential.
 mod credential_debug;
 // #5775: hand-written `Serialize` for the same sections — the derived one wrote
@@ -52,7 +54,13 @@ pub mod validator;
 
 pub use aliases::{AliasFile, DeveloperAliasEntry};
 pub use azdo::AzureDevOpsConfig;
-pub use llm::{LlmConfig, LlmEffort, LlmFallbackScope, LlmSource};
+pub use buckets::{
+    Bucket, BucketMap, BucketSource, DEFAULT_BUCKETS, MAP_ONLY_CATEGORIES, NO_BUCKET_LABELS,
+};
+pub use llm::{
+    JevOptions, LlmConfig, LlmEffort, LlmFallbackScope, LlmSource, JEV_API_KEY_ENV,
+    JEV_DEFAULT_BUDGET_USD, JEV_DEFAULT_NAME_MATCHER_BYTES,
+};
 pub use validator::{ConfigError, ConfigValidator};
 
 /// Top-level configuration root.
@@ -698,6 +706,21 @@ pub struct ClassificationConfig {
     /// `config.yaml`. Ignored when `no_external` is `true`.
     #[serde(default)]
     pub sources: Vec<crate::classify::sources::SourceConfig>,
+
+    /// #111: the two-level map, bucket name → fine categories. Absent means
+    /// [`BucketMap::default`]; a present map replaces the default whole.
+    /// Read through [`Config::bucket_map`].
+    ///
+    /// ```yaml
+    /// classification:
+    ///   buckets:
+    ///     Maintenance: [bug_fix, devops, security, qa, upkeep]
+    ///     Value Creation: [new_feature, integration, content_design]
+    ///     Foundational Investment: [platform_infrastructure, data_science]
+    ///     Internal Tooling: [internal_tooling]
+    /// ```
+    #[serde(default)]
+    pub buckets: Option<BucketMap>,
 }
 
 /// Deserialize `rules_files` from either a single path string or a list of paths.
@@ -775,6 +798,7 @@ impl Default for ClassificationConfig {
             sources: Vec::new(),
             weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig::default(),
             checkpoint_every: 0,
+            buckets: None,
         }
     }
 }
@@ -1504,11 +1528,15 @@ impl Config {
     /// - [`TgaError::IoError`] if the file cannot be read.
     /// - [`TgaError::SerdeYamlError`] if YAML parsing fails.
     /// - [`TgaError::ConfigError`] if any user-supplied `ticket_regex`
-    ///   (JIRA, GitHub, Linear) is not a valid regular expression.
+    ///   (JIRA, GitHub, Linear) is not a valid regular expression, or a
+    ///   top-level key is `jev`, starts with `llm.`, or names a `llm.jev:`
+    ///   option (#111).
     pub fn load(path: &Path) -> Result<Config> {
         let resolved = expand_path(path);
         tracing::debug!(path = %resolved.display(), "loading config");
         let text = std::fs::read_to_string(&resolved)?;
+        // #111: a misplaced `jev:` or `llm.*` key must not load silently.
+        llm::reject_misplaced_top_level_keys(&text)?;
         let mut cfg: Config = serde_yaml::from_str(&text)?;
         // #111: relative paths in the file are relative to the file, not CWD.
         if let Some(dir) = resolved.parent() {
@@ -1889,6 +1917,22 @@ mod tests {
         let yaml = "source: anthropic-api\n";
         let llm: LlmConfig = serde_yaml::from_str(yaml).expect("parse llm config");
         assert_eq!(llm.source, LlmSource::AnthropicApi);
+    }
+
+    /// Why (#111): a whole config with `llm: { source: jev }` must load,
+    /// with the Jev options nested under `llm.jev`.
+    /// What: parse a `Config` naming the jev source and one sensitive term.
+    /// Test: pure deserialization.
+    #[test]
+    fn llm_source_jev_parses_in_a_full_config() {
+        let yaml =
+            "repositories: []\nllm:\n  source: jev\n  jev:\n    sensitive_terms: [ledgerd]\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse config");
+        let llm = cfg.llm.expect("llm section");
+        assert_eq!(llm.source, LlmSource::Jev);
+        assert_eq!(llm.effective_api_key_env(), JEV_API_KEY_ENV);
+        assert_eq!(llm.jev.sensitive_terms, ["ledgerd"]);
+        assert_eq!(llm.jev.budget_usd, JEV_DEFAULT_BUDGET_USD);
     }
 
     /// Why: single-string `rules_file:` (old form) must still parse via the

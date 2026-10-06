@@ -1,0 +1,3 @@
+Changed
+- An unknown key under `llm:` is now a config load error, as under `llm.jev:`. A `jev` option written one level too high, such as `llm.payload_dump_dir`, used to be ignored, so a run meant to write a payload dump sent live requests instead (#111).
+- A top-level `jev:` key, any top-level key starting with `llm.` (such as `llm.jev.obfuscate: true`), and a top-level key named after a `llm.jev:` option (`obfuscate`, `payload_dump_dir`, `sensitive_terms`, `id_patterns`, `name_matcher_bytes`, `budget_usd`) are now config load errors that name the key and where it belongs. Such a key used to be ignored, leaving `llm.jev.obfuscate` off, so real commit text was sent. Other unknown top-level keys still load (#111).

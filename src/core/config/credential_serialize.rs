@@ -232,8 +232,9 @@ impl Serialize for ClassificationConfig {
             no_external,
             checkpoint_every,
             sources,
+            buckets,
         } = self;
-        let mut s = serializer.serialize_struct("ClassificationConfig", 16)?;
+        let mut s = serializer.serialize_struct("ClassificationConfig", 17)?;
         s.serialize_field("rules_files", rules_files)?;
         s.serialize_field("repo_categories", repo_categories)?;
         s.serialize_field("use_llm", use_llm)?;
@@ -250,6 +251,7 @@ impl Serialize for ClassificationConfig {
         s.serialize_field("no_external", no_external)?;
         s.serialize_field("checkpoint_every", checkpoint_every)?;
         s.serialize_field("sources", sources)?;
+        s.serialize_field("buckets", buckets)?;
         s.end()
     }
 }

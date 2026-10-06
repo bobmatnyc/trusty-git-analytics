@@ -1,11 +1,13 @@
 //! Tier 4: optional LLM fallback.
 //!
-//! Supports three providers:
+//! Supports four providers:
 //! - **OpenRouter** — OpenAI-compatible chat-completions endpoint
 //!   (`https://openrouter.ai/api/v1/chat/completions`).
 //! - **Bedrock** — AWS Bedrock Messages API via the AWS SDK.
 //! - **Anthropic API** — Direct Anthropic Messages API
 //!   (`POST https://api.anthropic.com/v1/messages`), no OpenRouter or AWS required.
+//! - **Jev** — TypeSafe's decision model, behind a pseudonymizer (#111); see
+//!   [`super::jev`].
 //!
 //! The LLM is consulted only when tiers 1–3 all failed and the engine has been
 //! configured with `use_llm = true` (or when the top-level `llm:` section is
@@ -22,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::classify::rules::CategoryDef;
-use crate::classify::tiers::bedrock::BedrockClassifier;
+use crate::classify::tiers::bedrock::{BedrockClassifier, DEFAULT_BEDROCK_MODEL};
+use crate::classify::tiers::jev::{JevClassifier, JEV_MODEL};
 use crate::classify::tiers::llm_prompt::{self, LlmCall, LlmUsage};
 use crate::classify::tiers::ClassificationResult;
 use crate::core::config::{LlmConfig, LlmEffort, LlmSource};
@@ -116,19 +119,36 @@ pub struct LlmClassifier {
     system_prompt: String,
     /// #131: Anthropic `output_config.effort`; `None` sends no parameter.
     effort: Option<LlmEffort>,
+    /// #111: Jev backend; when `Some`, [`Self::classify_detailed`] routes
+    /// through it and nothing else sees the message.
+    pub(super) jev: Option<JevClassifier>,
+}
+
+/// The model a source uses when neither `llm.model` nor the legacy
+/// `classification.llm_model` names one.
+///
+/// Why: each provider needs a model id from its own namespace.
+/// What: bedrock → [`DEFAULT_BEDROCK_MODEL`], anthropic-api →
+/// [`ANTHROPIC_DEFAULT_MODEL`], jev → [`JEV_MODEL`], openrouter →
+/// `gpt-4o-mini`.
+/// Test: `pipeline_tests::source_aware_default_model_selection`.
+pub(crate) fn default_model_for(source: &LlmSource) -> &'static str {
+    match source {
+        LlmSource::Bedrock => DEFAULT_BEDROCK_MODEL,
+        LlmSource::AnthropicApi => ANTHROPIC_DEFAULT_MODEL,
+        LlmSource::Jev => JEV_MODEL,
+        LlmSource::Openrouter => "gpt-4o-mini",
+    }
 }
 
 impl LlmClassifier {
-    /// Construct a new LLM classifier targeting the OpenAI chat-completions
-    /// endpoint.
-    ///
-    /// `model` is provider-specific (e.g. `"gpt-4o-mini"`). If `api_key` is
-    /// `None`, classification calls will return `None` immediately.
-    pub fn new(model: &str, api_key: Option<String>) -> Self {
+    /// Every field at its OpenAI-compatible default; constructors override
+    /// the fields their provider needs.
+    pub(super) fn base(model: &str) -> Self {
         Self {
             client: Client::new(),
             model: model.to_string(),
-            api_key,
+            api_key: None,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             extra_headers: HeaderMap::new(),
             bedrock: None,
@@ -136,6 +156,19 @@ impl LlmClassifier {
             allowed_categories: None,
             system_prompt: SYSTEM_PROMPT.to_string(),
             effort: None,
+            jev: None,
+        }
+    }
+
+    /// Construct a new LLM classifier targeting the OpenAI chat-completions
+    /// endpoint.
+    ///
+    /// `model` is provider-specific (e.g. `"gpt-4o-mini"`). If `api_key` is
+    /// `None`, classification calls will return `None` immediately.
+    pub fn new(model: &str, api_key: Option<String>) -> Self {
+        Self {
+            api_key,
+            ..Self::base(model)
         }
     }
 
@@ -162,16 +195,11 @@ impl LlmClassifier {
             headers.insert("anthropic-version", v);
         }
         Self {
-            client: Client::new(),
-            model: model.to_string(),
             api_key,
             endpoint: ANTHROPIC_ENDPOINT.to_string(),
             extra_headers: headers,
-            bedrock: None,
             use_anthropic_format: true,
-            allowed_categories: None,
-            system_prompt: SYSTEM_PROMPT.to_string(),
-            effort: None,
+            ..Self::base(model)
         }
     }
 
@@ -256,6 +284,13 @@ impl LlmClassifier {
                     Ok(Self::new(model, creds.get("OPENAI_API_KEY")))
                 }
             }
+            // #111: without this arm a legacy `llm_provider: jev` fell
+            // through to the OpenAI endpoint.
+            "jev" => Err(
+                "the jev provider is available only through the `llm:` section; \
+                 set `llm.source: jev` instead of `classification.llm_provider: jev`"
+                    .to_string(),
+            ),
             other => {
                 warn!(
                     provider = %other,
@@ -288,16 +323,9 @@ impl LlmClassifier {
             info!(model, "LLM provider: bedrock (async init)");
             let bedrock = BedrockClassifier::new(model).await?;
             return Ok(Self {
-                client: Client::new(),
-                model: model.to_string(),
-                api_key: None,
                 endpoint: String::new(),
-                extra_headers: HeaderMap::new(),
                 bedrock: Some(bedrock),
-                use_anthropic_format: false,
-                allowed_categories: None,
-                system_prompt: SYSTEM_PROMPT.to_string(),
-                effort: None,
+                ..Self::base(model)
             });
         }
         Self::from_provider(provider, model, openrouter_api_key)
@@ -374,16 +402,9 @@ impl LlmClassifier {
                 );
                 let bedrock = BedrockClassifier::with_region(model, cfg.region.as_deref()).await?;
                 Ok(Self {
-                    client: Client::new(),
-                    model: model.to_string(),
-                    api_key: None,
                     endpoint: String::new(),
-                    extra_headers: HeaderMap::new(),
                     bedrock: Some(bedrock),
-                    use_anthropic_format: false,
-                    allowed_categories: None,
-                    system_prompt: SYSTEM_PROMPT.to_string(),
-                    effort: None,
+                    ..Self::base(model)
                 })
             }
             LlmSource::AnthropicApi => {
@@ -415,6 +436,8 @@ impl LlmClassifier {
                 );
                 Ok(Self::build_anthropic(effective_model, key).with_effort(cfg.effort))
             }
+            // #111: see `jev_glue::LlmClassifier::build_jev`.
+            LlmSource::Jev => Self::build_jev(cfg, model, creds),
         }
     }
 
@@ -430,16 +453,10 @@ impl LlmClassifier {
         headers.insert("HTTP-Referer", HeaderValue::from_static(OPENROUTER_REFERER));
         headers.insert("X-Title", HeaderValue::from_static(OPENROUTER_TITLE));
         Self {
-            client: Client::new(),
-            model: model.to_string(),
             api_key: key,
             endpoint: OPENROUTER_ENDPOINT.to_string(),
             extra_headers: headers,
-            bedrock: None,
-            use_anthropic_format: false,
-            allowed_categories: None,
-            system_prompt: SYSTEM_PROMPT.to_string(),
-            effort: None,
+            ..Self::base(model)
         }
     }
 
@@ -457,7 +474,7 @@ impl LlmClassifier {
     /// at startup to emit a single warning instead of silently producing
     /// "LLM fallback did not improve confidence" for every commit.
     pub fn has_api_key(&self) -> bool {
-        self.bedrock.is_some() || self.api_key.is_some()
+        self.bedrock.is_some() || self.api_key.is_some() || self.jev.is_some()
     }
 
     /// Restrict the LLM to the configured category set (#131).
@@ -493,7 +510,9 @@ impl LlmClassifier {
 
     /// Provider label recorded with each call's token usage (#111).
     pub fn provider_label(&self) -> &'static str {
-        if self.bedrock.is_some() {
+        if self.jev.is_some() {
+            "jev"
+        } else if self.bedrock.is_some() {
             "bedrock"
         } else if self.use_anthropic_format {
             "anthropic-api"
@@ -523,6 +542,10 @@ impl LlmClassifier {
     /// Test: `llm_prompt_tests::anthropic_usage_is_recorded`,
     /// `llm_prompt_tests::openai_usage_is_recorded`.
     pub async fn classify_detailed(&self, message: &str) -> LlmCall {
+        // #111: Jev builds its own request from pseudonymized text only.
+        if let Some(jev) = &self.jev {
+            return jev.classify(message).await;
+        }
         let (text, usage) = if let Some(bedrock) = &self.bedrock {
             bedrock.complete(&self.system_prompt, message).await
         } else if self.use_anthropic_format {

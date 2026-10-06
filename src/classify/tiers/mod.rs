@@ -11,6 +11,19 @@ pub mod exact;
 pub mod fuzzy;
 pub mod issue_type_tier;
 pub mod jira_project_tier;
+// #111: TypeSafe Jev provider and the pseudonymizer in front of it.
+pub mod jev;
+pub(crate) mod jev_budget;
+pub(crate) mod jev_error;
+pub(crate) mod jev_glue;
+pub(crate) mod jev_matcher;
+pub(crate) mod jev_names;
+pub(crate) mod jev_obfuscate;
+pub(crate) mod jev_patterns;
+pub(crate) mod jev_response;
+pub(crate) mod jev_tickets;
+pub(crate) mod jev_trailers;
+pub(crate) mod jev_vocab;
 pub mod llm;
 // #131: LLM prompt, reply validation and token accounting.
 pub mod llm_prompt;
@@ -91,6 +104,36 @@ impl ClassificationResult {
         }
     }
 }
+
+#[cfg(test)]
+mod jev_obfuscate_tests;
+
+#[cfg(test)]
+mod jev_redaction_tests;
+
+#[cfg(test)]
+mod jev_review_tests;
+
+#[cfg(test)]
+mod jev_gateb_tests;
+
+#[cfg(test)]
+mod jev_gateb2_tests;
+
+#[cfg(test)]
+mod jev_round3_tests;
+
+#[cfg(test)]
+mod jev_round4_tests;
+
+#[cfg(test)]
+mod jev_round5_tests;
+
+#[cfg(test)]
+mod jev_tests;
+
+#[cfg(test)]
+mod jev_text_mode_tests;
 
 #[cfg(test)]
 mod llm_tests;
