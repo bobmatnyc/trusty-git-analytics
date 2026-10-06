@@ -299,9 +299,13 @@ const JEV_OPTION_KEYS: [&str; 6] = [
 /// `llm.`, or a [`JevOptions`] field name, naming the key and where it
 /// belongs. Every other key, and text that is not a mapping or does not
 /// parse, passes; the typed parse reports those.
-/// Test: `tests::misplaced_top_level_jev_keys_fail_the_config_load`.
+/// Test: `tests::misplaced_top_level_jev_keys_fail_the_config_load`,
+/// `tests::misplaced_top_level_jev_key_fails_beside_a_duplicate_key`.
 pub(super) fn reject_misplaced_top_level_keys(text: &str) -> Result<()> {
-    let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str(text) else {
+    // #111: a `Value` parse rejects a duplicate key at any depth that the
+    // typed parse accepts; read only top-level keys, last one winning.
+    type TopLevel = std::collections::HashMap<serde_yaml::Value, serde::de::IgnoredAny>;
+    let Ok(map) = serde_yaml::from_str::<TopLevel>(text) else {
         return Ok(());
     };
     for key in map.keys().filter_map(serde_yaml::Value::as_str) {
@@ -513,5 +517,44 @@ mod tests {
         )
         .expect("unknown top-level key tolerated");
         assert!(cfg.llm.expect("llm").jev.obfuscate);
+    }
+
+    /// #111: a duplicate key the typed parse accepts must not skip the check.
+    #[test]
+    fn misplaced_top_level_jev_key_fails_beside_a_duplicate_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let load = |yaml: &str| {
+            std::fs::write(&path, yaml).expect("write");
+            crate::core::config::Config::load(&path)
+        };
+        let misplaced = "jev:\n  obfuscate: true\n";
+        let cases = [
+            ("top level", "velocity: {}\nvelocity: {}\n"),
+            (
+                "developer_aliases",
+                "developer_aliases:\n  Ann: [a@x.io]\n  Ann: [b@x.io]\n",
+            ),
+            ("ignored section", "velocity:\n  window: 1\n  window: 2\n"),
+        ];
+        let mut loaded = Vec::new();
+        for (name, dup) in cases {
+            match load(&format!("llm:\n  source: jev\n{dup}{misplaced}")) {
+                Ok(_) => loaded.push(name),
+                Err(e) => assert!(e.to_string().contains("`jev`"), "{name}: {e}"),
+            }
+        }
+        assert!(
+            loaded.is_empty(),
+            "loaded despite misplaced `jev`: {loaded:?}"
+        );
+
+        // Text the key-only parse rejects still fails the typed parse.
+        for yaml in [
+            "- jev:\n    obfuscate: true\n",
+            "jev: {obfuscate: true}\nllm: [\n",
+        ] {
+            assert!(load(yaml).is_err(), "loaded: {yaml:?}");
+        }
     }
 }
