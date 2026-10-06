@@ -55,6 +55,21 @@ cargo install tga --locked
 
 This installs the newest release published to crates.io.
 
+The crates.io package, a `--git` install and the GitHub release binaries
+all include the four LLM sources. Pick one with `llm.source` in the config; no
+build flag is needed:
+
+| `llm.source` | Credentials |
+|--------------|-------------|
+| `bedrock` | AWS credentials from the default chain (env vars, `~/.aws` profile, SSO, instance or task role) with Bedrock model access in the region |
+| `openrouter` (default) | OpenRouter key in the variable named by `llm.api_key_env` (default `OPENROUTER_API_KEY`) |
+| `anthropic-api` | Anthropic key in the variable named by `llm.api_key_env` |
+| `jev` | TypeSafe key in the variable named by `llm.api_key_env` (default `TYPESAFE_API_KEY`) |
+
+`cargo install tga --locked --no-default-features` builds without the AWS SDK;
+that binary rejects `llm.source: bedrock`. See the [configuration
+spec](docs/requirements/configuration.md) for the full `llm:` section.
+
 To build from the latest commit on `main` instead:
 ```bash
 cargo install --git https://github.com/bobmatnyc/trusty-git-analytics tga --locked
@@ -877,7 +892,7 @@ Tier-0 manual overrides and exact-keyword conventional-commit prefixes (e.g. `fi
 
 **Tier 3 — Fuzzy heuristics**: detects merge commits (via `is_merge` flag or `Merge pull request` prefix) and reverts (via `Revert` prefix). No external dependencies. Suppressed when `extend_defaults: false`.
 
-**Tier 7 — LLM fallback** (optional, async): calls an OpenAI-compatible API (**OpenRouter** by default, **AWS Bedrock** behind the `bedrock` cargo feature) when tiers 0–3 leave a commit below the fallback threshold. Disabled by default; enable with `analysis.llm_classification.enabled: true` or `--use-llm`. Results are only accepted when `confidence >= confidence_threshold` (default 0.7). See [LLM fallback threshold](#llm-fallback-threshold-migration).
+**Tier 7 — LLM fallback** (optional, async): calls an OpenAI-compatible API (**OpenRouter** by default; **AWS Bedrock**, the **Anthropic API** and **Jev** through `llm.source`) when tiers 0–3 leave a commit below the fallback threshold. Disabled by default; enable with `analysis.llm_classification.enabled: true` or `--use-llm`. Results are only accepted when `confidence >= confidence_threshold` (default 0.7). See [LLM fallback threshold](#llm-fallback-threshold-migration).
 
 ### Default Rules
 

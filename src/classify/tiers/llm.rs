@@ -268,10 +268,7 @@ impl LlmClassifier {
                 #[cfg(not(feature = "bedrock"))]
                 {
                     let _ = model;
-                    Err(
-                        "bedrock feature not compiled in — rebuild with --features bedrock"
-                            .to_string(),
-                    )
+                    Err(crate::classify::tiers::bedrock::BEDROCK_NOT_BUILT.to_string())
                 }
             }
             "auto" | "" => {
@@ -348,8 +345,8 @@ impl LlmClassifier {
     ///
     /// # Errors
     ///
-    /// - `bedrock` source without the feature compiled in → error with
-    ///   "reinstall with --features bedrock" guidance.
+    /// - `bedrock` source in a `--no-default-features` build → error with
+    ///   rebuild guidance (`bedrock::BEDROCK_NOT_BUILT`).
     /// - Key-based source with unset / empty env var → error naming the
     ///   missing variable and how to set it.
     pub async fn from_llm_config(cfg: &LlmConfig, model: &str) -> Result<Self, String> {

@@ -208,6 +208,13 @@ step_fmt() { x cargo fmt --all --check; }
 step_clippy() { x cargo clippy --workspace --exclude trusty-audit-ui --all-targets -- -D warnings; }
 step_test() { x cargo test --workspace --exclude trusty-audit-ui; }
 step_msrv() { x cargo "+${MSRV}" check --workspace --exclude trusty-audit-ui; }
+# Port of ci.yml `no-default-features`. The default build includes Bedrock, so
+# this is the only step that compiles, lints and tests the
+# `cfg(not(feature = "bedrock"))` arm.
+step_no_default_features() {
+    x cargo clippy -p tga --no-default-features --all-targets -- -D warnings
+    x cargo test -p tga --no-default-features
+}
 
 # Port of ci.yml `dependency-duplicates`.
 step_dep_dupes() {
@@ -381,6 +388,7 @@ run_step fmt step_fmt
 run_step clippy step_clippy
 run_step test step_test
 run_step "msrv (${MSRV})" step_msrv
+run_step no-default-features step_no_default_features
 run_step dependency-duplicates step_dep_dupes
 
 if [[ ! -e "${AUDIT_UI_DIST}/index.html" ]]; then

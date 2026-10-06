@@ -1,0 +1,2 @@
+Changed
+- Bedrock provider enabled by default. `bedrock` is now in tga's default feature set, so `cargo install tga` and the release binaries accept `llm.source: bedrock` with no build flag; Bedrock, OpenRouter, Anthropic API and Jev are all chosen through configuration alone. `--features bedrock` still works and changes nothing. `--no-default-features` builds without the AWS SDK, and its "bedrock feature not compiled in" error now says to rebuild with the default features. The local gate and `ci.yml` gain a `no-default-features` step that lints and tests that build.

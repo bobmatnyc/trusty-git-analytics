@@ -147,14 +147,14 @@ classification:
   llm_fallback_scope: unanswered       # send only rule-unanswered commits to the LLM, not low-confidence hits
 
 llm:
-  source: bedrock                      # bedrock | openrouter | anthropic-api
+  source: bedrock                      # bedrock | openrouter | anthropic-api | jev
   region: us-east-1                    # Bedrock only; falls back to the AWS SDK's own resolution
   model: us.anthropic.claude-haiku-4-5-20251001-v1:0
   api_key_env: MY_LLM_API_KEY          # openrouter / anthropic-api only; ignored for bedrock
 ```
 
-- **Bedrock:** build the binary with `cargo build --release --features
-  bedrock`. Current Claude models on Bedrock need a `us.` or `global.`
+- **Bedrock:** the default build includes it; no build flag is needed
+  (only a `--no-default-features` build leaves it out). Current Claude models on Bedrock need a `us.` or `global.`
   inference-profile model id, not the bare model id. Credentials come from
   the AWS default credential chain (env vars, `~/.aws/credentials` profile,
   SSO, instance role) — set `AWS_PROFILE` to pick a non-default profile. No

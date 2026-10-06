@@ -178,8 +178,9 @@ path = "src/main.rs"
 # Shared CLI help system (issue #216): declarative `help.yaml` loader +
 # Jaro-Winkler "did you mean?" suggester. `cli-help`/`update-check`/`config-cli`
 # are always on; `bedrock-client` (the shared Converse adapter, #2407) is added
-# only under tga's own `bedrock` feature below (#2411) so the AWS SDK stack
-# stays opt-in.
+# under tga's own `bedrock` feature below (#2411), which is a default feature so
+# `llm.source: bedrock` works from configuration alone; `--no-default-features`
+# drops the AWS SDK stack.
 # `monitor-tui` (#5197) is what gives the `tga tui` subcommand the shared
 # `enter_tui` / `leave_tui` terminal glue in `trusty_common::monitor::tui_common`,
 # so tga does not grow a second copy of the raw-mode dance. It turns on
@@ -293,9 +294,13 @@ async-trait = "0.1.89"
 futures = "0.3.32"
 
 [features]
-default = []
-# Enable the AWS Bedrock LLM classifier provider. Without this feature,
-# `--provider bedrock` returns a configuration error explaining the build.
+# Bedrock is on by default (owner ruling: tga supports Bedrock, OpenRouter,
+# Anthropic API and Jev through user configuration alone), so `cargo install
+# tga` and the release binaries accept `llm.source: bedrock`. `--features
+# bedrock` is therefore a no-op; `--no-default-features` builds without the AWS
+# SDK, and `llm.source: bedrock` then returns a configuration error.
+default = ["bedrock"]
+# The AWS Bedrock LLM classifier provider.
 #
 # As of #2411 the Bedrock wire integration (region resolution, the AWS
 # credential chain, and the Converse request/response conversion) is no longer
