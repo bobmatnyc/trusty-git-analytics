@@ -58,8 +58,9 @@ pub use buckets::{
     Bucket, BucketMap, BucketSource, DEFAULT_BUCKETS, MAP_ONLY_CATEGORIES, NO_BUCKET_LABELS,
 };
 pub use llm::{
-    JevOptions, LlmConfig, LlmEffort, LlmFallbackScope, LlmSource, JEV_API_KEY_ENV,
-    JEV_DEFAULT_BUDGET_USD, JEV_DEFAULT_NAME_MATCHER_BYTES,
+    JevOptions, LlmConfig, LlmContextItem, LlmEffort, LlmFallbackScope, LlmSource, JEV_API_KEY_ENV,
+    JEV_DEFAULT_BUDGET_USD, JEV_DEFAULT_NAME_MATCHER_BYTES, LLM_CONTEXT_DEFAULT_MAX_PATHS,
+    LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES,
 };
 pub use validator::{ConfigError, ConfigValidator};
 

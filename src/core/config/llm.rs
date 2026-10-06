@@ -2,7 +2,8 @@
 //!
 //! Why: moved out of `config/mod.rs` (#131) so that file stops growing past
 //! the size cap while the LLM tier gains its fallback scope and effort keys.
-//! What: [`LlmSource`], [`LlmConfig`], [`LlmEffort`] and [`LlmFallbackScope`].
+//! What: [`LlmSource`], [`LlmConfig`], [`LlmEffort`], [`LlmFallbackScope`]
+//! and [`LlmContextItem`].
 //! Test: `core::config::tests::llm_config_*`,
 //! `core::config::llm::tests::fallback_scope_and_effort_parse`.
 
@@ -197,6 +198,34 @@ pub enum LlmFallbackScope {
     Unanswered,
 }
 
+/// One commit fact `llm.context` can append to the LLM user prompt (#111).
+///
+/// Why: the message-only LLM scored well below a rater who also saw the
+/// changed paths, the PR title and the issue type.
+/// What: `paths` (changed file paths, capped by
+/// [`LlmConfig::context_max_paths`] and [`LlmConfig::context_max_path_bytes`]),
+/// `pr_title` (the lowest-numbered stored PR containing the commit) and
+/// `issue_type` (the first linked work item's type). Any other value fails
+/// the config load.
+/// Test: `tests::llm_context_items_parse_and_unknown_items_fail_the_load`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LlmContextItem {
+    /// Changed file paths from the `files` table.
+    Paths,
+    /// The linked pull request's title from `pull_requests`.
+    PrTitle,
+    /// The linked work item's `item_type` (e.g. `Bug`, `Story`).
+    IssueType,
+}
+
+/// Default for [`LlmConfig::context_max_paths`] (#111).
+pub const LLM_CONTEXT_DEFAULT_MAX_PATHS: usize = 30;
+
+/// Default for [`LlmConfig::context_max_path_bytes`] (#111).
+pub const LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES: usize = 2048;
+
 /// Top-level LLM configuration section (`llm:` in YAML).
 ///
 /// Why: the previous design placed LLM credentials inside
@@ -273,6 +302,35 @@ pub struct LlmConfig {
     /// `source: jev` settings (#111); ignored by the other sources.
     #[serde(default)]
     pub jev: JevOptions,
+
+    /// Commit facts appended to the user prompt after the message (#111).
+    ///
+    /// Empty (the default) sends the message alone, exactly as before. Each
+    /// item adds a line to one delimited block when the database stores
+    /// that fact for the commit. Every source honours it; for `jev` the
+    /// block is part of the message text, and with `jev.obfuscate: true`
+    /// it is pseudonymized too.
+    #[serde(default)]
+    pub context: Vec<LlmContextItem>,
+
+    /// Most changed paths `context: [paths]` lists per commit (default
+    /// [`LLM_CONTEXT_DEFAULT_MAX_PATHS`]).
+    #[serde(default = "default_context_max_paths")]
+    pub context_max_paths: usize,
+
+    /// Most bytes of path text `context: [paths]` lists per commit (default
+    /// [`LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES`]); the list stops before the
+    /// first path that would pass it.
+    #[serde(default = "default_context_max_path_bytes")]
+    pub context_max_path_bytes: usize,
+}
+
+fn default_context_max_paths() -> usize {
+    LLM_CONTEXT_DEFAULT_MAX_PATHS
+}
+
+fn default_context_max_path_bytes() -> usize {
+    LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES
 }
 
 fn default_api_key_env() -> String {
@@ -354,6 +412,9 @@ impl Default for LlmConfig {
             model: None,
             effort: None,
             jev: JevOptions::default(),
+            context: Vec::new(),
+            context_max_paths: LLM_CONTEXT_DEFAULT_MAX_PATHS,
+            context_max_path_bytes: LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES,
         }
     }
 }

@@ -26,6 +26,7 @@ use tracing::{debug, info, warn};
 use crate::classify::rules::CategoryDef;
 use crate::classify::tiers::bedrock::{BedrockClassifier, DEFAULT_BEDROCK_MODEL};
 use crate::classify::tiers::jev::{JevClassifier, JEV_MODEL};
+use crate::classify::tiers::llm_context::{with_context, CommitContext};
 use crate::classify::tiers::llm_prompt::{self, LlmCall, LlmUsage};
 use crate::classify::tiers::ClassificationResult;
 use crate::core::config::{LlmConfig, LlmEffort, LlmSource};
@@ -542,10 +543,29 @@ impl LlmClassifier {
     /// Test: `llm_prompt_tests::anthropic_usage_is_recorded`,
     /// `llm_prompt_tests::openai_usage_is_recorded`.
     pub async fn classify_detailed(&self, message: &str) -> LlmCall {
+        self.classify_detailed_with_context(message, None).await
+    }
+
+    /// [`Self::classify_detailed`] with the commit's `llm.context` facts
+    /// (#111) after the message; `None` sends the message alone.
+    ///
+    /// What: Bedrock, the Anthropic API and the OpenAI-compatible path send
+    /// [`with_context`]'s text where the message went; Jev adds the block to
+    /// its message text (pseudonymized with `llm.jev.obfuscate`).
+    /// Test: `classify::llm_context_tests::context_paths_appends_a_paths_block`,
+    /// `classify::llm_context_tests::anthropic_prompt_carries_every_context_item`,
+    /// `classify::tiers::jev_context_tests::obfuscated_jev_context_sends_no_raw_path`.
+    pub(crate) async fn classify_detailed_with_context(
+        &self,
+        message: &str,
+        context: Option<&CommitContext>,
+    ) -> LlmCall {
         // #111: Jev builds its own request from pseudonymized text only.
         if let Some(jev) = &self.jev {
-            return jev.classify(message).await;
+            return jev.classify_with_context(message, context).await;
         }
+        let message = with_context(message, context);
+        let message = message.as_ref();
         let (text, usage) = if let Some(bedrock) = &self.bedrock {
             bedrock.complete(&self.system_prompt, message).await
         } else if self.use_anthropic_format {

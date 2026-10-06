@@ -14,6 +14,7 @@ use crate::classify::tiers::fuzzy::FuzzyClassifier;
 use crate::classify::tiers::issue_type_tier::IssueTypeTier;
 use crate::classify::tiers::jira_project_tier::JiraProjectTier;
 use crate::classify::tiers::llm::LlmClassifier;
+use crate::classify::tiers::llm_context::CommitContext;
 use crate::classify::tiers::llm_prompt::LlmCall;
 use crate::classify::tiers::override_tier::OverrideTier;
 use crate::classify::tiers::regex_tier::RegexMatcher;
@@ -603,8 +604,19 @@ impl ClassificationEngine {
     /// [`Self::llm_classify_only`] plus the call's outcome and token usage
     /// (#111); `None` when the LLM tier is not configured.
     pub async fn llm_classify_detailed(&self, message: &str) -> Option<LlmCall> {
+        self.llm_classify_with_context(message, None).await
+    }
+
+    /// [`Self::llm_classify_detailed`] with the commit's `llm.context`
+    /// facts after the message (#111). The ticket id still comes from the
+    /// message alone.
+    pub(crate) async fn llm_classify_with_context(
+        &self,
+        message: &str,
+        context: Option<&CommitContext>,
+    ) -> Option<LlmCall> {
         let llm = self.llm.as_ref()?;
-        let mut call = llm.classify_detailed(message).await;
+        let mut call = llm.classify_detailed_with_context(message, context).await;
         if let Some(r) = call.verdict.as_mut() {
             r.top_level = self.taxonomy.resolve(&r.category);
             if r.ticket_id.is_none() {
@@ -614,9 +626,10 @@ impl ClassificationEngine {
         Some(call)
     }
 
-    /// Hand the LLM tier the run's messages, in commit order, and the names
-    /// the database records before the concurrent calls start (#111: every
-    /// name is known to the Jev pseudonymizer before its first request).
+    /// Hand the LLM tier the run's messages and `llm.context` blocks, in
+    /// commit order, and the names the database records before the
+    /// concurrent calls start (#111: every name is known to the Jev
+    /// pseudonymizer before its first request).
     ///
     /// # Errors
     ///
@@ -624,10 +637,11 @@ impl ClassificationEngine {
     pub(crate) fn llm_prepare(
         &self,
         messages: &[&str],
+        contexts: &[&CommitContext],
         names: &crate::classify::tiers::jev_obfuscate::RunNames,
     ) -> std::result::Result<(), crate::classify::tiers::jev_error::JevError> {
         match &self.llm {
-            Some(llm) => llm.prepare_batch(messages, names),
+            Some(llm) => llm.prepare_batch(messages, contexts, names),
             None => Ok(()),
         }
     }
