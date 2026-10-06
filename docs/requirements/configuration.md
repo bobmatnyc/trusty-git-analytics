@@ -279,7 +279,13 @@ rules can emit. A category may not be named `NO_MATCH` or
   a list wrapped onto an indented next line; trailers behind list or quote
   markers; bracketed and any-case ticket keys (`[abc-123]`,
   `PROJ-12_fix`, `feature/proj-12`); record ids of 1–4 letters and 4+
-  digits (`H1234` → `ID_n`); `jev.id_patterns` regexes (`ID_n`); IPv6
+  digits (`H1234` → `ID_n`); commit and content hashes and UUIDs (`ID_n`,
+  gate B 2: a hex run of 7 to 31 characters holding both a digit and a
+  letter, any hex run of 32 or more such as a 64-character hash, and a
+  UUID; inside a version string, after `-g`, `@` or `+`, never inside a
+  longer word; words spelled in hex letters such as `decade` or `facade`,
+  and pure-digit numbers under 32 digits such as `20261006`, are kept);
+  `jev.id_patterns` regexes (`ID_n`); IPv6
   addresses; host names in any case when the last label is a known TLD
   (`DB1.CORP.ACME.COM`).
 - **Hosts on word suffixes:** a dotted name of two or more labels, in any
@@ -292,11 +298,17 @@ rules can emit. A category may not be named `NO_MATCH` or
   `process.env.dev` stay. A name followed by `(` or with a camelCase label
   (`fooBar.baz`) is code and stays, as does `f64::MAX`.
 - **Name matcher size:** `jev.name_matcher_bytes` (default `67108864`,
-  64 MiB) caps the compiled matcher of learned names and file names. A run
-  whose names do not fit fails before anything is sent. Measured: about
-  18,000 two-word names fit the default; 50,000 fit `268435456` (256 MiB),
-  which builds in about one second in a release build. A repository with
-  many files may need a larger value.
+  64 MiB) caps the heap bytes of the compiled matcher of learned names and
+  file names. A run whose names do not fit fails before anything is sent.
+  The matcher is one Aho-Corasick automaton over every name (gate B 2; it
+  was one regex alternation, which needed about 1 GiB for 225,000 names).
+  Measured on a synthetic set shaped like a production database (230,000
+  file paths with their basenames and stems, 80,000 logins, 40,000
+  two-word names with their parts, 20,000 hyphenated `org/repo` names;
+  672,780 names in all): 44,453,564 bytes (42 MiB), built in 1.1 s in a
+  release build and 7.9 s in a debug build; the whole test process peaked
+  at about 400 MB resident. At about 66 bytes per name the default holds
+  roughly a million names.
 - **Payload dump:** with `jev.payload_dump_dir` set, tga writes each exact
   outbound request body to `<dir>/jev-request-<hash>.json`, sends nothing, and
   records the calls as `skipped`; no key is needed. Next to each body it
@@ -316,7 +328,7 @@ llm:
     budget_usd: 0.25                  # per-run spend cap (default)
     sensitive_terms: [ledgerd, paygate]   # extra names to hide (default: none)
     # payload_dump_dir: ./jev-payloads   # write bodies, send nothing
-    # name_matcher_bytes: 268435456      # raise for ~50k people (default 64 MiB)
+    # name_matcher_bytes: 134217728      # raise past ~1M names (default 64 MiB)
 ```
 
 #### Self-enabling behavior (added v2.3.0)

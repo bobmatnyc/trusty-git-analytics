@@ -26,7 +26,7 @@ pub(crate) enum JevError {
     Matcher {
         /// Names the matcher had to cover.
         count: usize,
-        /// `exceeds N bytes` or `is invalid`.
+        /// `exceeds N bytes` or `could not be built`.
         why: String,
     },
     /// An earlier matcher rebuild failed, so names the run has seen may be

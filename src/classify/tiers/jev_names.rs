@@ -4,16 +4,14 @@
 //! shape; the list grows during a run (authors, trailer names) and its
 //! matching rules (name parts, stop-listed given names, apostrophes) are
 //! their own concern. Split out of `jev_obfuscate.rs` for the size cap.
-//! What: [`NameSet`] collects the names; [`NameMatcher::build`] compiles
-//! them into a case-insensitive regex plus a case-sensitive one for
-//! stop-listed given names, which match only in Titlecase (`Frank`).
+//! What: [`NameSet`] collects the names and the stop-listed given names
+//! that match only in Titlecase (`Frank`);
+//! [`super::jev_matcher::NameMatcher`] compiles them.
 //! Test: `classify::tiers::jev_obfuscate_tests`,
 //! `classify::tiers::jev_review_tests::name_tokens_apostrophes_hyphens_titlecase`,
 //! `classify::tiers::jev_round3_tests::category_text_survives_learning`.
 
-use std::collections::{HashMap, HashSet};
-
-use regex::{Captures, Regex, RegexBuilder};
+use std::collections::HashSet;
 
 use super::jev_obfuscate::TokenKind;
 use super::jev_patterns::is_name_stop_word;
@@ -54,7 +52,7 @@ pub(super) struct NameSet {
     pub(super) entries: Vec<(String, TokenKind)>,
     seen: HashSet<String>,
     /// Stop-listed given names of known people, matched only in Titlecase.
-    titled: Vec<String>,
+    pub(super) titled: Vec<String>,
     /// Entries left unmatched case-insensitively (too short, a stop-list
     /// name token, or category vocabulary).
     pub(super) skipped: usize,
@@ -62,11 +60,6 @@ pub(super) struct NameSet {
     /// a person name or part made only of it is never matched (#111).
     vocab: Vocab,
 }
-
-/// Punctuation after which a Titlecase word starts a sentence or item.
-const SENTENCE_BREAKS: [char; 14] = [
-    '.', '!', '?', ':', ';', '\n', '*', '-', '>', '#', '(', '[', '"', '\'',
-];
 
 impl NameSet {
     /// Words that are never a name (#111, gate B): see [`Vocab::new`].
@@ -164,145 +157,4 @@ impl NameSet {
         }
         changed
     }
-}
-
-/// The compiled name matcher.
-pub(super) struct NameMatcher {
-    re: Option<Regex>,
-    titled: Option<Regex>,
-    kinds: HashMap<String, TokenKind>,
-}
-
-impl NameMatcher {
-    /// Compile `set`; `None` when it holds no name.
-    ///
-    /// # Errors
-    ///
-    /// `(names, error)` when a matcher would exceed `size_limit`.
-    pub(super) fn build(
-        set: &NameSet,
-        size_limit: usize,
-    ) -> Result<Option<Self>, (usize, regex::Error)> {
-        let list: Vec<String> = set.entries.iter().map(|(n, _)| n.clone()).collect();
-        let count = list.len() + set.titled.len();
-        let compile = |names: &[String], fold: bool| {
-            if names.is_empty() {
-                return Ok(None);
-            }
-            names_regex(names, size_limit, fold)
-                .map(Some)
-                .map_err(|e| (count, e))
-        };
-        let re = compile(&list, true)?;
-        let titled = compile(&set.titled, false)?;
-        if re.is_none() && titled.is_none() {
-            return Ok(None);
-        }
-        let mut kinds: HashMap<String, TokenKind> =
-            set.entries.iter().map(|(n, k)| (name_key(n), *k)).collect();
-        for t in &set.titled {
-            kinds.entry(name_key(t)).or_insert(TokenKind::Person);
-        }
-        Ok(Some(Self { re, titled, kinds }))
-    }
-
-    /// Replace every matched name in `text` via `token`.
-    pub(super) fn apply(
-        &self,
-        text: &str,
-        mut token: impl FnMut(TokenKind, &str) -> String,
-    ) -> String {
-        let mut out = text.to_string();
-        for (i, re) in [&self.re, &self.titled].into_iter().enumerate() {
-            let Some(re) = re else { continue };
-            let src = out.clone();
-            out = re
-                .replace_all(&src, |c: &Captures| {
-                    // #111 (gate B): a Titlecase-only given name at a sentence
-                    // or item start is an ordinary word (`Mark as done`).
-                    let start = c.get(0).map_or(0, |m| m.start());
-                    let before = src[..start].trim_end_matches([' ', '\t']);
-                    if i == 1 && (before.is_empty() || before.ends_with(SENTENCE_BREAKS)) {
-                        return c[0].to_string();
-                    }
-                    // An unknown case-folded spelling still gets a pseudonym.
-                    let kind = self
-                        .kinds
-                        .get(&name_key(&c[0]))
-                        .copied()
-                        .unwrap_or(TokenKind::Term);
-                    token(kind, &c[0])
-                })
-                .into_owned();
-        }
-        out
-    }
-}
-
-/// The whole-word pattern for one configured name.
-///
-/// What: the name, escaped, with each whitespace run matching any
-/// whitespace, and an ASCII word boundary on each side whose edge character
-/// is an ASCII word character (so `c++` and `José` still match).
-fn bounded(name: &str) -> String {
-    let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-    // #111: `'` and `’` match each other (`O'Brien`, `O’Brien`).
-    let body = name
-        .split_whitespace()
-        .map(|w| {
-            regex::escape(w)
-                .chars()
-                .map(|c| match c {
-                    '\'' | '\u{2019}' => "['\u{2019}]".to_string(),
-                    c => c.to_string(),
-                })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join(r"\s+");
-    let pre = if edge(name.chars().next()) {
-        r"(?-u:\b)"
-    } else {
-        ""
-    };
-    let post = if edge(name.chars().last()) {
-        r"(?-u:\b)"
-    } else {
-        ""
-    };
-    format!("{pre}{body}{post}")
-}
-
-/// One regex over `names`, case-insensitive when `fold` (#111).
-///
-/// Why: a leftmost-longest literal matcher returned only the longest
-/// candidate at a position, so when it failed the whole-word check
-/// (`acme-web` inside `acme-webhooks`) the shorter overlapping name
-/// (`acme`) was never tried.
-/// What: `(?i)(?:n1|n2|…)` with each name [`bounded`], sorted longest
-/// first; the regex engine falls back to the next alternative when a
-/// boundary fails. `size_limit` caps the compiled program.
-/// Test: `jev_obfuscate_tests::overlapping_names_fall_back_to_the_shorter`.
-///
-/// # Errors
-///
-/// The compiled matcher would exceed `size_limit`.
-fn names_regex(names: &[String], size_limit: usize, fold: bool) -> Result<Regex, regex::Error> {
-    let mut sorted: Vec<&String> = names.iter().collect();
-    sorted.sort_by(|a, b| {
-        b.chars()
-            .count()
-            .cmp(&a.chars().count())
-            .then_with(|| a.cmp(b))
-    });
-    let alternation = sorted
-        .iter()
-        .map(|n| bounded(n))
-        .collect::<Vec<_>>()
-        .join("|");
-    RegexBuilder::new(&format!("(?:{alternation})"))
-        .case_insensitive(fold)
-        .size_limit(size_limit)
-        .dfa_size_limit(size_limit)
-        .build()
 }

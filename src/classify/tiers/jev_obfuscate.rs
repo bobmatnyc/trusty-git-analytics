@@ -23,15 +23,16 @@ use serde::{Serialize, Serializer};
 use tracing::{info, warn};
 
 use super::jev_error::JevError;
-use super::jev_names::{name_key, NameMatcher, NameSet};
+use super::jev_matcher::{MatcherError, NameMatcher};
+use super::jev_names::{name_key, NameSet};
 use super::jev_patterns::{
     classify_dotted, is_ipv6, is_path, is_placeholder, is_public_branch, known_ext, patterns,
     split_trailing_punct, Dotted, Patterns, FILE_STEMS,
 };
-use super::jev_tickets::{is_record_id, ticket_start};
+use super::jev_tickets::{is_hex_id, is_record_id, replace_ids, ticket_start};
 use super::jev_trailers::{item_names, items, names_in, scan, Role, Trailer};
 
-/// Compiled-size cap for the name matcher. Thousands of names fit well
+/// Heap-byte cap for the name matcher. Hundreds of thousands of names fit
 /// inside it; past it, building the matcher is an error, never a silent
 /// skip (#111).
 #[cfg(test)]
@@ -175,6 +176,10 @@ impl std::fmt::Debug for Obfuscator {
         f.debug_struct("Obfuscator")
             .field("pseudonyms", &self.tokens.len())
             .field("names", &self.names.entries.len())
+            .field(
+                "matcher_bytes",
+                &self.matcher.as_ref().map_or(0, NameMatcher::memory_usage),
+            )
             .field("poisoned", &self.poisoned)
             .finish_non_exhaustive()
     }
@@ -196,7 +201,8 @@ impl Obfuscator {
     /// # Errors
     ///
     /// A built-in pattern or an operator id pattern does not compile, or
-    /// the matcher would exceed `size_limit` — a hard error, so no run
+    /// the matcher would hold more than `size_limit` heap bytes — a hard
+    /// error, so no run
     /// proceeds with names silently unmatched (#111).
     pub(crate) fn with_size_limit(names: &KnownNames, size_limit: usize) -> Result<Self, JevError> {
         let p = patterns()?;
@@ -371,8 +377,8 @@ impl Obfuscator {
                 // later call would pass them through. Refuse every one.
                 self.poisoned = true;
                 let why = match e {
-                    regex::Error::CompiledTooBig(limit) => format!("exceeds {limit} bytes"),
-                    _ => "is invalid".to_string(),
+                    MatcherError::TooBig { limit } => format!("exceeds {limit} bytes"),
+                    MatcherError::Build => "could not be built".to_string(),
                 };
                 warn!(
                     names = count,
@@ -492,7 +498,7 @@ impl Obfuscator {
     /// #111: operator id patterns run first; known names run before the
     /// host, path and ticket shapes, so a remembered `jane.doe` is a
     /// person, never a host. URLs and addresses go whole before names, so
-    /// one address keeps one pseudonym.
+    /// one address keeps one pseudonym; hashes go next (gate B 2).
     fn line(&mut self, line: &str) -> String {
         let p = self.p;
         let mut s = self.merge_refs(line);
@@ -502,12 +508,21 @@ impl Obfuscator {
         }
         let s = self.regex_pass(&s, &p.url, TokenKind::Url, true);
         let s = self.regex_pass(&s, &p.email, TokenKind::Email, false);
+        // Gate B 2: hashes before every shape rule, so one inside a version
+        // string (`1.4.2-<sha>`) or after `-g` goes whole.
+        let hex = |c: &Captures| c.get(0).is_some_and(|m| is_hex_id(&s, m.start(), m.end()));
+        let s = replace_ids(&s, &p.hex, hex, |m| self.token(TokenKind::Id, m));
         let s = self.names(&s);
         let s = self.ipv6(&s);
         let s = self.paths(&s);
         let s = self.dotted(&s);
         let s = self.tickets(&s);
-        let s = self.record_ids(&s);
+        let s = replace_ids(
+            &s,
+            &p.id,
+            |c| is_record_id(&c[1]),
+            |m| self.token(TokenKind::Id, m),
+        );
         self.mentions(&s)
     }
 
@@ -649,20 +664,6 @@ impl Obfuscator {
         }
         out.push_str(&text[last..]);
         out
-    }
-
-    /// Record ids (`H1234`, `AB12345`) → `ID_n` (gate B).
-    fn record_ids(&mut self, text: &str) -> String {
-        self.p
-            .id
-            .replace_all(text, |c: &Captures| {
-                if is_record_id(&c[1]) {
-                    self.token(TokenKind::Id, &c[0])
-                } else {
-                    c[0].to_string()
-                }
-            })
-            .into_owned()
     }
 
     /// Configured, database and trailer names, longest first with fallback.

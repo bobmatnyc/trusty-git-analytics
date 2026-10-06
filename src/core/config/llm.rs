@@ -60,7 +60,7 @@ pub const JEV_API_KEY_ENV: &str = "TYPESAFE_API_KEY";
 /// Default per-run spend cap for `source: jev`, in US dollars (#111).
 pub const JEV_DEFAULT_BUDGET_USD: f64 = 0.25;
 
-/// Default compiled-size cap of the Jev name matcher, in bytes (#111).
+/// Default heap-byte cap of the Jev name matcher (#111).
 pub const JEV_DEFAULT_NAME_MATCHER_BYTES: usize = 64 << 20;
 
 /// Settings that apply only to `source: jev` (`llm.jev:` in YAML, #111).
@@ -94,10 +94,10 @@ pub struct JevOptions {
     /// regex fails the run before anything is sent. Empty by default.
     #[serde(default)]
     pub id_patterns: Vec<String>,
-    /// Compiled-size cap of the name matcher, in bytes (default
-    /// [`JEV_DEFAULT_NAME_MATCHER_BYTES`], 64 MiB). A run whose names do not
-    /// fit fails before anything is sent; raise it for a very large roster
-    /// (#111).
+    /// Heap bytes the compiled name matcher may hold (default
+    /// [`JEV_DEFAULT_NAME_MATCHER_BYTES`], 64 MiB; about 66 bytes per name,
+    /// so roughly a million names). A run whose names do not fit fails
+    /// before anything is sent; raise it for a larger name set (#111).
     #[serde(default = "default_jev_name_matcher_bytes")]
     pub name_matcher_bytes: usize,
 }

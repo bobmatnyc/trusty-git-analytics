@@ -167,28 +167,19 @@ fn fifty_thousand_names() -> Vec<String> {
 /// Why (round 3, item 4): a large organisation's history names tens of
 /// thousands of people; the matcher must build in bounded time under a
 /// documented cap, or the run sends nothing.
-/// What: the measured ceiling at the default 64 MiB cap is about 18 600
-/// two-word names (18 609 fit, 18 992 do not; ~52 000 entries with parts),
-/// so 17 000 must fit the default (the built-in file names and gate-B
-/// entries take a little room). 50 000 two-word names (140 254 entries)
-/// do not fit the default and do fit `name_matcher_bytes: 268435456`
-/// (256 MiB; about 1 s in a release build), building and redacting one
-/// message in under 120 s in the unoptimised test build.
+/// What: 50,000 two-word names (140,254 entries with parts) fit the
+/// default 64 MiB cap (gate B 2: the regex matcher fitted about 18,600 and
+/// needed 256 MiB for these), building and redacting one message in under
+/// 120 s in the unoptimised test build.
 #[test]
 fn fifty_thousand_names_build_under_the_default_limit() {
-    let all = fifty_thousand_names();
-    let default_fit = KnownNames {
-        people: all[..17_000].to_vec(),
-        ..KnownNames::default()
-    };
-    assert!(Obfuscator::with_size_limit(&default_fit, NAME_MATCHER_SIZE_LIMIT).is_ok());
     let names = KnownNames {
-        people: all,
+        people: fifty_thousand_names(),
         ..KnownNames::default()
     };
-    assert!(Obfuscator::with_size_limit(&names, NAME_MATCHER_SIZE_LIMIT).is_err());
     let start = Instant::now();
-    let mut o = Obfuscator::with_size_limit(&names, 256 << 20).expect("50k names fit 256 MiB");
+    let mut o = Obfuscator::with_size_limit(&names, NAME_MATCHER_SIZE_LIMIT)
+        .expect("50k names fit the default cap");
     let built = start.elapsed();
     let who = names.people[31_337].clone();
     let out = o
@@ -236,6 +227,7 @@ fn jev_test_pointers_resolve() {
         ("jev.rs", include_str!("jev.rs")),
         ("jev_budget.rs", include_str!("jev_budget.rs")),
         ("jev_error.rs", include_str!("jev_error.rs")),
+        ("jev_matcher.rs", include_str!("jev_matcher.rs")),
         ("jev_names.rs", include_str!("jev_names.rs")),
         ("jev_obfuscate.rs", include_str!("jev_obfuscate.rs")),
         ("jev_patterns.rs", include_str!("jev_patterns.rs")),
@@ -258,6 +250,7 @@ fn jev_test_pointers_resolve() {
         ("jev_review_tests", include_str!("jev_review_tests.rs")),
         ("jev_round3_tests", include_str!("jev_round3_tests.rs")),
         ("jev_round4_tests", include_str!("jev_round4_tests.rs")),
+        ("jev_round5_tests", include_str!("jev_round5_tests.rs")),
         ("jev_gateb_tests", include_str!("jev_gateb_tests.rs")),
         ("jev_gateb2_tests", include_str!("jev_gateb2_tests.rs")),
     ];

@@ -5,9 +5,34 @@
 //! prose is full of look-alikes (`utf-8`, `python-3`, `step-2`). Split out
 //! of `jev_patterns.rs` for the size cap.
 //! What: [`ticket_start`] decides whether a `ticket` regex match is a key,
-//! and where it starts; [`is_record_id`] decides an `id` match.
+//! and where it starts; [`is_record_id`] decides an `id` match and
+//! [`is_hex_id`] a `hex` match.
 //! Test: `classify::tiers::jev_obfuscate_tests::lowercase_ticket_rule`,
 //! `jev_gateb_tests::lowercase_ticket_keys_any_digits`.
+
+use regex::{Captures, Regex};
+
+/// `text` with each `re` match that `is_id` accepts replaced by `token`.
+///
+/// What: the record-id and hash passes of the pseudonymizer; the record-id
+/// rule is [`is_record_id`], the hash rule [`is_hex_id`].
+/// Test: `jev_obfuscate_tests::record_ids_become_id`,
+/// `jev_round5_tests::a_full_sha_in_a_version_string_becomes_id`.
+pub(super) fn replace_ids(
+    text: &str,
+    re: &Regex,
+    is_id: impl Fn(&Captures) -> bool,
+    mut token: impl FnMut(&str) -> String,
+) -> String {
+    re.replace_all(text, |c: &Captures| {
+        if is_id(c) {
+            token(&c[0])
+        } else {
+            c[0].to_string()
+        }
+    })
+    .into_owned()
+}
 
 /// Standard names shaped like issue keys (`UTF-8`, `SHA-256`); kept.
 const NOT_TICKETS: &[&str] = &[
@@ -105,6 +130,39 @@ const TICKET_STOP_WORDS: &[&str] = &[
 /// Test: `jev_obfuscate_tests::record_ids_become_id`.
 pub(super) fn is_record_id(prefix: &str) -> bool {
     !NOT_TICKETS.iter().any(|n| n.eq_ignore_ascii_case(prefix))
+}
+
+/// Whether the `hex` match `text[start..end]` is a commit hash, content
+/// hash or UUID (#111, gate B 2).
+///
+/// Why: a hash names a real commit or artefact; gate B 2 found full commit
+/// hashes inside version strings in two payload bodies.
+/// What: the match must not continue a word: the character before it is
+/// none, not a letter or digit, or a `g` that is itself not after one
+/// (`git describe` output: `v1.2-3-g3f9c2a7`); the character after it is
+/// none or not a letter or digit. Then a UUID, any run of 32 or more hex
+/// characters (a 64-character hash, a 40-digit number), or a run of 7 to
+/// 31 that holds both a digit and a letter (`3f9c2a7`) is an id. A
+/// shorter run, a pure-letter run (`decade`, `facade`, `deadbeef`) and a
+/// pure-digit run under 32 (`20261006`, `1234567`) are not.
+/// Test: `jev_round5_tests::an_abbreviated_sha_after_g_and_other_joiners_becomes_id`,
+/// `jev_round5_tests::hex_letter_words_and_plain_numbers_survive`,
+/// `jev_round5_tests::a_64_character_hash_becomes_id`.
+pub(super) fn is_hex_id(text: &str, start: usize, end: usize) -> bool {
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    let mut before = text[..start].chars().rev();
+    let free_start = match before.next() {
+        None => true,
+        Some('g' | 'G') => !word(before.next()),
+        Some(c) => !c.is_alphanumeric(),
+    };
+    if !free_start || word(text[end..].chars().next()) {
+        return false;
+    }
+    let run = &text[start..end];
+    let digit = run.bytes().any(|b| b.is_ascii_digit());
+    let letter = run.bytes().any(|b| b.is_ascii_alphabetic());
+    run.contains('-') || run.len() >= 32 || (digit && letter)
 }
 
 /// Whether `prefix-…` is a key, given the character `before` it and the

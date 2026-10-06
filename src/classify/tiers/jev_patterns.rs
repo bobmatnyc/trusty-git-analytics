@@ -42,6 +42,9 @@ pub(super) struct Patterns {
     /// Record ids: 1–4 letters then 4+ digits (`H1234`, `AB12345`);
     /// [`super::jev_tickets::is_record_id`] decides.
     pub(super) id: Regex,
+    /// UUIDs and runs of 7 or more hex characters;
+    /// [`super::jev_tickets::is_hex_id`] decides (#111, gate B 2).
+    pub(super) hex: Regex,
     /// `@handle`, `@org/team` and `@app[bot]` mentions not preceded by a
     /// word character, `.`, `@` or `/`.
     pub(super) mention: Regex,
@@ -90,6 +93,10 @@ impl Patterns {
             // rejects a key run on into a letter.
             ticket: c("ticket", r"\b([A-Za-z][A-Za-z0-9_]{1,19})-([0-9]+)")?,
             id: c("id", r"\b([A-Za-z]{1,4})[0-9]{4,}\b")?,
+            hex: c(
+                "hex",
+                r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{7,}",
+            )?,
             mention: c(
                 "mention",
                 r"(^|[^A-Za-z0-9_.@/])@([A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?(?:/[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?)?(?:\[bot\])?)",

@@ -542,8 +542,10 @@ pub(super) fn small_limit() -> usize {
         people: vec!["qaa".into()],
         ..KnownNames::default()
     };
-    let limit = (8..24)
-        .map(|b| 1_usize << b)
+    // #111 (gate B 2): steps of 1/8, since an automaton's fixed overhead
+    // keeps one name and 300 names within a factor of two.
+    let limit = std::iter::successors(Some(256_usize), |l| Some(l + l / 8))
+        .take_while(|&l| l < 1 << 24)
         .find(|&l| Obfuscator::with_size_limit(&one, l).is_ok())
         .expect("some cap fits one name");
     let many = KnownNames {
