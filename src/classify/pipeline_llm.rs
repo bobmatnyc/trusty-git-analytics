@@ -113,6 +113,8 @@ pub(super) struct UsageRow {
     usage: Option<LlmUsage>,
     /// The model the reply named, when it named one (#111).
     model: Option<String>,
+    /// The Jev commit-text mode, `real` or `obfuscated` (#111).
+    text_mode: Option<&'static str>,
 }
 
 /// Run the LLM on every eligible verdict and fold adopted answers back in.
@@ -197,6 +199,7 @@ pub(super) async fn run_llm_fallback(
             outcome,
             usage: call.usage,
             model: call.model,
+            text_mode: call.text_mode,
         });
     }
     // #111: commit order, whatever order the calls finished in.
@@ -213,8 +216,8 @@ pub(super) async fn run_llm_fallback(
 ///
 /// Why (#111): a cost report prices a run from these rows; `run_started_at`
 /// groups one run's calls.
-/// What: inserts `(commit, provider, model, outcome, tokens)` in one
-/// transaction.
+/// What: inserts `(commit, provider, model, outcome, tokens, text_mode)`
+/// in one transaction.
 /// Test: `pipeline_llm_tests::unanswered_scope_sends_only_abstentions`.
 pub(super) fn record_usage(
     db: &mut Database,
@@ -234,8 +237,8 @@ pub(super) fn record_usage(
         let mut stmt = tx
             .prepare(
                 "INSERT INTO llm_usage (commit_id, commit_sha, provider, model, outcome, \
-                 input_tokens, output_tokens, run_started_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 input_tokens, output_tokens, run_started_at, text_mode) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
             .map_err(crate::core::TgaError::from)?;
         for row in rows {
@@ -250,6 +253,7 @@ pub(super) fn record_usage(
                 row.usage.map(|u| u.input_tokens as i64),
                 row.usage.map(|u| u.output_tokens as i64),
                 run_started_at,
+                row.text_mode,
             ])
             .map_err(crate::core::TgaError::from)?;
         }

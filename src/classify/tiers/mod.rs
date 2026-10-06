@@ -15,6 +15,7 @@ pub mod jira_project_tier;
 pub mod jev;
 pub(crate) mod jev_budget;
 pub(crate) mod jev_error;
+pub(crate) mod jev_glue;
 pub(crate) mod jev_matcher;
 pub(crate) mod jev_names;
 pub(crate) mod jev_obfuscate;
@@ -130,6 +131,9 @@ mod jev_round5_tests;
 
 #[cfg(test)]
 mod jev_tests;
+
+#[cfg(test)]
+mod jev_text_mode_tests;
 
 #[cfg(test)]
 mod llm_tests;

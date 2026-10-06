@@ -78,7 +78,16 @@ pub struct LlmCall {
     /// The model id the provider's reply named, when it named one (#111:
     /// Jev); `llm_usage.model` records it in place of the configured id.
     pub model: Option<String>,
+    /// Which commit text the call carried, for a Jev call (#111):
+    /// [`TEXT_MODE_REAL`] or [`TEXT_MODE_OBFUSCATED`]; `None` for every
+    /// other provider. `llm_usage.text_mode` records it.
+    pub text_mode: Option<&'static str>,
 }
+
+/// [`LlmCall::text_mode`] for a Jev call that carried the message as stored.
+pub const TEXT_MODE_REAL: &str = "real";
+/// [`LlmCall::text_mode`] for a Jev call that carried pseudonymized text.
+pub const TEXT_MODE_OBFUSCATED: &str = "obfuscated";
 
 // #137: `LlmCall` is `#[non_exhaustive]`. One named constructor per outcome,
 // and none pairs a verdict with a non-`Answered` outcome. The fields stay
@@ -91,6 +100,7 @@ impl LlmCall {
             usage,
             outcome: LlmOutcome::Answered,
             model: None,
+            text_mode: None,
         }
     }
 
@@ -101,6 +111,7 @@ impl LlmCall {
             usage,
             outcome: LlmOutcome::Abstained,
             model: None,
+            text_mode: None,
         }
     }
 
@@ -111,6 +122,7 @@ impl LlmCall {
             usage,
             outcome: LlmOutcome::OutOfSet,
             model: None,
+            text_mode: None,
         }
     }
 
@@ -121,6 +133,7 @@ impl LlmCall {
             usage,
             outcome: LlmOutcome::Failed,
             model: None,
+            text_mode: None,
         }
     }
 
@@ -131,12 +144,19 @@ impl LlmCall {
             usage: None,
             outcome: LlmOutcome::Skipped,
             model: None,
+            text_mode: None,
         }
     }
 
     /// This call with the model id the provider's reply named (#111).
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    /// This call with the commit-text mode it ran in (#111: Jev).
+    pub fn with_text_mode(mut self, mode: &'static str) -> Self {
+        self.text_mode = Some(mode);
         self
     }
 }

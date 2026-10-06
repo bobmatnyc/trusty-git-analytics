@@ -67,8 +67,8 @@ pub const JEV_DEFAULT_NAME_MATCHER_BYTES: usize = 64 << 20;
 ///
 /// Why: Jev is a third-party hosted model, so what leaves the host and what
 /// a run may spend both need an operator-owned knob.
-/// What: the per-run spend cap, extra terms the pseudonymizer must replace,
-/// and an optional directory that turns the run into a payload dump: each
+/// What: the per-run spend cap, the opt-in pseudonymizer (`obfuscate`) and
+/// the extra terms it must replace, and an optional directory that turns the run into a payload dump: each
 /// outbound request body is written there and nothing is sent.
 /// Test: `core::config::llm::tests::jev_source_and_options_parse`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -100,6 +100,17 @@ pub struct JevOptions {
     /// before anything is sent; raise it for a larger name set (#111).
     #[serde(default = "default_jev_name_matcher_bytes")]
     pub name_matcher_bytes: usize,
+    /// Pseudonymize each message before it is sent (default `false`).
+    ///
+    /// #111 (owner ruling 2026-10-06): Jev receives the commit message as
+    /// stored unless this is `true`. `false` skips the pseudonymizer, the
+    /// name, trailer and repository learning (with its database scans) and
+    /// the name-matcher build; `sensitive_terms`, `id_patterns` and
+    /// `name_matcher_bytes` then have no effect. `true` replaces names
+    /// before sending and fails the run closed when the matcher cannot be
+    /// built.
+    #[serde(default)]
+    pub obfuscate: bool,
 }
 
 fn default_jev_budget_usd() -> f64 {
@@ -118,6 +129,7 @@ impl Default for JevOptions {
             payload_dump_dir: None,
             id_patterns: Vec::new(),
             name_matcher_bytes: JEV_DEFAULT_NAME_MATCHER_BYTES,
+            obfuscate: false,
         }
     }
 }
@@ -319,7 +331,8 @@ mod tests {
 
     /// Why (#111): `source: jev` must parse, read `TYPESAFE_API_KEY` unless
     /// the operator names another variable, and default its budget, term
-    /// list and dump mode so an existing config needs no new keys.
+    /// list, dump mode and `obfuscate` (off) so an existing config needs no
+    /// new keys.
     /// What: parses a minimal and a full `jev` section, checks the defaults,
     /// the key variable, and that a typo under `jev:` is rejected.
     /// Test: this test.
@@ -334,12 +347,16 @@ mod tests {
         assert!(min.jev.payload_dump_dir.is_none());
         assert!(min.jev.id_patterns.is_empty());
         assert_eq!(min.jev.name_matcher_bytes, JEV_DEFAULT_NAME_MATCHER_BYTES);
+        // #111 (owner ruling 2026-10-06): real commit text unless opted in.
+        assert!(!min.jev.obfuscate);
 
         let full: LlmConfig = serde_yaml::from_str(
             "source: jev\napi_key_env: MY_JEV_KEY\njev:\n  budget_usd: 0.1\n  \
-             sensitive_terms: [ledgerd, paygate]\n  payload_dump_dir: /tmp/jev\n",
+             sensitive_terms: [ledgerd, paygate]\n  payload_dump_dir: /tmp/jev\n  \
+             obfuscate: true\n",
         )
         .expect("parse");
+        assert!(full.jev.obfuscate);
         assert_eq!(full.effective_api_key_env(), "MY_JEV_KEY");
         assert_eq!(full.jev.budget_usd, 0.1);
         assert_eq!(full.jev.sensitive_terms, ["ledgerd", "paygate"]);
@@ -369,6 +386,7 @@ mod tests {
             "sensitive_terms: [ledgerd]",
             "id_patterns: ['Q\\d+']",
             "name_matcher_bytes: 1024",
+            "obfuscate: true",
             "modle: jev-1.13.0",
         ] {
             let e = serde_yaml::from_str::<LlmConfig>(&format!("source: jev\n{key}\n"))

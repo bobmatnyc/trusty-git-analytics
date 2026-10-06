@@ -194,6 +194,7 @@ pub const CONSTRAINED: &[&str] = &[
     "llm_usage.model",
     "llm_usage.outcome",
     "llm_usage.run_started_at",
+    "llm_usage.text_mode",
     "pr_reviewers.provider",
     "pr_reviewers.reviewer_id",
     "pr_reviewers.display_name",

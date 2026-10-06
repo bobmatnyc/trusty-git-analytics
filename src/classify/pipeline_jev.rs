@@ -315,10 +315,12 @@ fn jev_init(e: impl std::fmt::Display) -> ClassifyError {
 }
 
 /// Give a Jev tier every name the database records and every message of the
-/// run before the first request (#111); a no-op for any other tier.
+/// run before the first request (#111); a no-op for any other tier, and for
+/// Jev without `llm.jev.obfuscate` (owner ruling 2026-10-06: no scan runs).
 ///
 /// What: people ([`db_people`] plus [`db_trailer_people`]), file paths
 /// ([`db_file_paths`]) and repositories ([`db_repositories`]).
+/// Test: `jev_text_mode_tests::default_config_scans_no_names`.
 ///
 /// # Errors
 ///
@@ -328,7 +330,7 @@ pub(super) fn prepare_jev(
     db: &Database,
     commits: &[CommitRow],
 ) -> Result<()> {
-    if !engine.llm_is_jev() {
+    if !engine.llm_jev_obfuscates() {
         return Ok(());
     }
     let mut people = db_people(db)?;
@@ -365,8 +367,13 @@ impl ClassificationPipeline {
         }
         let (ruleset, _) = self.load_ruleset()?;
         // #111 (gate B): rule keywords and patterns are classification
-        // vocabulary, never a learned name.
-        let mut names = known_names(&self.config);
+        // vocabulary, never a learned name. #111: no names to learn without
+        // `llm.jev.obfuscate`.
+        let mut names = if llm.jev_obfuscates() {
+            known_names(&self.config)
+        } else {
+            KnownNames::default()
+        };
         for r in &ruleset.rules {
             names.vocab.push(r.category.clone());
             names.vocab.extend(r.keywords.iter().cloned());

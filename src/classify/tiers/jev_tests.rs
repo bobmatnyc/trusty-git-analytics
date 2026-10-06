@@ -44,6 +44,14 @@ fn cost_usd(jev: &JevClassifier) -> f64 {
 
 // ---- helpers ----
 
+/// Default options with `obfuscate: true` (#111: obfuscation is opt-in).
+pub(super) fn obfuscating() -> JevOptions {
+    JevOptions {
+        obfuscate: true,
+        ..JevOptions::default()
+    }
+}
+
 pub(super) fn categories() -> Vec<CategoryDef> {
     let mut feature = CategoryDef::new("feature");
     feature.description = Some("New user-facing   behaviour.".into());
@@ -89,6 +97,8 @@ pub(super) async fn server_with(template: ResponseTemplate) -> MockServer {
 fn unprepared(server: &MockServer, budget_usd: f64) -> JevClassifier {
     let opts = JevOptions {
         budget_usd,
+        // #111: obfuscation is opt-in; these tests cover it.
+        obfuscate: true,
         ..JevOptions::default()
     };
     JevClassifier::from_options(Some(TEST_KEY.into()), &opts)
@@ -389,6 +399,7 @@ async fn dump_mode_writes_body_and_sends_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let opts = JevOptions {
         payload_dump_dir: Some(dir.path().join("out")),
+        obfuscate: true,
         ..JevOptions::default()
     };
     let jev = JevClassifier::from_options(None, &opts)
@@ -518,8 +529,11 @@ pub(super) async fn run_pipeline_cfg(
     rules.write_all(rules_yaml.as_bytes()).expect("write rules");
     let llm_cfg = LlmConfig {
         source: LlmSource::Jev,
+        // #111 (owner ruling 2026-10-06): obfuscation is opt-in; these
+        // pipeline tests cover it, so they turn it on. `tweak` may undo it.
         jev: JevOptions {
             sensitive_terms: vec!["paygate".into()],
+            obfuscate: true,
             ..JevOptions::default()
         },
         ..LlmConfig::default()
@@ -539,10 +553,11 @@ pub(super) async fn run_pipeline_cfg(
             },
             ..ClassificationConfig::default()
         }),
-        llm: Some(llm_cfg.clone()),
+        llm: Some(llm_cfg),
         ..Config::default()
     };
     tweak(&mut config);
+    let llm_cfg = config.llm.clone().expect("llm section");
     let pipeline = ClassificationPipeline::new(config);
     let creds = CredentialSource::fixed([("TYPESAFE_API_KEY", TEST_KEY)]);
     let llm = LlmClassifier::from_llm_config_with_creds(&llm_cfg, JEV_MODEL, &creds)
@@ -731,7 +746,7 @@ async fn db_author_names_are_known_before_the_first_request() {
 async fn obfuscation_error_sends_nothing() {
     let server = server_with(reply("CAT_1", probs("CAT_1"), 150)).await;
     let limit = super::jev_obfuscate_tests::small_limit();
-    let jev = JevClassifier::from_options(Some(TEST_KEY.into()), &JevOptions::default())
+    let jev = JevClassifier::from_options(Some(TEST_KEY.into()), &obfuscating())
         .expect("keyed")
         .with_test_endpoint(&format!("{}/v1/systemone", server.uri()))
         .with_context_and_limit(categories(), KnownNames::default(), limit)

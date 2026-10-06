@@ -141,6 +141,7 @@ async fn category_text_is_never_tokenised() {
     a.description = Some("Fixes in qpaygate billing/invoices for Qlara's team.".into());
     let opts = JevOptions {
         sensitive_terms: vec!["qpaygate".into()],
+        obfuscate: true,
         ..JevOptions::default()
     };
     let names = KnownNames {

@@ -632,9 +632,10 @@ impl ClassificationEngine {
         }
     }
 
-    /// Whether the attached LLM tier routes through Jev (#111).
-    pub(crate) fn llm_is_jev(&self) -> bool {
-        self.llm.as_ref().is_some_and(|l| l.is_jev())
+    /// Whether the attached LLM tier routes through Jev with
+    /// `llm.jev.obfuscate` on, so it must learn the run's names (#111).
+    pub(crate) fn llm_jev_obfuscates(&self) -> bool {
+        self.llm.as_ref().is_some_and(|l| l.jev_obfuscates())
     }
 
     /// `(provider label, model id)` of the attached LLM tier, if any (#111).

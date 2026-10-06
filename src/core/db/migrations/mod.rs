@@ -206,6 +206,12 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "llm_usage",
         sql: include_str!("../sql/0031_llm_usage.sql"),
     },
+    // #111: the commit-text mode of each Jev call ('real' or 'obfuscated').
+    Migration {
+        version: 32,
+        name: "llm_usage_text_mode",
+        sql: include_str!("../sql/0032_llm_usage_text_mode.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

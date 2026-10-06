@@ -1,0 +1,3 @@
+Changed
+- `llm.source: jev` now sends each commit message as stored by default; pseudonymization is opt-in through the new `llm.jev.obfuscate` key (default `false`). With it off, the name, trailer and repository learning, its database scans and the name-matcher build are skipped, and payload-dump mode writes no token map. `obfuscate: true` keeps the previous behaviour, including failing the run closed when the matcher cannot be built (#111, owner ruling 2026-10-06).
+- The run log names the Jev text mode, `LlmCall` gains `text_mode`, and `llm_usage` gains a `text_mode` column (`real` or `obfuscated`; migration v32) (#111).

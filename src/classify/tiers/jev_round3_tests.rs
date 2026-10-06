@@ -111,7 +111,7 @@ async fn criteria(server: &MockServer) -> Value {
 #[tokio::test]
 async fn category_text_survives_learning() {
     let build = |server: &MockServer| {
-        JevClassifier::from_options(Some(TEST_KEY.into()), &JevOptions::default())
+        JevClassifier::from_options(Some(TEST_KEY.into()), &super::jev_tests::obfuscating())
             .expect("keyed")
             .with_test_endpoint(&format!("{}/v1/systemone", server.uri()))
             .with_context(vocab_categories(), KnownNames::default())
@@ -196,7 +196,8 @@ fn fifty_thousand_names_build_under_the_default_limit() {
 /// What: the key parses; a 16-byte cap makes attaching a roster fail.
 #[test]
 fn name_matcher_bytes_is_configurable() {
-    let opts: JevOptions = serde_yaml::from_str("name_matcher_bytes: 16\n").expect("key parses");
+    let opts: JevOptions =
+        serde_yaml::from_str("name_matcher_bytes: 16\nobfuscate: true\n").expect("key parses");
     let names = KnownNames {
         people: vec!["Qirin Vossberg".into(), "jroe-acme".into()],
         ..KnownNames::default()
@@ -227,6 +228,7 @@ fn jev_test_pointers_resolve() {
         ("jev.rs", include_str!("jev.rs")),
         ("jev_budget.rs", include_str!("jev_budget.rs")),
         ("jev_error.rs", include_str!("jev_error.rs")),
+        ("jev_glue.rs", include_str!("jev_glue.rs")),
         ("jev_matcher.rs", include_str!("jev_matcher.rs")),
         ("jev_names.rs", include_str!("jev_names.rs")),
         ("jev_obfuscate.rs", include_str!("jev_obfuscate.rs")),
@@ -253,6 +255,10 @@ fn jev_test_pointers_resolve() {
         ("jev_round5_tests", include_str!("jev_round5_tests.rs")),
         ("jev_gateb_tests", include_str!("jev_gateb_tests.rs")),
         ("jev_gateb2_tests", include_str!("jev_gateb2_tests.rs")),
+        (
+            "jev_text_mode_tests",
+            include_str!("jev_text_mode_tests.rs"),
+        ),
     ];
     let pointer = regex::Regex::new(r"(jev_[a-z0-9_]*tests)::([a-z0-9_]+)").expect("regex");
     let mut stale = Vec::new();

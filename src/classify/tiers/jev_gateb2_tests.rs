@@ -141,6 +141,7 @@ async fn dump_writes_the_token_map() {
     let out = dir.path().join("out");
     let opts = JevOptions {
         payload_dump_dir: Some(out.clone()),
+        obfuscate: true,
         ..JevOptions::default()
     };
     let jev = JevClassifier::from_options(None, &opts)

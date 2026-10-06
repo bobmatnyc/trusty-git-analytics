@@ -169,7 +169,18 @@ rules can emit. A category may not be named `NO_MATCH` or
   validation → `failed`. None of these replace the rule verdict. Each call's
   usage is written to `llm_usage` with provider `jev`. Merge commits are never
   sent, as for every source.
-- **Pseudonymization:** before a message is sent, tga replaces e-mail
+- **Commit text (`jev.obfuscate`, default `false`):** by default Jev
+  receives each commit message exactly as stored in the database, names,
+  addresses, ticket keys and paths included (owner ruling 2026-10-06,
+  #111). The pseudonymizer, the name, trailer and repository learning, the
+  database scans behind it and the name-matcher build are all skipped, so
+  `jev.sensitive_terms`, `jev.id_patterns` and `jev.name_matcher_bytes`
+  have no effect. Set `jev.obfuscate: true` to send pseudonymized text
+  instead; every rule below marked "obfuscation only" then applies. The run
+  log names the mode (`Jev: sending real commit text` or `Jev: sending
+  obfuscated text`), and each `llm_usage` row records it in `text_mode`
+  (`real` or `obfuscated`; `NULL` for other sources).
+- **Pseudonymization (obfuscation only):** before a message is sent, tga replaces e-mail
   addresses (`EMAIL_n`), people named in git trailers (`Co-authored-by`,
   `Signed-off-by`, `Reviewed-by`, `Acked-by`, `Tested-by`, `Reported-by`,
   `Helped-by`, `cc`), `@` mentions and roster names from `team:` and
@@ -207,7 +218,8 @@ rules can emit. A category may not be named `NO_MATCH` or
   on their own line, but teach the run a name only when they look like one
   (`Jane Roe`, `jroe-acme`); `Tested with: chrome and firefox` teaches
   nothing.
-- **Repository, org and workspace names** (`REPO_n`, #111): from the
+- **Repository, org and workspace names** (`REPO_n`, #111; obfuscation
+  only): from the
   config, `repositories[].name`, `.org` and the path basename,
   `github.org`, `github.orgs` and `github.repo`, `bitbucket.workspace`,
   `bitbucket.workspaces` and `bitbucket.repo_slug`, the Azure DevOps
@@ -222,7 +234,7 @@ rules can emit. A category may not be named `NO_MATCH` or
   `unknown` or classification vocabulary (`platform`, `docs`) is not
   learned. Database names share the name matcher, its size cap and its
   fail-closed rebuild with people.
-- **Stored trailer scan cost:** the trailer names of stored commits are
+- **Stored trailer scan cost (obfuscation only):** the trailer names of stored commits are
   read in one pass over `commits.message`, skipping messages with no `:`
   in SQL. Measured on a synthetic 300,000-commit database (a quarter of
   the messages one-line, a quarter multi-line with no trailer, half with
@@ -235,7 +247,7 @@ rules can emit. A category may not be named `NO_MATCH` or
   category name itself, sent verbatim: it is operator configuration, not
   commit text, and is never tokenised. Do not put customer or people names
   in category descriptions.
-- **Paths:** every slash-joined token is a path (`PATH_n`) — two-segment
+- **Paths (obfuscation only):** every slash-joined token is a path (`PATH_n`) — two-segment
   directories (`billing/invoices`), branch names (`feature/foo-bar`,
   `release/2026-09`), `.github/workflows/…` and deeper paths, all-caps
   pairs (`CI/CD`, `I/O`) included — unless it is prose: all segments digits
@@ -243,7 +255,7 @@ rules can emit. A category may not be named `NO_MATCH` or
   character (`w/o`, `n/a`), or one of the fixed pairs `and/or`,
   `read/write`, `client/server`, `input/output`, `true/false`, `yes/no`,
   `on/off`, `pass/fail` (either order, any case).
-- **File names:** a bare `name.ext` with a known source, config, data or doc
+- **File names (obfuscation only):** a bare `name.ext` with a known source, config, data or doc
   extension becomes `PATH_n.<ext>` (`invoice_sync.py`, `PriceTable.tsx`,
   `README.md`, `Cargo.toml`); build files (`Makefile`, `Dockerfile`,
   `Dockerfile.prod`, `CODEOWNERS`) become `PATH_n`. The run also learns
@@ -251,7 +263,7 @@ rules can emit. A category may not be named `NO_MATCH` or
   and, when identifier-like (`invoice_sync`, `PriceTable`), its stem, so a
   file with no or an unusual extension is caught too; an extension-less
   basename that is classification vocabulary (`build`) is skipped.
-- **Ticket keys:** uppercase keys always; lowercase keys with any number of
+- **Ticket keys (obfuscation only):** uppercase keys always; lowercase keys with any number of
   digits (`abc-1`, `[abc-1]`, `abc-1_fix`, `build_abc-7`) unless the prefix
   is a version or ordinal word (`python-3`, `step-2`) or classification
   vocabulary (`fix-1`).
@@ -268,10 +280,10 @@ rules can emit. A category may not be named `NO_MATCH` or
   configuration error, and a reply that names another model is recorded as
   `failed` with the served model in `llm_usage.model`. Each commit is one
   `category` question; the second "mixed" question is not sent.
-- **Fail closed:** a message the pseudonymizer cannot process is recorded as
+- **Fail closed (obfuscation only):** a message the pseudonymizer cannot process is recorded as
   `failed` and not sent; after a failed name-matcher rebuild every later
   message in the run fails the same way.
-- **More redaction:** trailers in any case and spacing whose token ends in
+- **More redaction (obfuscation only):** trailers in any case and spacing whose token ends in
   `by`, `with` or `to` (`Approved by:`, `Paired-with:`, `Thanks-to:`) or is
   `Reviewer`, `Author`, `Owner`, `Assignee` or `Approver` (singular or
   plural), with or without an address; Phabricator `Reviewers:`,
@@ -288,7 +300,7 @@ rules can emit. A category may not be named `NO_MATCH` or
   `jev.id_patterns` regexes (`ID_n`); IPv6
   addresses; host names in any case when the last label is a known TLD
   (`DB1.CORP.ACME.COM`).
-- **Hosts on word suffixes:** a dotted name of two or more labels, in any
+- **Hosts on word suffixes:** (obfuscation only) a dotted name of two or more labels, in any
   case, ending in `local`, `prod`, `staging`, `stage`, `qa`, `uat`, `int`,
   `private`, `office`, `home`, `cloud`, `dev`, `app`, `in`, `it`, `at`,
   `be`, `me`, `us`, `no`, `so`, `to`, `info`, `tech`, `site`, `online`,
@@ -297,7 +309,7 @@ rules can emit. A category may not be named `NO_MATCH` or
   `window`, `this`, `process`, `self`, …): `config.dev`, `window.app` and
   `process.env.dev` stay. A name followed by `(` or with a camelCase label
   (`fooBar.baz`) is code and stays, as does `f64::MAX`.
-- **Name matcher size:** `jev.name_matcher_bytes` (default `67108864`,
+- **Name matcher size (obfuscation only):** `jev.name_matcher_bytes` (default `67108864`,
   64 MiB) caps the heap bytes of the compiled matcher of learned names and
   file names. A run whose names do not fit fails before anything is sent.
   The matcher is one Aho-Corasick automaton over every name (gate B 2; it
@@ -311,11 +323,13 @@ rules can emit. A category may not be named `NO_MATCH` or
   roughly a million names.
 - **Payload dump:** with `jev.payload_dump_dir` set, tga writes each exact
   outbound request body to `<dir>/jev-request-<hash>.json`, sends nothing, and
-  records the calls as `skipped`; no key is needed. Next to each body it
+  records the calls as `skipped`; no key is needed. It works in both text
+  modes. With obfuscation on, next to each body it
   writes `<dir>/jev-request-<hash>.tokens.json`, `{"tokens": {"PERSON_1":
   "<original>", …}}` for every pseudonym in that message, so a scanner can
   measure which words each token replaced. That map holds the originals:
-  keep the dump directory on the host. `tga classify` still writes
+  keep the dump directory on the host. In real-text mode no token map is
+  written, and the body itself holds the original message. `tga classify` still writes
   the rule verdicts, so point it at a scratch copy of the database. A relative
   path resolves against the config file's directory.
 
@@ -326,7 +340,8 @@ llm:
   # model: jev-1.13.0                 # pinned; any other value is an error
   jev:
     budget_usd: 0.25                  # per-run spend cap (default)
-    sensitive_terms: [ledgerd, paygate]   # extra names to hide (default: none)
+    # obfuscate: true                 # pseudonymize first (default: false, real text)
+    # sensitive_terms: [ledgerd, paygate]   # extra names to hide; obfuscation only
     # payload_dump_dir: ./jev-payloads   # write bodies, send nothing
     # name_matcher_bytes: 134217728      # raise past ~1M names (default 64 MiB)
 ```

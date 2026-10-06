@@ -285,11 +285,10 @@ impl LlmClassifier {
                 }
             }
             // #111: without this arm a legacy `llm_provider: jev` fell
-            // through to the OpenAI endpoint with un-pseudonymized text.
+            // through to the OpenAI endpoint.
             "jev" => Err(
                 "the jev provider is available only through the `llm:` section; \
-                 set `llm.source: jev` (it pseudonymizes every message) instead of \
-                 `classification.llm_provider: jev`"
+                 set `llm.source: jev` instead of `classification.llm_provider: jev`"
                     .to_string(),
             ),
             other => {
@@ -437,7 +436,7 @@ impl LlmClassifier {
                 );
                 Ok(Self::build_anthropic(effective_model, key).with_effort(cfg.effort))
             }
-            // #111: see `jev::LlmClassifier::build_jev`.
+            // #111: see `jev_glue::LlmClassifier::build_jev`.
             LlmSource::Jev => Self::build_jev(cfg, model, creds),
         }
     }
