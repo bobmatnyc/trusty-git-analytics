@@ -2946,8 +2946,9 @@ exit 0
     /// each one on its first exec — measured at 2–15 s on a busy build host.
     /// A fixed 10 s window opened at the sweep's first await covered two of
     /// those execs (the `trusty-search` approval, then `tga`) and failed. The
-    /// hang bound is the sweep's own per-child budget, which starts at the
-    /// spawn; a sweep that ends without a pid panics with its own result.
+    /// scan lands after the spawn returns, inside the sweep's per-child budget,
+    /// so the `tga` stub is run once before the sweep; the budget then times
+    /// only the child. A sweep that ends without a pid panics with its result.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_running_tga_group_is_registered_for_ctrl_c() {
@@ -2957,19 +2958,27 @@ exit 0
         install_stubs(
             &work,
             &format!(
-                "#!/bin/sh\necho $$ > \"{p}.tmp\" && mv \"{p}.tmp\" \"{p}\"\n\
+                "#!/bin/sh\n[ \"$1\" = --warm ] && exit 0\n\
+                 echo $$ > \"{p}.tmp\" && mv \"{p}.tmp\" \"{p}\"\n\
                  while [ ! -f \"{r}\" ]; do sleep 0.05; done\n",
                 p = pidfile.display(),
                 r = release.display()
             ),
         );
+        // See #154: pay the stub's first-exec scan here, outside HANG_GUARD.
+        let warmed = std::process::Command::new(RequiredTool::Tga.path_in(&work))
+            .arg("--warm")
+            .status()
+            .expect("run the tga stub once");
+        assert!(warmed.success(), "the warm-up run exits 0: {warmed}");
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
         let (config, options, progress) = (config(), RunOptions::default(), Progress::none());
         let sweep = sweep_with_budget(&work, &config, &options, None, HANG_GUARD, &progress);
         tokio::pin!(sweep);
-        // See #154: a sweep that ends first never spawned the stub; say why.
+        // See #154: a sweep that ends first gave the stub no chance to write
+        // its pid (a refusal, or a budget kill); say which.
         let pid = tokio::select! {
             pid = recorded_pid(&pidfile, None) => pid,
             swept = &mut sweep => panic!("the sweep ended before `tga` recorded its pid: {swept:?}"),
