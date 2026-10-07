@@ -22,6 +22,13 @@
 # this CI job cannot itself stop an upload. It is a second, independent
 # report — the actual stop is the equivalent local preflight check run
 # immediately before `cargo publish` (docs/PUBLISHING.md's CHECK 5).
+#
+# REPORT-ONLY (owner ruling: "At tga's next release, switch the semver-checks
+# CI job to report-only"; applied in the tga 10.1.0 release prep). The
+# `cargo semver-checks` output still prints in the job log, and a break adds a
+# `::warning` annotation and a step-summary line, but the job exits 0. Tool
+# errors other than a reported break (an unknown package, an empty selection)
+# still fail the job.
 name: SemVer checks
 
 on:
@@ -140,7 +147,6 @@ jobs:
         if: steps.select.outputs.have_work == 'true'
         run: |
           set -euo pipefail
-          rc=0
           for pkg in ${{ steps.select.outputs.packages }}; do
             case "$pkg" in
               tga)          manifest="Cargo.toml" ;;
@@ -191,11 +197,13 @@ jobs:
                    --package "$pkg" \
                    --baseline-version "$BASELINE" \
                    --only-explicit-features; then
-              echo "::error title=SemVer break::${pkg} has a breaking public-API change relative to ${BASELINE} without (or ahead of) a corresponding breaking version bump."
-              rc=1
+              echo "::warning title=SemVer break (report-only)::${pkg} has a breaking public-API change relative to ${BASELINE}. Report-only under the owner ruling recorded in this file's header; the job does not fail."
+              echo "- ${pkg} ${BASELINE} -> ${CURRENT}: semver-checks reported a break (report-only)" >> "$GITHUB_STEP_SUMMARY"
             fi
           done
-          exit "$rc"
+          # Report-only: a reported break is printed above and in the step
+          # summary, but never fails the job.
+          exit 0
 
       - name: No release under test
         if: steps.select.outputs.have_work != 'true'
