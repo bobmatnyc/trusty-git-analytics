@@ -146,6 +146,10 @@ mod llm_tests;
 #[cfg(test)]
 mod llm_prompt_tests;
 
+// #178: every prompt stays inside the LLM input budget.
+#[cfg(test)]
+mod llm_budget_tests;
+
 #[cfg(test)]
 mod weighted_sum_tests;
 
