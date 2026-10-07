@@ -308,6 +308,11 @@ pub enum ClassificationMethod {
     /// Why: lets callers distinguish a confident classification from a
     /// repo-default assignment, enabling metric-level filtering.
     RepoCategoryFallback,
+    /// Set by the `classification.repo_categories` hard override (#158).
+    ///
+    /// Why: a mapped repository's commits take its category ahead of every
+    /// other tier; reports and `tga eval` must see that the map decided it.
+    RepoMap,
 }
 
 impl ClassificationMethod {
@@ -330,6 +335,7 @@ impl ClassificationMethod {
             ClassificationMethod::WeightedSum => "weighted_sum",
             ClassificationMethod::CatchAll => "catch_all",
             ClassificationMethod::RepoCategoryFallback => "repo_category_fallback",
+            ClassificationMethod::RepoMap => "repo_map",
         }
     }
 }

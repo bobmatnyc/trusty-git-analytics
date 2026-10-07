@@ -528,30 +528,34 @@ pub struct ClassificationConfig {
     )]
     pub rules_files: Vec<PathBuf>,
 
-    /// Per-repo default subcategory fallback (#445 batch C).
+    /// Repository → category hard override (#158).
     ///
-    /// Why: reduces the 'uncategorized' rate for well-known repositories
-    /// without LLM cost. After the full classification cascade (including the
-    /// LLM tier), commits that are still uncategorized (or below the
-    /// confidence threshold) and whose repository matches an entry here are
-    /// assigned the configured default subcategory.
+    /// Why (owner ruling 2026-10-07): some repositories map to one category
+    /// for every commit, and no message-based tier can know that.
+    /// What: every non-merge commit whose repository is a key gets the
+    /// mapped category at confidence 1.0 with method `repo_map`, ahead of
+    /// every other tier: the manual override, rules (security fixes
+    /// included), external sources and the LLM. A mapped commit is never
+    /// sent to the LLM. A merge keeps its existing handling.
     ///
-    /// Keys are repository names or simple glob patterns (single `*`
-    /// wildcard). Values are subcategory names (resolved through the taxonomy
-    /// to set `top_level_category`).
-    ///
-    /// **Precedence**: this is the last-resort fallback (Tier 5). A
-    /// confidently-classified commit is NEVER overridden. Literal key matches
-    /// take precedence over glob matches.
+    /// Keys are the repository name tga stores in `commits.repository`
+    /// (`repositories[].name`, else the path basename), matched whole and
+    /// case-sensitively; a key holding `*` is an error. Each value must be a
+    /// category the config knows (matched case-insensitively, stored in the
+    /// config's spelling): the rules files' categories under
+    /// `extend_defaults: false`, else the taxonomy plus every rule category.
+    /// Both checks run when `tga classify` or `tga eval` starts, before any
+    /// write. Before #158 this key was a fallback that `tga classify` never
+    /// applied.
     ///
     /// Example (YAML):
     /// ```yaml
     /// classification:
     ///   repo_categories:
-    ///     infra-api: platform_infrastructure
-    ///     "data-*": data_engineering
-    ///     legacy-monolith: maintenance
+    ///     mcp-services: internal_tooling
+    ///     duetto-playwright-e2e: qa
     /// ```
+    /// Test: `classify::pipeline_repo_map_tests`.
     #[serde(default)]
     pub repo_categories: HashMap<String, String>,
 

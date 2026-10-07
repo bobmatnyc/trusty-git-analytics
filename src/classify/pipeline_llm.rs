@@ -37,15 +37,21 @@ pub(crate) fn is_unanswered(r: &ClassificationResult) -> bool {
 ///
 /// Why: one predicate for `tga classify` and `tga eval repredict`, so the
 /// eval replays exactly the routing the pipeline uses.
-/// What: `LowConfidence` → `confidence <= threshold`; `Unanswered` →
-/// [`is_unanswered`], threshold ignored.
+/// What: never a `repo_map` verdict (#158); otherwise `LowConfidence` →
+/// `confidence <= threshold`; `Unanswered` → [`is_unanswered`], threshold
+/// ignored.
 /// Test: `pipeline_llm_tests::unanswered_scope_sends_only_abstentions`,
-/// `pipeline_llm_tests::low_confidence_scope_also_sends_weak_rule_hits`.
+/// `pipeline_llm_tests::low_confidence_scope_also_sends_weak_rule_hits`,
+/// `pipeline_repo_map_tests::mapped_repo_commits_never_reach_the_llm`.
 pub(crate) fn llm_eligible(
     scope: LlmFallbackScope,
     r: &ClassificationResult,
     threshold: f64,
 ) -> bool {
+    // #158: the repo map is a hard override; the LLM never revisits it.
+    if r.method == crate::core::models::ClassificationMethod::RepoMap {
+        return false;
+    }
     match scope {
         LlmFallbackScope::LowConfidence => r.confidence <= threshold,
         LlmFallbackScope::Unanswered => is_unanswered(r),

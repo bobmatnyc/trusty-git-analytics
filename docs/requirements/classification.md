@@ -6,12 +6,22 @@ a rule-based fallback ensuring every commit receives a classification.
 
 ## Four-Tier Cascade
 
+### Repo map: `classification.repo_categories` (confidence: 1.0, #158)
+
+- Source: the `classification.repo_categories` config map, repository name → category
+  (see `configuration.md`)
+- Key: the commit's `repository` column, matched whole and case-sensitively
+- A hard override: every non-merge commit of a mapped repository gets the mapped category
+  with method `repo_map`, ahead of every tier below, the manual override included
+- A mapped commit is never sent to the LLM, nor by `tga classify --backfill-complexity`
+- A merge commit is not mapped; it keeps the handling below
+
 ### Tier 0: Manual Overrides (confidence: 1.0)
 
 - Source: `classification_overrides` table
 - Key: `(commit_hash, repo_path)`
 - Set via `tga override --commit <HASH> --repo <PATH> --change-type <TYPE> --reason <...>`
-- Always wins when present
+- Always wins when present, except for a commit the repo map decides
 
 ### Tier 1.5: Issue Type Classifier (confidence: 0.90)
 

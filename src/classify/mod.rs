@@ -22,6 +22,8 @@ pub(super) mod pipeline_external;
 pub(crate) mod pipeline_llm;
 // #111: Jev category set and names to pseudonymize.
 mod pipeline_jev;
+// #158: the repo -> category hard override.
+pub(crate) mod pipeline_repo_map;
 pub mod rules;
 pub mod sources;
 pub mod taxonomy;
@@ -52,3 +54,7 @@ mod llm_context_tests;
 
 #[cfg(test)]
 mod trace_tests;
+
+// #158: the repo → category hard override, end to end.
+#[cfg(test)]
+mod pipeline_repo_map_tests;

@@ -59,8 +59,11 @@ pub enum TraceTier {
     ExternalSource,
     /// Pipeline Tier 4: the LLM fallback.
     Llm,
-    /// Tier 5: the `repo_categories` fallback.
+    /// Tier 5: the retired `repo_categories` fallback, for stored verdicts.
     RepoCategory,
+    /// #158: the `classification.repo_categories` hard override, ahead of
+    /// every other tier.
+    RepoMap,
     /// No tier matched.
     Unclassified,
 }
@@ -80,6 +83,7 @@ impl TraceTier {
             Self::ExternalSource => "external_source",
             Self::Llm => "llm",
             Self::RepoCategory => "repo_category",
+            Self::RepoMap => "repo_map",
             Self::Unclassified => "unclassified",
         }
     }
@@ -94,6 +98,7 @@ impl TraceTier {
 /// - weighted sum: `weighted_sum:<category>/<dominant signal>`;
 /// - fuzzy: `fuzzy:<heuristic>`;
 /// - issue type / JIRA project: `issue_type:<type>` / `jira_project:<KEY>`;
+/// - repo map (#158): `repo_map:<repository>`;
 /// - manual override: `manual_override`; no match: `unclassified`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleTrace {
