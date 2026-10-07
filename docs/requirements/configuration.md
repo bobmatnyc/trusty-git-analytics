@@ -642,7 +642,7 @@ classification:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `mode` | `override` \| `floor` | `override` | `override` is the #158 hard override above. `floor` makes the mapped category the default and lets the cascade infer exceptions. |
-| `exceptions` | list of categories | `[qa, security, devops, bug_fix]` | Categories a cascade verdict may keep in floor mode. Names compare through the taxonomy's canonical names, case-insensitively, so `bug_fix` matches the built-in rules' `bugfix` (aliases: `bug_fix` = `bugfix`, `new_feature` = `feature`, `tech_debt_refactoring` = `refactor`). In a written list, a name the config's category set lacks is an error. In the default list it is a warning: the built-in taxonomy has no `qa`. |
+| `exceptions` | list of categories | `[qa, security, devops, bug_fix]` | Categories a cascade verdict may keep in floor mode. Names compare through the taxonomy's canonical names, case-insensitively, so `bug_fix` matches the built-in rules' `bugfix` (aliases: `bug_fix` = `bugfix`, `new_feature` = `feature`, `tech_debt_refactoring` = `refactor`). `qa` matches `test` and `devops` matches `ci`, unless the config's rules or `custom_categories` define `qa` or `devops`; then the name matches exactly (#171). In a written list, a name the config's category set lacks is an error. In the default list it is a warning. |
 | `min_confidence` | float in `[0, 1]` | `0.8` | Lowest confidence at which an exception verdict is kept. A value outside `[0, 1]` is an error. |
 
 Without the block, or with `mode: override`, behaviour is exactly that of
@@ -661,10 +661,14 @@ In floor mode:
   confidence 1.0 with method `repo_map`, keeping the replaced verdict's
   complexity score (the complexity backfill skips `repo_map` rows). The
   rule applies to every tier alike, the manual override included.
-- Under the built-in rules, `security` and `bugfix` verdicts match the
-  default exceptions. The built-in rules emit no `qa` or `devops`: test
-  commits are `test` and CI or build commits are `ci` or `build`. To keep
-  those, write the list, e.g. `exceptions: [bug_fix, security, test, ci]`.
+- Under the built-in rules, `security`, `bugfix`, `test` and `ci` verdicts
+  match the default exceptions: the built-in rules emit no `qa` or
+  `devops`, so those names stand for `test` and `ci` (#171). `build`
+  verdicts do not match; to keep them, write the list, e.g.
+  `exceptions: [qa, security, devops, bug_fix, build]`.
+- A config whose rules or `custom_categories` define `qa` or `devops`
+  (such as the eval scheme v2 rules file) matches those names exactly:
+  there, `test` and `ci` verdicts are not exceptions unless listed.
 - A merge commit is never mapped, as in override mode.
 - `tga eval sample` and `tga eval repredict` apply the same rule to the
   carried or re-derived verdict; a carried verdict the floor replaces counts
