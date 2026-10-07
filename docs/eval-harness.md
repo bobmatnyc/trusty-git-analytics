@@ -275,11 +275,13 @@ works from any directory. `output.directory`, `cache.directory` and
 working-directory-relative one. Repository paths still resolve from the
 working directory.
 
-With `extend_defaults: false` the fuzzy tier is off, but the weighted-sum
-tier still names its own categories (`feature`, `bugfix`, `chore`,
-`integration`, `platform`, `docs`, `refactor`, `merge`). The only config
-control over that tier today is `classification.weighted_sum.enabled:
-false`, which turns it off; the commits it would have named then abstain.
+With `extend_defaults: false` the fuzzy tier is off, and the weighted-sum
+tier answers only with a category the rules files define. It votes among
+built-in names (`feature`, `bugfix`, `chore`, `integration`, `platform`,
+`docs`, `refactor`, `merge`); a vote outside the configured set is dropped
+and the commit falls through to the next tier (#165).
+`classification.weighted_sum.enabled: false` turns the tier off; the
+commits it would have named then abstain.
 
 For a worked example of this harness — a 400-commit sample, a 100-commit
 rater subsample, and a cost-benefit analysis of the LLM tiers it scored —

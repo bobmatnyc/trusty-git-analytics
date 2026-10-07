@@ -252,29 +252,9 @@ impl ClassificationPipeline {
         let mut engine = self.build_rule_engine()?;
         let engine_cfg = self.engine_config();
 
-        // Determine whether the LLM tier is requested and which source.
-        //
-        // Precedence (highest first):
-        // 1. Top-level `llm:` section (new, preferred): presence of the section
-        //    SELF-ENABLES the LLM tier — no `classification.use_llm: true` required.
-        //    The intent is: if you wrote `llm:` in config, you mean to use the LLM.
-        // 2. Legacy `classification.use_llm: true` — still honored when no `llm:`
-        //    section is present.
-        //
-        // Note: an explicit `use_llm: false` in `classification:` does NOT suppress
-        // the `llm:` section; the `llm:` section is always self-enabling. Users who
-        // need to temporarily disable the LLM tier while keeping the `llm:` config
-        // should remove or comment out the `llm:` block.
-        let use_llm = self.config.llm.is_some()
-            || self
-                .config
-                .classification
-                .as_ref()
-                .map(|c| c.use_llm)
-                .unwrap_or(false);
-
         // Wire the LLM tier when requested, preferring the `llm:` section.
-        if use_llm {
+        // #165: `llm_enabled` is shared with `tga rules test`.
+        if self.llm_enabled() {
             let llm_classifier = if let Some(llm_cfg) = self.config.llm.as_ref() {
                 // New path: `llm:` section present.
                 //

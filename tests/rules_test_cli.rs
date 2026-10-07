@@ -35,7 +35,13 @@ fn rules_test(dir: &Path, rules: &Path, extra: &str) -> String {
     .expect("config");
     let out = Command::new(env!("CARGO_BIN_EXE_tga"))
         .current_dir(dir)
-        .args(["--config", cfg.to_str().expect("utf-8"), "rules", "test", MSG])
+        .args([
+            "--config",
+            cfg.to_str().expect("utf-8"),
+            "rules",
+            "test",
+            MSG,
+        ])
         .output()
         .expect("run tga");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -59,11 +65,7 @@ fn rules_test_honours_weighted_sum_enabled_false() {
     assert!(on.contains("method      : weighted_sum"), "control: {on}");
     assert!(on.contains("category    : chore"), "control: {on}");
 
-    let off = rules_test(
-        dir.path(),
-        &rules,
-        "  weighted_sum:\n    enabled: false\n",
-    );
+    let off = rules_test(dir.path(), &rules, "  weighted_sum:\n    enabled: false\n");
     assert!(!off.contains("weighted_sum"), "tier is off: {off}");
     assert!(off.contains("No tier matched"), "tier is off: {off}");
 }

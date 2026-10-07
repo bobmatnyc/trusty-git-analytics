@@ -1,0 +1,3 @@
+Fixed
+- `tga rules test` now classifies with the engine `tga classify` builds: it honours `classification.weighted_sum`, `confidence_threshold` and JIRA mapping confidence, checks `classification.repo_categories` as `classify` does, and says whether the LLM tier is enabled when no tier matches. Before, `weighted_sum.enabled: false` still reported a `weighted_sum` verdict (#165).
+- The weighted-sum tier no longer writes a category outside a custom taxonomy. With `extend_defaults: false`, a weighted-sum verdict whose category the rules files do not define is dropped and the commit falls through to the next tier (the LLM, when enabled, else `uncategorized`); one they do define takes their spelling. With the built-in taxonomy, verdicts are unchanged (#165).
