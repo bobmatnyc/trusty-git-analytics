@@ -28,7 +28,8 @@ use tracing::{debug, info, warn};
 use crate::classify::rules::CategoryDef;
 use crate::classify::tiers::bedrock::{BedrockClassifier, DEFAULT_BEDROCK_MODEL};
 use crate::classify::tiers::jev::{JevClassifier, JEV_MODEL};
-use crate::classify::tiers::llm_context::{with_context, CommitContext};
+use crate::classify::tiers::llm_budget::PromptBudget;
+use crate::classify::tiers::llm_context::CommitContext;
 use crate::classify::tiers::llm_prompt::{self, LlmCall, LlmUsage};
 use crate::classify::tiers::ClassificationResult;
 use crate::core::config::{LlmConfig, LlmEffort, LlmSource};
@@ -125,6 +126,8 @@ pub struct LlmClassifier {
     /// #111: Jev backend; when `Some`, [`Self::classify_detailed`] routes
     /// through it and nothing else sees the message.
     pub(super) jev: Option<JevClassifier>,
+    /// #178: every prompt but Jev's is cut to this; see [`PromptBudget`].
+    pub(super) budget: PromptBudget,
 }
 
 /// The model a source uses when neither `llm.model` nor the legacy
@@ -160,6 +163,7 @@ impl LlmClassifier {
             system_prompt: SYSTEM_PROMPT.to_string(),
             effort: None,
             jev: None,
+            budget: PromptBudget::default(),
         }
     }
 
@@ -375,7 +379,7 @@ impl LlmClassifier {
         model: &str,
         creds: &CredentialSource,
     ) -> Result<Self, String> {
-        match &cfg.source {
+        let built = match &cfg.source {
             LlmSource::Openrouter => {
                 // Read key from the named variable; fail loudly if unset.
                 let key = creds.get(&cfg.api_key_env);
@@ -438,7 +442,9 @@ impl LlmClassifier {
             }
             // #111: see `jev_glue::LlmClassifier::build_jev`.
             LlmSource::Jev => Self::build_jev(cfg, model, creds),
-        }
+        };
+        // #178: `llm.max_input_tokens` caps every prompt this classifier sends.
+        built.map(|c| c.with_max_input_tokens(cfg.max_input_tokens))
     }
 
     /// Internal helper: build an OpenRouter-configured classifier with
@@ -549,9 +555,11 @@ impl LlmClassifier {
     /// (#111) after the message; `None` sends the message alone.
     ///
     /// What: Bedrock, the Anthropic API and the OpenAI-compatible path send
-    /// [`with_context`]'s text where the message went; Jev adds the block to
-    /// its message text (pseudonymized with `llm.jev.obfuscate`).
-    /// Test: `classify::llm_context_tests::context_paths_appends_a_paths_block`,
+    /// [`PromptBudget::fit`]'s text (message, then block, cut to the input
+    /// budget, #178) where the message went; Jev adds the block to its
+    /// message text (pseudonymized with `llm.jev.obfuscate`).
+    /// Test: `classify::tiers::llm_budget_tests::oversized_message_fits_the_budget_on_openai_compat`,
+    /// `classify::llm_context_tests::context_paths_appends_a_paths_block`,
     /// `classify::llm_context_tests::anthropic_prompt_carries_every_context_item`,
     /// `classify::tiers::jev_context_tests::obfuscated_jev_context_sends_no_raw_path`.
     pub(crate) async fn classify_detailed_with_context(
@@ -563,7 +571,8 @@ impl LlmClassifier {
         if let Some(jev) = &self.jev {
             return jev.classify_with_context(message, context).await;
         }
-        let message = with_context(message, context);
+        // #178: cut to the input budget; byte-identical when it fits.
+        let message = self.budget.fit(&self.system_prompt, message, context);
         let message = message.as_ref();
         let (text, usage) = if let Some(bedrock) = &self.bedrock {
             bedrock.complete(&self.system_prompt, message).await

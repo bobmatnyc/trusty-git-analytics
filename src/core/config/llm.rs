@@ -226,6 +226,18 @@ pub const LLM_CONTEXT_DEFAULT_MAX_PATHS: usize = 30;
 /// Default for [`LlmConfig::context_max_path_bytes`] (#111).
 pub const LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES: usize = 2048;
 
+/// Default for [`LlmConfig::max_input_tokens`] (#178).
+///
+/// Why: a commit message of several hundred kilobytes made every classify
+/// call for that commit fail as over the model's 200k-token context.
+/// What: 100,000 estimated tokens. The estimate counts one token per byte,
+/// an upper bound (see `classify::tiers::llm_budget::BYTES_PER_TOKEN`), so a
+/// prompt at the cap is at most 100k real tokens. That fits a 128k-token
+/// window (`gpt-4o-mini`, the OpenRouter default) and leaves half of a
+/// 200k-token Claude window for the reply.
+/// Test: `classify::tiers::llm_budget::tests::default_budget_fits_every_default_model`.
+pub const LLM_DEFAULT_MAX_INPUT_TOKENS: usize = 100_000;
+
 /// Top-level LLM configuration section (`llm:` in YAML).
 ///
 /// Why: the previous design placed LLM credentials inside
@@ -323,6 +335,13 @@ pub struct LlmConfig {
     /// first path that would pass it.
     #[serde(default = "default_context_max_path_bytes")]
     pub context_max_path_bytes: usize,
+
+    /// Most estimated input tokens one LLM prompt may carry, system prompt
+    /// included (#178; default [`LLM_DEFAULT_MAX_INPUT_TOKENS`]). A longer
+    /// prompt is cut, message first, and marked `[truncated N bytes]`; a
+    /// prompt inside the budget is sent unchanged. Ignored by `jev`.
+    #[serde(default = "default_max_input_tokens")]
+    pub max_input_tokens: usize,
 }
 
 fn default_context_max_paths() -> usize {
@@ -331,6 +350,10 @@ fn default_context_max_paths() -> usize {
 
 fn default_context_max_path_bytes() -> usize {
     LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES
+}
+
+fn default_max_input_tokens() -> usize {
+    LLM_DEFAULT_MAX_INPUT_TOKENS
 }
 
 fn default_api_key_env() -> String {
@@ -460,6 +483,7 @@ impl Default for LlmConfig {
             context: Vec::new(),
             context_max_paths: LLM_CONTEXT_DEFAULT_MAX_PATHS,
             context_max_path_bytes: LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES,
+            max_input_tokens: LLM_DEFAULT_MAX_INPUT_TOKENS,
         }
     }
 }

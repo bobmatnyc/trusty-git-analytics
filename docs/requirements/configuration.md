@@ -78,6 +78,7 @@ an `llm:` section emits a `tracing::warn!` deprecation message.
 | `context` | list | `[]` | Commit facts appended to the user prompt after the message: any of `paths`, `pr_title`, `issue_type` (#111). See [Commit context](#commit-context-llmcontext-111). Any other item is a load error. |
 | `context_max_paths` | integer | `30` | Most changed paths `context: [paths]` lists per commit. |
 | `context_max_path_bytes` | integer | `2048` | Most bytes of path text `context: [paths]` lists per commit. |
+| `max_input_tokens` | integer | `100000` | Most estimated input tokens one LLM prompt may carry, system prompt included (#178). See [Input budget](#input-budget-llmmax_input_tokens-178). Ignored by `jev`. |
 
 Any other key under `llm:` is a load error (#111), as it is under `llm.jev:`.
 A `jev` option written one level too high (`llm.payload_dump_dir`) therefore
@@ -420,6 +421,45 @@ llm:
   context: [paths, pr_title, issue_type]
   context_max_paths: 30          # default
   context_max_path_bytes: 2048   # default
+```
+
+#### Input budget (`llm.max_input_tokens`, #178)
+
+A commit message can be hundreds of kilobytes long, for example when it
+embeds a diff or a generated file. Sent whole, such a prompt passes the
+model's context window and the provider rejects every call for that commit.
+`max_input_tokens` caps every prompt that `openrouter`, `bedrock` and
+`anthropic-api` send, both for the `tga classify` LLM fallback and for the
+complexity backfill. The default is `100000`.
+
+tga has no tokenizer. It counts one token per byte of the system prompt,
+the fixed `Classify this commit message:` prefix, the message and the
+context block, plus 64 tokens for request framing. One byte per token is
+an upper bound: every token of a byte-level BPE vocabulary (Claude,
+GPT-4o) is at least one byte long. Ordinary commit text runs near 3.3
+bytes per token, so the estimate counts about three times the real
+number. A prompt at the default cap is therefore at most 100k real tokens,
+which fits a 128k-token window and leaves half of a 200k-token window for
+the reply.
+
+A prompt inside the budget is sent byte for byte as before. A longer one
+is cut:
+
+- The context block keeps the bytes the message leaves free, and at least
+  a quarter of the room. The message gets the rest.
+- Each cut part ends at a UTF-8 character boundary, followed by a
+  `[truncated N bytes]` line, where N is the number of bytes left out.
+- The cut is deterministic: the same commit always sends the same prompt.
+- tga logs a warning with the prompt size before and after the cut.
+
+A budget smaller than the system prompt leaves only the markers. `jev`
+ignores the key and sends its pseudonymized text uncut; `jev.budget_usd`
+caps its spend, not the size of one request.
+
+```yaml
+llm:
+  source: bedrock
+  max_input_tokens: 100000   # default; lower it for a small-context model
 ```
 
 #### Self-enabling behavior (added v2.3.0)

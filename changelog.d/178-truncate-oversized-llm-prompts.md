@@ -1,0 +1,3 @@
+Fixed
+- `tga classify` no longer fails on a commit whose message is hundreds of kilobytes long (#178). Every prompt the `openrouter`, `bedrock` and `anthropic-api` sources send, for the classify LLM fallback and the complexity backfill, is now cut to an input budget: the message first, then the `llm.context` block, each at a UTF-8 character boundary and marked `[truncated N bytes]`. Prompts inside the budget are sent unchanged.
+- New optional key `llm.max_input_tokens` (default `100000`) sets the budget. tga counts one token per byte, an upper bound, so a prompt at the default cap fits a 128k-token window.
