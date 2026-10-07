@@ -592,6 +592,8 @@ impl ClassificationPipeline {
         //    (optionally bounded by `--since`/`--until`/`--repos`).
         // #158: a bad repo map stops the run before any read or write.
         let repo_map = self.repo_category_map()?;
+        // #167: once per run, name every key that matches nothing stored.
+        repo_map.warn_unmatched_keys(db.connection())?;
         if let Some(shas) = &self.shas {
             super::pipeline_db::check_shas_exist(db, shas)?;
         }
@@ -646,10 +648,16 @@ impl ClassificationPipeline {
         // 3a. Tier 0 (override) pre-pass — done serially against the live
         //     DB connection. Commits with a hit skip the parallel cascade.
         let mut overrides = super::pipeline_db::read_overrides(db, &commits)?;
-        // #158: the repo map outranks every tier, the manual override included.
-        // Held with the overrides, it skips the external sources too;
-        // `llm_eligible` keeps it from the LLM.
-        overrides.extend(repo_map.verdicts(&commits, engine.taxonomy()));
+        // #167: changed paths, read only for repos with a `<repo>:<prefix>` key.
+        let map_paths = repo_map.load_paths(
+            db.connection(),
+            commits.iter().map(|c| (c.id, c.repository.as_str())),
+        )?;
+        // #158: in override mode the repo map outranks every tier, the manual
+        // override included. Held with the overrides, it skips the external
+        // sources too; `llm_eligible` keeps it from the LLM. In floor mode
+        // (#167) this is empty and the map applies after the LLM, below.
+        overrides.extend(repo_map.verdicts(&commits, &map_paths, engine.taxonomy()));
 
         // 3b. Tiers 1–3 in parallel for commits without an override.
         let pairs: Vec<(&str, bool)> = commits
@@ -751,6 +759,9 @@ impl ClassificationPipeline {
             )
             .await;
         }
+        // #167: floor mode keeps an exception verdict at or above the
+        // threshold, from any tier; every other mapped verdict takes the map.
+        repo_map.apply_floor(&commits, &map_paths, &mut results, engine.taxonomy());
         // #111 review: record billed calls before the classification writes,
         // so a failed write-back never loses them.
         if let Some((provider, model)) = engine.llm_identity() {

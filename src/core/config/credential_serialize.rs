@@ -218,6 +218,7 @@ impl Serialize for ClassificationConfig {
         let Self {
             rules_files,
             repo_categories,
+            repo_map,
             use_llm,
             llm_model,
             llm_provider,
@@ -234,9 +235,10 @@ impl Serialize for ClassificationConfig {
             sources,
             buckets,
         } = self;
-        let mut s = serializer.serialize_struct("ClassificationConfig", 17)?;
+        let mut s = serializer.serialize_struct("ClassificationConfig", 18)?;
         s.serialize_field("rules_files", rules_files)?;
         s.serialize_field("repo_categories", repo_categories)?;
+        s.serialize_field("repo_map", repo_map)?;
         s.serialize_field("use_llm", use_llm)?;
         s.serialize_field("llm_model", llm_model)?;
         s.serialize_field("llm_provider", llm_provider)?;

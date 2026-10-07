@@ -46,7 +46,9 @@ pub(crate) struct Resolved {
 /// it, so any configured source keeps it. A stored repo fallback is never
 /// carried: `tga classify` never applies one. #158: a non-merge commit of a
 /// repository in `classification.repo_categories` resolves to the repo map,
-/// whatever is stored, as `tga classify` would store it.
+/// whatever is stored, as `tga classify` would store it. #167: in floor mode
+/// the map applies after the carried or re-derived verdict instead, keeping
+/// it only when it is an exception at or above the threshold.
 /// Test: `tests/eval_harness.rs::repredict_carries_a_stored_verdict_only_when_its_tier_is_reached`,
 /// `tests/eval_harness.rs::repredict_never_carries_an_llm_verdict_for_a_merge`.
 pub(crate) struct CarryPolicy {
@@ -56,8 +58,11 @@ pub(crate) struct CarryPolicy {
     /// #131: the LLM's category set when the rules restrict it.
     llm_categories: Option<Vec<String>>,
     external: bool,
-    /// #158: the checked `classification.repo_categories` hard override.
+    /// #158: the checked `classification.repo_categories` map.
     repo_map: crate::classify::pipeline_repo_map::RepoCategoryMap,
+    /// #167: changed paths of the commits a `<repo>:<prefix>` key needs,
+    /// read by [`Self::prepare`].
+    paths: std::collections::HashMap<i64, Vec<String>>,
 }
 
 impl CarryPolicy {
@@ -74,12 +79,34 @@ impl CarryPolicy {
             .map(|cats| cats.into_iter().map(|c| c.name).collect());
         Ok(Self {
             repo_map: pipeline.repo_category_map()?,
+            paths: std::collections::HashMap::new(),
             llm_categories,
             use_llm: config.llm.is_some() || c.is_some_and(|c| c.use_llm),
             llm_threshold: c.map_or(0.65, |c| c.llm_fallback_threshold),
             llm_scope: c.map(|c| c.llm_fallback_scope).unwrap_or_default(),
             external: c.is_some_and(|c| !c.no_external && !c.sources.is_empty()),
         })
+    }
+
+    /// Read what the repo map needs from the eval database (#167).
+    ///
+    /// What: warns once per map key that matches nothing stored, and reads
+    /// the changed paths of the `commits` a prefix key needs. Call once,
+    /// before [`resolve_verdicts`].
+    ///
+    /// # Errors
+    ///
+    /// A database read fails.
+    pub(crate) fn prepare(
+        &mut self,
+        conn: &rusqlite::Connection,
+        commits: &[&CommitRow],
+    ) -> crate::classify::Result<()> {
+        self.repo_map.warn_unmatched_keys(conn)?;
+        self.paths = self
+            .repo_map
+            .load_paths(conn, commits.iter().map(|c| (c.id, c.repo.as_str())))?;
+        Ok(())
     }
 
     /// Whether the cascade reaches `stored` given the re-derived verdict `t`
@@ -146,9 +173,11 @@ fn stored_override(method: &str, traced: TraceTier) -> Option<(TraceTier, &'stat
 /// Why: see the module doc. What: classifies `(message, is_merge)` with
 /// [`ClassificationEngine::classify_batch_traced`]; a commit whose stored
 /// `method` names a tier outside the rule engine keeps its stored verdict when
-/// `policy` says the cascade reaches that tier. The second value counts
-/// rule-engine commits whose stored category differs from the re-derived one.
-/// Test: see the module doc.
+/// `policy` says the cascade reaches that tier. The repo map then applies as
+/// [`CarryPolicy`] describes (#158, #167). The second value counts
+/// rule-engine commits whose stored category differs from the resolved one.
+/// Test: see the module doc,
+/// `tests::floor_mode_keeps_an_exception_and_floors_the_rest`.
 pub(crate) fn resolve_verdicts(
     engine: &ClassificationEngine,
     policy: &CarryPolicy,
@@ -164,38 +193,61 @@ pub(crate) fn resolve_verdicts(
         .iter()
         .zip(traced)
         .map(|(c, t)| {
-            // #158: a mapped repo's commit takes the repo map's verdict.
-            let t = policy
-                .repo_map
-                .traced(&c.repo, c.is_merge, &c.message, engine.taxonomy())
-                .unwrap_or(t);
+            let paths = policy.paths.get(&c.id).map_or(&[][..], Vec::as_slice);
+            let mapped =
+                policy
+                    .repo_map
+                    .traced(&c.repo, c.is_merge, paths, &c.message, engine.taxonomy());
+            // #158: in override mode a mapped commit takes the repo map's
+            // verdict up front. #167: in floor mode it applies last, below.
+            let (t, floor) = match mapped {
+                Some(m) if !policy.repo_map.is_floor() => (m, None),
+                m => (t, m),
+            };
             let mut superseded = false;
+            let mut carried = None;
+            let mut stored_rule_category = None;
             if let Some((cat, conf, method)) = &c.stored {
                 match stored_override(method, t.trace.tier) {
                     // #111: carry only a tier the config's cascade reaches.
                     Some((tier, rule)) if policy.reaches(tier, cat, &t, c.is_merge) => {
-                        return Resolved {
+                        carried = Some(Resolved {
                             tier,
                             rule_id: rule.to_string(),
                             category: cat.clone(),
                             confidence: *conf,
                             carried: true,
                             superseded: false,
-                        };
+                        });
                     }
                     Some(_) => superseded = true,
-                    None if cat != &t.verdict.category => drifted += 1,
-                    None => {}
+                    None => stored_rule_category = Some(cat),
                 }
             }
-            Resolved {
+            let mut r = carried.unwrap_or(Resolved {
                 tier: t.trace.tier,
                 rule_id: t.trace.rule_id,
                 category: t.verdict.category,
                 confidence: t.verdict.confidence,
                 carried: false,
                 superseded,
+            });
+            // #167: the floor replaces any verdict it does not keep, a
+            // carried one included (which then counts as superseded).
+            if let Some(m) = floor.filter(|_| !policy.repo_map.keeps(&r.category, r.confidence)) {
+                r = Resolved {
+                    tier: m.trace.tier,
+                    rule_id: m.trace.rule_id,
+                    category: m.verdict.category,
+                    confidence: m.verdict.confidence,
+                    carried: false,
+                    superseded: r.carried || r.superseded,
+                };
             }
+            if stored_rule_category.is_some_and(|cat| cat != &r.category) {
+                drifted += 1;
+            }
+            r
         })
         .collect();
     (resolved, drifted)
@@ -274,6 +326,132 @@ mod tests {
         assert_eq!(
             (resolved[2].tier.as_str(), resolved[2].category.as_str()),
             ("exact", "security")
+        );
+    }
+
+    /// Why (#167): `tga eval` must reach the verdict a floor-mode
+    /// `tga classify` stores: an exception verdict at or above the threshold
+    /// survives, everything else takes the mapped category.
+    /// What: floor mode, repo `e2e` mapped to `qa`. A `security` rule hit at
+    /// 0.9 keeps its tier; an unanswered commit and a stored manual
+    /// `new_feature` verdict (not an exception) resolve to the repo map.
+    /// Test: this test.
+    #[test]
+    fn floor_mode_keeps_an_exception_and_floors_the_rest() {
+        let mut rules = tempfile::Builder::new()
+            .suffix(".yaml")
+            .tempfile()
+            .expect("tempfile");
+        rules
+            .write_all(
+                b"extend_defaults: false\nrules:\n  - id: sec\n    category: security\n    \
+                  keywords: [\"security\"]\n    confidence: 0.9\ncategories:\n  - name: qa\n  \
+                  - name: new_feature\n",
+            )
+            .expect("write");
+        let config = Config {
+            classification: Some(ClassificationConfig {
+                rules_files: vec![rules.path().to_path_buf()],
+                repo_categories: [("e2e".to_string(), "qa".to_string())].into(),
+                repo_map: crate::core::config::RepoMapConfig {
+                    mode: crate::core::config::RepoMapMode::Floor,
+                    ..Default::default()
+                },
+                ..ClassificationConfig::default()
+            }),
+            ..Config::default()
+        };
+        let engine = ClassificationPipeline::new(config.clone())
+            .build_rule_engine()
+            .expect("engine");
+        let policy = CarryPolicy::from_config(&config).expect("policy");
+        let mut quiet = commit("e2e", None);
+        quiet.message = "zzz qqq vvv".into();
+        let mut manual = commit("e2e", Some(("new_feature", "manual")));
+        manual.message = "zzz qqq vvv".into();
+        let rows = [commit("e2e", None), quiet, manual];
+        let refs: Vec<&CommitRow> = rows.iter().collect();
+        let (resolved, _) = resolve_verdicts(&engine, &policy, &refs);
+        assert_eq!(
+            (resolved[0].tier.as_str(), resolved[0].category.as_str()),
+            ("exact", "security")
+        );
+        for r in &resolved[1..] {
+            assert_eq!((r.tier.as_str(), r.category.as_str()), ("repo_map", "qa"));
+            assert_eq!(r.rule_id, "repo_map:e2e");
+            assert!(!r.carried);
+        }
+        assert!(resolved[2].superseded, "the manual verdict was floored");
+    }
+
+    /// Why (#167 review): `tga eval` reads the changed paths a prefix key
+    /// needs through [`CarryPolicy::prepare`], so it resolves a monorepo
+    /// commit as `tga classify` does.
+    /// What: keys `mono` (qa) and `mono:services` (new_feature); a commit
+    /// under `services/` resolves to `repo_map:mono:services`, one under
+    /// `docs/` to `repo_map:mono`.
+    /// Test: this test.
+    #[test]
+    fn prepare_reads_the_paths_a_prefix_key_needs() {
+        let mut rules = tempfile::Builder::new()
+            .suffix(".yaml")
+            .tempfile()
+            .expect("tempfile");
+        rules
+            .write_all(
+                b"extend_defaults: false\nrules:\n  - id: sec\n    category: security\n    \
+                  keywords: [\"security\"]\ncategories:\n  - name: qa\n  - name: new_feature\n",
+            )
+            .expect("write");
+        let config = Config {
+            classification: Some(ClassificationConfig {
+                rules_files: vec![rules.path().to_path_buf()],
+                repo_categories: [
+                    ("mono".to_string(), "qa".to_string()),
+                    ("mono:services".to_string(), "new_feature".to_string()),
+                ]
+                .into(),
+                ..ClassificationConfig::default()
+            }),
+            ..Config::default()
+        };
+        let db = crate::core::db::Database::open_in_memory().expect("db");
+        let conn = db.connection();
+        let mut rows = Vec::new();
+        for (sha, path) in [("sha-svc", "services/a.rs"), ("sha-docs", "docs/x.md")] {
+            conn.execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, is_merge) VALUES (?1, 'a', 'a@x', '2024-01-01T00:00:00Z', \
+                 'zzz qqq vvv', 'mono', 0)",
+                [sha],
+            )
+            .expect("commit");
+            let id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO files (commit_id, path, change_type) VALUES (?1, ?2, 'M')",
+                rusqlite::params![id, path],
+            )
+            .expect("file");
+            let mut row = commit("mono", None);
+            row.id = id;
+            row.sha = sha.into();
+            row.message = "zzz qqq vvv".into();
+            rows.push(row);
+        }
+        let engine = ClassificationPipeline::new(config.clone())
+            .build_rule_engine()
+            .expect("engine");
+        let mut policy = CarryPolicy::from_config(&config).expect("policy");
+        let refs: Vec<&CommitRow> = rows.iter().collect();
+        policy.prepare(conn, &refs).expect("prepare");
+        let (resolved, _) = resolve_verdicts(&engine, &policy, &refs);
+        assert_eq!(
+            (resolved[0].rule_id.as_str(), resolved[0].category.as_str()),
+            ("repo_map:mono:services", "new_feature")
+        );
+        assert_eq!(
+            (resolved[1].rule_id.as_str(), resolved[1].category.as_str()),
+            ("repo_map:mono", "qa")
         );
     }
 }

@@ -374,6 +374,28 @@ impl Default for TaxonomyRegistry {
     }
 }
 
+/// Category aliases: the underscore spelling external sources emit, and
+/// the built-in name it stands for (#271; see [`TaxonomyRegistry::built_in_defs`]).
+pub const CATEGORY_ALIASES: [(&str, &str); 3] = [
+    ("bug_fix", "bugfix"),
+    ("new_feature", "feature"),
+    ("tech_debt_refactoring", "refactor"),
+];
+
+/// The canonical spelling of category `name`: lowercase, with an alias in
+/// [`CATEGORY_ALIASES`] replaced by the name it stands for.
+///
+/// Why (#167 review): floor mode's default exception `bug_fix` must match
+/// the built-in `cc-fix` rule's `bugfix`; comparing raw strings did not.
+/// Test: `pipeline_repo_map_floor_tests::floor_keeps_a_default_ruleset_bug_fix`.
+pub fn canonical_category(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    CATEGORY_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == lower)
+        .map_or(lower, |(_, target)| (*target).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

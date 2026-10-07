@@ -22,8 +22,10 @@ pub(super) mod pipeline_external;
 pub(crate) mod pipeline_llm;
 // #111: Jev category set and names to pseudonymize.
 mod pipeline_jev;
-// #158: the repo -> category hard override.
+// #158: the repo -> category map (hard override; #167 floor mode).
 pub(crate) mod pipeline_repo_map;
+// #167: `<repo>` / `<repo>:<prefix>` keys and path resolution.
+pub(crate) mod repo_map_keys;
 pub mod rules;
 pub mod sources;
 pub mod taxonomy;
@@ -58,6 +60,10 @@ mod trace_tests;
 // #158: the repo → category hard override, end to end.
 #[cfg(test)]
 mod pipeline_repo_map_tests;
+
+// #167: repo map v2 — floor mode, path-prefix keys, unmatched-key warning.
+#[cfg(test)]
+mod pipeline_repo_map_floor_tests;
 
 // #165: the weighted-sum tier stays inside the active category set.
 #[cfg(test)]

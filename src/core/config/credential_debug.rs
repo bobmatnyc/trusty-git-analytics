@@ -224,6 +224,7 @@ impl fmt::Debug for ClassificationConfig {
         let Self {
             rules_files,
             repo_categories,
+            repo_map,
             use_llm,
             llm_model,
             llm_provider,
@@ -243,6 +244,7 @@ impl fmt::Debug for ClassificationConfig {
         f.debug_struct("ClassificationConfig")
             .field("rules_files", rules_files)
             .field("repo_categories", repo_categories)
+            .field("repo_map", repo_map)
             .field("use_llm", use_llm)
             .field("llm_model", llm_model)
             .field("llm_provider", llm_provider)
