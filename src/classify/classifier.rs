@@ -105,9 +105,9 @@ pub struct ClassificationEngine {
     /// `chore`, `integration`, `platform`, `docs`, `refactor`, `merge`); see
     /// [`Self::weighted_sum_categories`] for how a custom taxonomy limits it.
     weighted_sum: WeightedSumClassifier,
-    /// #165: the active category set when the rules define it
-    /// (`extend_defaults: false`): rule categories, then `categories:`
-    /// entries. `None` when the built-in taxonomy is in force.
+    /// #165: the active category set when the rules files define their own
+    /// taxonomy (`extend_defaults: false` and a non-empty `categories:`):
+    /// rule categories, then `categories:` entries. `None` otherwise.
     ///
     /// Why: the weighted-sum tier emits built-in category names; a custom
     /// taxonomy must never receive one it does not hold.
@@ -286,9 +286,13 @@ impl ClassificationEngine {
         // Tier 2.5: weighted-sum classifier. The per-instance `enabled`
         // flag in WeightedSumConfig lets operators opt out.
         let weighted_sum = WeightedSumClassifier::new(config.weighted_sum.clone());
-        // #165: a custom taxonomy limits the tier to its own category set,
-        // the same set the LLM tier is restricted to.
-        let weighted_sum_categories = (!ruleset.extend_defaults).then(|| {
+        // #165: a rules file that declares its own `categories:` (with
+        // `extend_defaults: false`) limits the tier to that taxonomy, the
+        // same set the LLM tier is restricted to. A custom-only file with no
+        // `categories:` keeps the pre-#165 verdicts (pinned by
+        // `tests/classify_byte_identical.rs`).
+        let declares_taxonomy = !ruleset.extend_defaults && !ruleset.categories.is_empty();
+        let weighted_sum_categories = declares_taxonomy.then(|| {
             super::pipeline::configured_categories(ruleset.clone())
                 .into_iter()
                 .map(|c| c.name)
@@ -582,7 +586,7 @@ impl ClassificationEngine {
 
     /// A weighted-sum verdict limited to the active category set (#165).
     ///
-    /// What: `r` unchanged when the built-in taxonomy is in force. Otherwise
+    /// What: `r` unchanged when no custom taxonomy is declared. Otherwise
     /// `None` when its category is outside
     /// [`Self::weighted_sum_categories`]; when inside, the set's spelling
     /// with `top_level` resolved from the engine's taxonomy only, never the
@@ -800,8 +804,8 @@ mod tests {
     /// ("merge", "feature", "chore") that conflict with user-defined
     /// taxonomies. It must be suppressed when `extend_defaults: false` so
     /// the user's fully-custom ruleset is respected end-to-end. The
-    /// weighted-sum tier answers only inside the custom category set (#165;
-    /// see `weighted_sum_taxonomy_tests`).
+    /// weighted-sum tier answers only inside a declared `categories:` set
+    /// (#165; see `weighted_sum_taxonomy_tests`).
     /// What: build an engine from a minimal `extend_defaults: false` ruleset,
     /// classify a merge-commit message, and assert the verdict (if any) was
     /// never produced by the fuzzy tier.
@@ -830,8 +834,8 @@ mod tests {
         // A merge-commit message that would normally fire the fuzzy tier.
         let result = engine.classify_sync("Merge pull request #42 from main", true);
         // With extend_defaults: false the fuzzy tier is suppressed.
-        // #165: the weighted-sum tier's "merge" is outside this ruleset's
-        // category set, so it is dropped too. Any verdict must not be fuzzy.
+        // This ruleset declares no `categories:`, so the weighted-sum tier
+        // may still answer "merge" (#165). Any verdict must not be fuzzy.
         if let Some(ref r) = result {
             assert_ne!(
                 r.method,

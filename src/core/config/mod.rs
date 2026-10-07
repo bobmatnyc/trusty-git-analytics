@@ -653,10 +653,12 @@ pub struct ClassificationConfig {
     /// restore pre-1.3.0 behaviour (regex falls directly to fuzzy).
     /// The tier votes among built-in category names (`feature`, `bugfix`,
     /// `chore`, `integration`, `platform`, `docs`, `refactor`, `merge`).
-    /// #165: when the rules files define the whole category set
-    /// (`extend_defaults: false`), a verdict whose category is outside that
-    /// set is dropped and the commit falls through to the next tier; one
-    /// inside it is kept in the set's spelling.
+    /// #165: when the rules files declare their own taxonomy
+    /// (`extend_defaults: false` and a `categories:` list), a verdict whose
+    /// category is outside that set (rule categories plus `categories:`) is
+    /// dropped and the commit falls through to the next tier; one inside it
+    /// is kept in the set's spelling. A custom-only rules file with no
+    /// `categories:` still receives these built-in names.
     #[serde(default)]
     pub weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig,
 

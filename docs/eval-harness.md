@@ -275,11 +275,12 @@ works from any directory. `output.directory`, `cache.directory` and
 working-directory-relative one. Repository paths still resolve from the
 working directory.
 
-With `extend_defaults: false` the fuzzy tier is off, and the weighted-sum
-tier answers only with a category the rules files define. It votes among
-built-in names (`feature`, `bugfix`, `chore`, `integration`, `platform`,
-`docs`, `refactor`, `merge`); a vote outside the configured set is dropped
-and the commit falls through to the next tier (#165).
+With `extend_defaults: false` the fuzzy tier is off. The weighted-sum tier
+votes among built-in names (`feature`, `bugfix`, `chore`, `integration`,
+`platform`, `docs`, `refactor`, `merge`). When the rules files also declare
+`categories:`, a vote outside the configured set (rule categories plus
+`categories:`) is dropped and the commit falls through to the next tier
+(#165); without `categories:`, the built-in names are still written.
 `classification.weighted_sum.enabled: false` turns the tier off; the
 commits it would have named then abstain.
 
