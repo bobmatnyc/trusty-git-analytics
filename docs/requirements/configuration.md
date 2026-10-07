@@ -61,7 +61,9 @@ every `tga` invocation.
 
 The `llm:` section controls how the LLM fallback tier reaches an inference
 provider. **When `llm:` is present, the LLM tier is automatically enabled** —
-no `classification.use_llm: true` is required (added v2.3.0). It takes
+no `classification.use_llm: true` is required (added v2.3.0), and an explicit
+`classification.use_llm: false` turns it off (#175; see "Self-enabling
+behavior" below). It takes
 precedence over the legacy `classification.llm_provider` /
 `classification.openrouter_api_key` fields; using those legacy fields without
 an `llm:` section emits a `tracing::warn!` deprecation message.
@@ -426,13 +428,24 @@ When a valid `llm:` section is present in the config, the LLM classification tie
 is **automatically enabled** — no `classification.use_llm: true` is required. The
 intent is: if you wrote `llm:`, you mean to use it.
 
-Precedence:
-1. `llm:` section present → LLM tier enabled automatically.
-2. `classification.use_llm: true` (legacy) → LLM tier enabled (when no `llm:` section).
-3. Neither → LLM tier disabled.
+Precedence (#175, tga 10.3.2):
+1. `classification.use_llm: false` → LLM tier **off**, whatever the `llm:`
+   section says. tga builds no provider client and makes no LLM call in
+   `tga classify`, `tga analyze`, `tga collect`'s classify step or the
+   complexity backfill. The run logs at info that the `llm:` section is ignored.
+2. `classification.use_llm: true` → LLM tier on, through the `llm:` section when
+   present, else the legacy `classification.llm_provider` fields.
+3. `classification.use_llm` absent, `llm:` section present → LLM tier on.
+4. Neither → LLM tier off.
 
-To temporarily disable the LLM tier while keeping the `llm:` config for reference,
-comment out the `llm:` block.
+`use_llm` must be `true` or `false`; an empty value or `null` is a config error,
+so a half-written off switch never reads as absent. The `--use-llm` flag on
+`tga classify` and `tga backfill complexity` sets `use_llm: true` for that run,
+overriding a `use_llm: false` in the file.
+
+To disable the LLM tier while keeping the `llm:` config, set
+`classification.use_llm: false`. Before 10.3.2 that setting was ignored when an
+`llm:` section was present, and every eligible commit went to the provider.
 
 #### Default models by source
 
