@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.3.3] — 2026-10-07
+
+### Fixed
+
+- `tga classify` no longer fails on a commit whose message is hundreds of kilobytes long (#178). Every prompt the `openrouter`, `bedrock` and `anthropic-api` sources send, for the classify LLM fallback and the complexity backfill, now has an input budget. A prompt within the budget is sent byte-identical to 10.3.2. A larger one is cut: the message first, then the `llm.context` block, each at a UTF-8 character boundary and marked `[truncated N bytes]`.
+- New optional key `llm.max_input_tokens` sets the budget. Unset, it is `190000` for `bedrock` and `anthropic-api` (200k-token Claude windows) and `100000` for `openrouter` and other OpenAI-compatible endpoints (128k-token windows). A set value overrides both. tga counts one token per byte, an upper bound, so a prompt at the cap is at most that many real tokens. A value below `8192` fails the config load.
+
 ## [10.3.2] — 2026-10-07
 
 ### Breaking
