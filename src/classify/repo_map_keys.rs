@@ -118,8 +118,10 @@ impl RepoKeys {
     /// then to the alphabetically first category. "Unmapped" wins only with
     /// strictly more votes than every category. With no prefix keys, or no
     /// stored paths, the bare key alone decides. The returned prefix is the
-    /// winning category's most specific voting key.
+    /// winning category's most specific voting key; between equal-length
+    /// keys, the alphabetically first prefix.
     /// Test: `pipeline_repo_map_floor_tests::a_commit_spanning_prefixes_takes_the_category_most_paths_resolve_to`,
+    /// `tests::equal_length_keys_of_one_category_break_on_the_prefix`,
     /// `pipeline_repo_map_floor_tests::the_longest_matching_prefix_wins`,
     /// `pipeline_repo_map_floor_tests::a_bare_repo_key_is_the_fallback`.
     pub(crate) fn resolve(&self, paths: &[String]) -> Option<(Option<&str>, &str)> {

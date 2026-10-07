@@ -21,7 +21,7 @@ pub enum RepoMapMode {
     Override,
     /// The mapped category is the default. The cascade still runs, LLM
     /// included; its verdict survives only when its category is one of
-    /// [`RepoMapConfig::exceptions`] and its confidence is at or above
+    /// `exceptions` and its confidence is at or above
     /// [`RepoMapConfig::min_confidence`].
     Floor,
 }

@@ -570,10 +570,13 @@ classification:
   `repositories[].name`, else the basename of `repositories[].path`. It
   matches the whole name, case-sensitively: `mcp-services` does not match
   `MCP-Services` or `mcp-services-v2`. A key holding `*` is an error; there
-  are no globs. A key with a `:` is a path-prefix key (below); a key with a
-  `/` and no `:` (`acme-mono/api`), or an empty repository or prefix
-  around the `:`, is an error. Two keys naming the same repository and
-  prefix (`r:api` and `r:api/`) are an error.
+  are no globs. A key with a `:` is a path-prefix key (below). A
+  repository part may hold a `/` only when it equals a configured
+  `repositories[].name` (`acme-org/widget`); otherwise, as in
+  `acme-mono/api`, it is an error naming the key and saying no configured
+  name matches. An empty repository or prefix around the `:` is an error.
+  Two keys naming the same repository and prefix (`r:api` and `r:api/`)
+  are an error.
 - **Merges.** A merge commit is not mapped. It keeps its existing handling:
   the rules decide it and it never reaches the LLM.
 - **Checks.** Each category must be one the config knows: under
@@ -624,7 +627,7 @@ order:
 
 A commit with no stored paths, or a repository with no prefix keys, uses
 the bare key alone. The rule id names the winning category's most specific
-voting key.
+voting key; between equal-length keys, the alphabetically first prefix.
 
 #### `classification.repo_map` — override or floor (#167)
 
@@ -639,7 +642,7 @@ classification:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `mode` | `override` \| `floor` | `override` | `override` is the #158 hard override above. `floor` makes the mapped category the default and lets the cascade infer exceptions. |
-| `exceptions` | list of categories | `[qa, security, devops, bug_fix]` | Categories a cascade verdict may keep in floor mode, matched case-insensitively. A name the config's category set lacks gets a warning; no verdict can match it. |
+| `exceptions` | list of categories | `[qa, security, devops, bug_fix]` | Categories a cascade verdict may keep in floor mode. Names compare through the taxonomy's canonical names, case-insensitively, so `bug_fix` matches the built-in rules' `bugfix` (aliases: `bug_fix` = `bugfix`, `new_feature` = `feature`, `tech_debt_refactoring` = `refactor`). In a written list, a name the config's category set lacks is an error. In the default list it is a warning: the built-in taxonomy has no `qa`. |
 | `min_confidence` | float in `[0, 1]` | `0.8` | Lowest confidence at which an exception verdict is kept. A value outside `[0, 1]` is an error. |
 
 Without the block, or with `mode: override`, behaviour is exactly that of
@@ -655,8 +658,13 @@ In floor mode:
 - After the cascade, a mapped commit keeps the cascade's verdict only when
   its category is in `exceptions` and its confidence is at or above
   `min_confidence`. Every other mapped commit gets the mapped category at
-  confidence 1.0 with method `repo_map`. The rule applies to every tier
-  alike, the manual override included.
+  confidence 1.0 with method `repo_map`, keeping the replaced verdict's
+  complexity score (the complexity backfill skips `repo_map` rows). The
+  rule applies to every tier alike, the manual override included.
+- Under the built-in rules, `security` and `bugfix` verdicts match the
+  default exceptions. The built-in rules emit no `qa` or `devops`: test
+  commits are `test` and CI or build commits are `ci` or `build`. To keep
+  those, write the list, e.g. `exceptions: [bug_fix, security, test, ci]`.
 - A merge commit is never mapped, as in override mode.
 - `tga eval sample` and `tga eval repredict` apply the same rule to the
   carried or re-derived verdict; a carried verdict the floor replaces counts
