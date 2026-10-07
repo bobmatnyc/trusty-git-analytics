@@ -25,6 +25,8 @@ pub(crate) mod jev_tickets;
 pub(crate) mod jev_trailers;
 pub(crate) mod jev_vocab;
 pub mod llm;
+// #178: the input budget every LLM prompt is cut to.
+pub mod llm_budget;
 // #111: the `llm.context` block appended to the user prompt.
 pub(crate) mod llm_context;
 // #131: LLM prompt, reply validation and token accounting.
@@ -145,6 +147,10 @@ mod llm_tests;
 
 #[cfg(test)]
 mod llm_prompt_tests;
+
+// #178: every prompt stays inside the LLM input budget.
+#[cfg(test)]
+mod llm_budget_tests;
 
 #[cfg(test)]
 mod weighted_sum_tests;

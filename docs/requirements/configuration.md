@@ -78,6 +78,7 @@ an `llm:` section emits a `tracing::warn!` deprecation message.
 | `context` | list | `[]` | Commit facts appended to the user prompt after the message: any of `paths`, `pr_title`, `issue_type` (#111). See [Commit context](#commit-context-llmcontext-111). Any other item is a load error. |
 | `context_max_paths` | integer | `30` | Most changed paths `context: [paths]` lists per commit. |
 | `context_max_path_bytes` | integer | `2048` | Most bytes of path text `context: [paths]` lists per commit. |
+| `max_input_tokens` | integer | `190000` for `bedrock` and `anthropic-api`, else `100000` | Most estimated input tokens one LLM prompt may carry, system prompt included; minimum `8192` (#178). See [Input budget](#input-budget-llmmax_input_tokens-178). Ignored by `jev`. |
 
 Any other key under `llm:` is a load error (#111), as it is under `llm.jev:`.
 A `jev` option written one level too high (`llm.payload_dump_dir`) therefore
@@ -420,6 +421,58 @@ llm:
   context: [paths, pr_title, issue_type]
   context_max_paths: 30          # default
   context_max_path_bytes: 2048   # default
+```
+
+#### Input budget (`llm.max_input_tokens`, #178)
+
+A commit message can be hundreds of kilobytes long, for example when it
+embeds a diff or a generated file. Sent whole, such a prompt passes the
+model's context window and the provider rejects every call for that commit.
+`max_input_tokens` caps every prompt that `openrouter`, `bedrock` and
+`anthropic-api` send, both for the `tga classify` LLM fallback and for the
+complexity backfill. When the key is unset, the default depends on the
+source:
+
+| Source | Default | Why |
+|--------|---------|-----|
+| `bedrock`, `anthropic-api` | `190000` | Claude models have a 200k-token window; 10k is left for the reply (at most 2,048 tokens) and request framing. |
+| `openrouter` (and the legacy OpenAI-compatible endpoints) | `100000` | Fits a 128k-token window such as `gpt-4o-mini`, the OpenRouter default. |
+
+A set `max_input_tokens` overrides the default for every source. A value
+below `8192` fails the config load with an error naming the key and the
+minimum: 4,096 tokens of room for the commit plus as much again for the
+system prompt and framing. If a configured system prompt is long enough
+to leave less than 4,096 tokens of room, tga sends nothing for that commit
+and records the call as failed, so no verdict on a marker-only prompt is
+stored.
+
+tga has no tokenizer. It counts one token per byte of the system prompt,
+the fixed `Classify this commit message:` prefix, the message and the
+context block, plus 64 tokens for request framing. One byte per token is
+an upper bound: every token of a byte-level BPE vocabulary (Claude,
+GPT-4o) is at least one byte long. Ordinary commit text runs near 3.3
+bytes per token, so the estimate counts about three times the real
+number. A prompt at the cap is therefore at most that many real tokens,
+whatever it contains.
+
+A prompt within the budget is sent byte-identical to tga 10.3.2. A
+larger one is cut:
+
+- The context block keeps the bytes the message leaves free, and at least
+  a quarter of the room. The message gets the rest.
+- Each cut part ends at a UTF-8 character boundary, followed by a
+  `[truncated N bytes]` line, where N is the number of bytes left out.
+- The cut is deterministic: the same commit always sends the same prompt.
+- tga logs a warning with the prompt size before and after the cut.
+
+`jev` ignores the key and sends its pseudonymized text uncut;
+`jev.budget_usd` caps its spend, not the size of one request.
+
+```yaml
+llm:
+  source: openrouter
+  model: some/small-context-model
+  max_input_tokens: 24000   # unset: 190000 for bedrock/anthropic-api, 100000 otherwise
 ```
 
 #### Self-enabling behavior (added v2.3.0)
