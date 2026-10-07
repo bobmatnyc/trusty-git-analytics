@@ -470,9 +470,10 @@ async fn a_commit_spanning_prefixes_takes_the_category_most_paths_resolve_to() {
         ("r-pool:a", "qa"),
         ("r-pool:b", "qa"),
         ("r-pool:c", "platform_infrastructure"),
-        // length tie-break: 1 vs 1, `services` is longer than `tests`.
-        ("r-len:services", "platform_infrastructure"),
-        ("r-len:tests", "qa"),
+        // length tie-break: 1 vs 1, `services` is longer than `tests`, and
+        // its category sorts later, so a missing length step picks platform.
+        ("r-len:services", "qa"),
+        ("r-len:tests", "platform_infrastructure"),
         // alphabetical tie-break: equal lengths, `platform_...` < `qa`.
         ("r-alpha:bb", "qa"),
         ("r-alpha:aa", "platform_infrastructure"),
@@ -507,7 +508,7 @@ async fn a_commit_spanning_prefixes_takes_the_category_most_paths_resolve_to() {
     let qa = pair("qa", "repo_map");
     assert_eq!(cat_method(&db, "sha-major"), platform);
     assert_eq!(cat_method(&db, "sha-pool"), qa);
-    assert_eq!(cat_method(&db, "sha-len"), platform);
+    assert_eq!(cat_method(&db, "sha-len"), qa);
     assert_eq!(cat_method(&db, "sha-alpha"), platform);
     let (category, method) = cat_method(&db, "sha-unmapped");
     assert_ne!(method, "repo_map", "{category}");
@@ -638,4 +639,195 @@ fn a_prefix_key_gives_jev_only_its_repository_name() {
             names.repos
         );
     }
+}
+
+/// Why (#167 review HIGH): the default exception `bug_fix` must match the
+/// built-in ruleset, whose `cc-fix` rule emits `bugfix`; the taxonomy
+/// names `bug_fix` as its alias.
+/// What: no rules file (built-in rules), floor mode with the default
+/// exceptions. A `fix: ...` commit in a mapped repo keeps `bugfix`; a
+/// `feat: ...` commit takes the mapped category.
+/// Test: this test.
+#[tokio::test]
+async fn floor_keeps_a_default_ruleset_bug_fix() {
+    let config = Config {
+        classification: Some(ClassificationConfig {
+            repo_categories: [(MAPPED.to_string(), "tooling".to_string())].into(),
+            repo_map: floor(),
+            ..ClassificationConfig::default()
+        }),
+        ..Config::default()
+    };
+    let pipeline = ClassificationPipeline::new(config);
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-fix", MAPPED, "fix: handle the empty token");
+    insert(&db, "sha-feat", MAPPED, "feat: add the export button");
+
+    run(&pipeline, &mut db).await.expect("run");
+
+    assert_eq!(cat_method(&db, "sha-fix").0, "bugfix");
+    assert_eq!(cat_method(&db, "sha-feat"), pair("tooling", "repo_map"));
+}
+
+/// Why (#167 review): an exception the operator wrote that no category
+/// matches would silently never keep anything (fail-open).
+/// What: `exceptions: [qa, bugfixes]` under a ruleset without `bugfixes`
+/// fails the run with an error naming it.
+/// Test: this test.
+#[tokio::test]
+async fn a_user_written_unknown_exception_is_rejected() {
+    let rules = rules_file();
+    let repo_map: RepoMapConfig =
+        serde_yaml::from_str("mode: floor\nexceptions: [qa, bugfixes]\n").expect("block");
+    let pipeline = ClassificationPipeline::new(config(
+        rules.path(),
+        &[(MAPPED, "internal_tooling")],
+        repo_map,
+    ));
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-a", MAPPED, NOTHING);
+    let msg = run(&pipeline, &mut db)
+        .await
+        .expect_err("unknown exception")
+        .to_string();
+    assert!(msg.contains("bugfixes"), "{msg}");
+    assert!(msg.contains("exceptions"), "{msg}");
+}
+
+/// Why (#167 review): `repositories[].name` may hold a `/` (`org/repo`); a
+/// bare key equal to such a name maps that repository. A `/` key matching
+/// no configured name is still refused, and the error says so.
+/// What: the configured name `acme-org/widget` maps; `acme-org/gadget`
+/// fails naming `repositories[].name`.
+/// Test: this test.
+#[tokio::test]
+async fn a_bare_key_naming_a_configured_slash_repository_maps_it() {
+    let rules = rules_file();
+    let with_repo = |key: &str| {
+        let mut cfg = config(rules.path(), &[(key, "qa")], RepoMapConfig::default());
+        let mut repo = crate::core::config::RepositoryConfig::default();
+        repo.path = "/nonexistent/widget".into();
+        repo.name = Some("acme-org/widget".into());
+        cfg.repositories = vec![repo];
+        ClassificationPipeline::new(cfg)
+    };
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-a", "acme-org/widget", NOTHING);
+    run(&with_repo("acme-org/widget"), &mut db)
+        .await
+        .expect("configured name");
+    assert_eq!(cat_method(&db, "sha-a"), pair("qa", "repo_map"));
+
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-a", "acme-org/widget", NOTHING);
+    let msg = run(&with_repo("acme-org/gadget"), &mut db)
+        .await
+        .expect_err("unconfigured slash key")
+        .to_string();
+    assert!(msg.contains("acme-org/gadget"), "{msg}");
+    assert!(msg.contains("repositories[].name"), "{msg}");
+}
+
+/// Why (#167 review): floor mode and prefix keys combine: the floor is the
+/// category the commit's paths resolve to.
+/// What: floor mode, keys `acme-mono` and `acme-mono:services`. Under
+/// `services/`, a `security` hit at 0.8 is kept and a `new_feature` hit
+/// takes the prefix category; under `docs/`, a `qa` hit at 0.79 takes the
+/// bare category.
+/// Test: this test.
+#[tokio::test]
+async fn floor_mode_applies_to_a_prefix_key() {
+    let rules = rules_file();
+    let map = [
+        (MONO, "internal_tooling"),
+        ("acme-mono:services", "platform_infrastructure"),
+    ];
+    let pipeline = ClassificationPipeline::new(config(rules.path(), &map, floor()));
+    let mut db = Database::open_in_memory().expect("db");
+    let with = |sha: &str, msg: &str, path: &str| {
+        insert(&db, sha, MONO, msg);
+        let id = db.connection().last_insert_rowid();
+        db.connection()
+            .execute(
+                "INSERT INTO files (commit_id, path, change_type) VALUES (?1, ?2, 'M')",
+                params![id, path],
+            )
+            .expect("insert file");
+    };
+    with(
+        "sha-sec",
+        "security: rotate the signing keys",
+        "services/a.rs",
+    );
+    with("sha-feat", "feat: add the widget", "services/b.rs");
+    with("sha-qa", "flaky: retry the login test", "docs/x.md");
+
+    run(&pipeline, &mut db).await.expect("run");
+
+    assert_eq!(cat_method(&db, "sha-sec"), pair("security", "exact_rule"));
+    assert_eq!(
+        cat_method(&db, "sha-feat"),
+        pair("platform_infrastructure", "repo_map")
+    );
+    assert_eq!(
+        cat_method(&db, "sha-qa"),
+        pair("internal_tooling", "repo_map")
+    );
+}
+
+/// Why (#167): `r:api` and `r:api/` normalize to one key; two categories
+/// for it would make the map depend on key order.
+/// What: the pair fails the run with an error naming both keys.
+/// Test: this test.
+#[tokio::test]
+async fn duplicate_keys_naming_one_prefix_are_rejected() {
+    let rules = rules_file();
+    let pipeline = ClassificationPipeline::new(config(
+        rules.path(),
+        &[("r:api", "qa"), ("r:api/", "internal_tooling")],
+        RepoMapConfig::default(),
+    ));
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-a", "r", NOTHING);
+    let msg = run(&pipeline, &mut db)
+        .await
+        .expect_err("duplicate")
+        .to_string();
+    assert!(msg.contains("'r:api'") && msg.contains("'r:api/'"), "{msg}");
+}
+
+/// Why (#167 review): the complexity backfill never revisits a `repo_map`
+/// row, so a floored LLM verdict must keep the LLM's complexity score.
+/// What: the LLM answers `new_feature` at 0.95 with complexity 2 for an
+/// unanswered commit in a floor-mode mapped repo; the stored `repo_map`
+/// row carries complexity 2.
+/// Test: this test.
+#[tokio::test]
+async fn floor_keeps_the_llm_complexity_when_it_replaces_an_llm_verdict() {
+    let rules = rules_file();
+    let pipeline = ClassificationPipeline::new(config(
+        rules.path(),
+        &[(MAPPED, "internal_tooling")],
+        floor(),
+    ));
+    let server = mock_llm("new_feature", 0.95).await;
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-none", MAPPED, NOTHING);
+
+    run_with_llm(&pipeline, &mut db, &server).await;
+
+    assert_eq!(
+        cat_method(&db, "sha-none"),
+        pair("internal_tooling", "repo_map")
+    );
+    let complexity: Option<i64> = db
+        .connection()
+        .query_row(
+            "SELECT cl.complexity FROM commits c JOIN classifications cl \
+             ON cl.id = c.classification_id WHERE c.sha = 'sha-none'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("complexity");
+    assert_eq!(complexity, Some(2));
 }

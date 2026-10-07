@@ -383,4 +383,75 @@ mod tests {
         }
         assert!(resolved[2].superseded, "the manual verdict was floored");
     }
+
+    /// Why (#167 review): `tga eval` reads the changed paths a prefix key
+    /// needs through [`CarryPolicy::prepare`], so it resolves a monorepo
+    /// commit as `tga classify` does.
+    /// What: keys `mono` (qa) and `mono:services` (new_feature); a commit
+    /// under `services/` resolves to `repo_map:mono:services`, one under
+    /// `docs/` to `repo_map:mono`.
+    /// Test: this test.
+    #[test]
+    fn prepare_reads_the_paths_a_prefix_key_needs() {
+        let mut rules = tempfile::Builder::new()
+            .suffix(".yaml")
+            .tempfile()
+            .expect("tempfile");
+        rules
+            .write_all(
+                b"extend_defaults: false\nrules:\n  - id: sec\n    category: security\n    \
+                  keywords: [\"security\"]\ncategories:\n  - name: qa\n  - name: new_feature\n",
+            )
+            .expect("write");
+        let config = Config {
+            classification: Some(ClassificationConfig {
+                rules_files: vec![rules.path().to_path_buf()],
+                repo_categories: [
+                    ("mono".to_string(), "qa".to_string()),
+                    ("mono:services".to_string(), "new_feature".to_string()),
+                ]
+                .into(),
+                ..ClassificationConfig::default()
+            }),
+            ..Config::default()
+        };
+        let db = crate::core::db::Database::open_in_memory().expect("db");
+        let conn = db.connection();
+        let mut rows = Vec::new();
+        for (sha, path) in [("sha-svc", "services/a.rs"), ("sha-docs", "docs/x.md")] {
+            conn.execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, is_merge) VALUES (?1, 'a', 'a@x', '2024-01-01T00:00:00Z', \
+                 'zzz qqq vvv', 'mono', 0)",
+                [sha],
+            )
+            .expect("commit");
+            let id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO files (commit_id, path, change_type) VALUES (?1, ?2, 'M')",
+                rusqlite::params![id, path],
+            )
+            .expect("file");
+            let mut row = commit("mono", None);
+            row.id = id;
+            row.sha = sha.into();
+            row.message = "zzz qqq vvv".into();
+            rows.push(row);
+        }
+        let engine = ClassificationPipeline::new(config.clone())
+            .build_rule_engine()
+            .expect("engine");
+        let mut policy = CarryPolicy::from_config(&config).expect("policy");
+        let refs: Vec<&CommitRow> = rows.iter().collect();
+        policy.prepare(conn, &refs).expect("prepare");
+        let (resolved, _) = resolve_verdicts(&engine, &policy, &refs);
+        assert_eq!(
+            (resolved[0].rule_id.as_str(), resolved[0].category.as_str()),
+            ("repo_map:mono:services", "new_feature")
+        );
+        assert_eq!(
+            (resolved[1].rule_id.as_str(), resolved[1].category.as_str()),
+            ("repo_map:mono", "qa")
+        );
+    }
 }

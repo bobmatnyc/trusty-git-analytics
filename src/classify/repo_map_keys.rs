@@ -153,3 +153,24 @@ impl RepoKeys {
             .map(|(category, t)| (t.prefix, category))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why (#167 review): two equal-length prefix keys of one category must
+    /// name the same deciding key whatever the path order.
+    /// What: keys `bb` and `aa`, both `qa`; both path orders resolve to
+    /// `(Some("aa"), "qa")`.
+    /// Test: this test.
+    #[test]
+    fn equal_length_keys_of_one_category_break_on_the_prefix() {
+        let mut keys = RepoKeys::default();
+        keys.insert(Some("bb".into()), "qa".into());
+        keys.insert(Some("aa".into()), "qa".into());
+        for order in [["bb/1", "aa/1"], ["aa/1", "bb/1"]] {
+            let paths: Vec<String> = order.iter().map(|p| p.to_string()).collect();
+            assert_eq!(keys.resolve(&paths), Some((Some("aa"), "qa")), "{order:?}");
+        }
+    }
+}
