@@ -6,11 +6,15 @@ use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use crate::classify::tiers::llm::LlmClassifier;
+use crate::classify::tiers::llm::{LlmClassifier, SYSTEM_PROMPT};
 use crate::classify::tiers::llm_context::{CommitContext, CLOSE, OPEN};
+use crate::core::config::LlmSource;
 
-/// The default input budget, in estimated tokens (one byte = one token).
+/// The OpenAI-compatible default input budget, in estimated tokens (one
+/// byte = one token).
 const BUDGET_TOKENS: usize = 100_000;
+/// #178: the Bedrock and Anthropic API default (200k-token Claude windows).
+const CLAUDE_BUDGET_TOKENS: usize = 190_000;
 /// The fixed text every provider puts before the message.
 const PREFIX: &str = "Classify this commit message:\n\n";
 /// The marker that opens the truncation note.
@@ -77,14 +81,14 @@ async fn sent(server: &MockServer) -> (String, String) {
     (system, text("user").expect("user message"))
 }
 
-/// Assert the prompt fits the budget and that `sent_text` is `original` cut
+/// Assert the prompt fits `budget` and that `sent_text` is `original` cut
 /// at a character boundary and followed by an exact `[truncated N bytes]`
 /// note, where N is the byte count left out.
-fn assert_truncated(system: &str, user: &str, sent_text: &str, original: &str) {
+fn assert_truncated(budget: usize, system: &str, user: &str, sent_text: &str, original: &str) {
     let total = system.len() + user.len();
     assert!(
-        total <= BUDGET_TOKENS,
-        "prompt is {total} bytes, over the {BUDGET_TOKENS}-token budget"
+        total <= budget,
+        "prompt is {total} bytes, over the {budget}-token budget"
     );
     let at = sent_text
         .find(MARKER)
@@ -119,7 +123,7 @@ async fn oversized_message_fits_the_budget_on_openai_compat() {
     assert!(call.verdict.is_some(), "the cut prompt still classifies");
     let (system, user) = sent(&server).await;
     let body = user.strip_prefix(PREFIX).expect("fixed prefix");
-    assert_truncated(&system, &user, body, &message);
+    assert_truncated(BUDGET_TOKENS, &system, &user, body, &message);
 }
 
 /// Why (#178): the cap must hold for the Anthropic Messages API too, and a
@@ -144,7 +148,8 @@ async fn oversized_message_keeps_the_context_block_on_anthropic() {
     );
     let body = user.strip_prefix(PREFIX).expect("fixed prefix");
     let head = body.strip_suffix(block.as_str()).expect("block sent whole");
-    assert_truncated(&system, &user, head, &message);
+    // #178: the Anthropic API default is the 190k Claude budget.
+    assert_truncated(CLAUDE_BUDGET_TOKENS, &system, &user, head, &message);
 }
 
 /// Why (#178): the context block is part of the prompt, so an oversized PR
@@ -166,7 +171,49 @@ async fn oversized_context_block_fits_the_budget() {
         .strip_prefix(&format!("{PREFIX}fix: a"))
         .expect("message sent whole");
     let full = ctx.render_plain();
-    assert_truncated(&system, &user, block, &full);
+    assert_truncated(BUDGET_TOKENS, &system, &user, block, &full);
+}
+
+/// Why (#178): a 150 KB prompt fits a 200k-token Claude window, and 10.3.2
+/// sent it whole on Bedrock and the Anthropic API; only a 128k-class
+/// OpenAI-compatible model needs it cut by default.
+/// What: with no `max_input_tokens`, a 150 KB message is sent byte for byte
+/// by the Anthropic API path and in the Bedrock Converse request, and cut,
+/// with the marker, by the OpenAI-compatible path.
+/// Test: this test.
+#[tokio::test]
+async fn claude_sources_send_150_kb_whole_and_openai_compat_cuts_it() {
+    let message = huge("feat: generated ledger fixture ", 150_000);
+    let expected = format!("{PREFIX}{message}");
+
+    let anthropic = server("/v1/messages", anthropic_reply()).await;
+    let llm = LlmClassifier::build_anthropic("claude-test", Some("sk-ant-test".to_string())) // pragma: allowlist secret
+        .with_endpoint(format!("{}/v1/messages", anthropic.uri()));
+    llm.classify_detailed(&message).await;
+    assert_eq!(sent(&anthropic).await.1, expected, "anthropic-api");
+
+    let bedrock_budget =
+        crate::classify::tiers::llm_budget::PromptBudget::for_source(&LlmSource::Bedrock);
+    let text = bedrock_budget
+        .fit(SYSTEM_PROMPT, &message, None)
+        .expect("room");
+    let req = crate::classify::tiers::bedrock::converse_request("m", SYSTEM_PROMPT, &text);
+    let json = serde_json::to_value(&req).expect("serialize");
+    let user = json["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("user message");
+    assert_eq!(user["content"], Value::from(expected), "bedrock");
+
+    let openai = server("/v1/chat/completions", openai_reply()).await;
+    let llm = LlmClassifier::new("test-model", Some("sk-test".to_string()))
+        .with_endpoint(format!("{}/v1/chat/completions", openai.uri()));
+    llm.classify_detailed(&message).await;
+    let (system, user) = sent(&openai).await;
+    let body = user.strip_prefix(PREFIX).expect("fixed prefix");
+    assert_truncated(BUDGET_TOKENS, &system, &user, body, &message);
 }
 
 /// Why (#178): a prompt inside the budget must be sent byte for byte as

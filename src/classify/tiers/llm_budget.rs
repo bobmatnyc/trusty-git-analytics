@@ -17,7 +17,10 @@ use tracing::warn;
 
 use crate::classify::tiers::llm::LlmClassifier;
 use crate::classify::tiers::llm_context::{with_context, CommitContext};
-use crate::core::config::LLM_DEFAULT_MAX_INPUT_TOKENS;
+use crate::core::config::{
+    default_max_input_tokens_for, LlmSource, LLM_DEFAULT_MAX_INPUT_TOKENS,
+    LLM_MIN_INPUT_ROOM_TOKENS,
+};
 
 /// Bytes counted per estimated token: one.
 ///
@@ -50,9 +53,9 @@ const MARKER_MAX: usize = MARKER_OPEN.len() + 20 + MARKER_CLOSE.len();
 /// The most estimated input tokens one prompt may carry, system prompt
 /// included (`llm.max_input_tokens`, #178).
 ///
-/// Invariant: a prompt [`Self::fit`] returns is at most the budget, unless
-/// the budget is smaller than the system prompt plus two markers; then the
-/// text is cut to its markers alone.
+/// Invariant: a prompt [`Self::fit`] returns is at most the budget; a
+/// budget that leaves less than [`LLM_MIN_INPUT_ROOM_TOKENS`] after the
+/// system prompt returns nothing to send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptBudget {
     max_input_tokens: usize,
@@ -68,6 +71,12 @@ impl PromptBudget {
     /// A budget of `max_input_tokens` estimated tokens.
     pub fn new(max_input_tokens: usize) -> Self {
         Self { max_input_tokens }
+    }
+
+    /// The budget `source` uses when `llm.max_input_tokens` is unset (#178);
+    /// see [`default_max_input_tokens_for`].
+    pub fn for_source(source: &LlmSource) -> Self {
+        Self::new(default_max_input_tokens_for(source))
     }
 
     /// The budget in estimated tokens.
@@ -92,36 +101,48 @@ impl PromptBudget {
     /// keeps whatever the message leaves of the room, and at least a quarter
     /// of it; the message gets the rest. A cut part ends in
     /// `\n[truncated N bytes]`, N being the bytes left out, and the result
-    /// is a pure function of its inputs.
+    /// is a pure function of its inputs. `None` when the room is under
+    /// [`LLM_MIN_INPUT_ROOM_TOKENS`]: nothing is sent, so no verdict on a
+    /// marker-only prompt is stored.
     /// Test: `llm_budget_tests::oversized_message_fits_the_budget_on_openai_compat`,
     /// `llm_budget_tests::oversized_message_keeps_the_context_block_on_anthropic`,
     /// `llm_budget_tests::oversized_context_block_fits_the_budget`,
     /// `llm_budget_tests::prompt_inside_the_budget_is_byte_identical`,
-    /// `tests::bedrock_request_fits_the_budget`.
+    /// `tests::bedrock_request_fits_the_budget`,
+    /// `tests::room_under_the_floor_sends_nothing`.
     pub(crate) fn fit<'a>(
         self,
         system: &str,
         message: &'a str,
         ctx: Option<&CommitContext>,
-    ) -> Cow<'a, str> {
-        let full = with_context(message, ctx);
+    ) -> Option<Cow<'a, str>> {
         let room = self.room(system);
+        // #178: a budget the system prompt nearly fills would send only markers.
+        if room < LLM_MIN_INPUT_ROOM_TOKENS * BYTES_PER_TOKEN {
+            warn!(
+                max_input_tokens = self.max_input_tokens,
+                system_bytes = system.len(),
+                "LLM input budget leaves too little room for the commit; nothing sent (#178)"
+            );
+            return None;
+        }
+        let full = with_context(message, ctx);
         if full.len() <= room {
-            return full;
+            return Some(full);
         }
         let block = ctx.map(CommitContext::render_plain).unwrap_or_default();
         let block_room = room.saturating_sub(message.len()).max(room / 4);
         let block = cut(&block, block_room);
         let message = cut(message, room.saturating_sub(block.len()));
         let text = format!("{message}{block}");
-        debug_assert!(room < 2 * MARKER_MAX || text.len() <= room);
+        debug_assert!(text.len() <= room);
         warn!(
             prompt_bytes = full.len(),
             sent_bytes = text.len(),
             max_input_tokens = self.max_input_tokens,
             "LLM prompt over the input budget; sending it truncated (#178)"
         );
-        Cow::Owned(text)
+        Some(Cow::Owned(text))
     }
 }
 
@@ -147,11 +168,26 @@ fn cut(text: &str, max: usize) -> Cow<'_, str> {
 
 impl LlmClassifier {
     /// Cut every prompt this classifier sends to `max_input_tokens`
-    /// estimated tokens (#178); see [`PromptBudget`]. The default is
-    /// [`LLM_DEFAULT_MAX_INPUT_TOKENS`].
-    pub fn with_max_input_tokens(mut self, max_input_tokens: usize) -> Self {
-        self.budget = PromptBudget::new(max_input_tokens);
+    /// estimated tokens (#178); see [`PromptBudget`]. `None` keeps the
+    /// provider's default, see [`Self::prompt_budget`].
+    pub fn with_max_input_tokens(mut self, max_input_tokens: Option<usize>) -> Self {
+        self.budget = max_input_tokens.map(PromptBudget::new);
         self
+    }
+
+    /// The budget this classifier cuts prompts to (#178): the configured one,
+    /// else the default of the source it calls. Bedrock and the Anthropic API
+    /// serve 200k-token Claude windows; every other endpoint is treated as
+    /// OpenAI-compatible.
+    /// Test: `llm_budget_tests::claude_sources_send_150_kb_whole_and_openai_compat_cuts_it`.
+    pub fn prompt_budget(&self) -> PromptBudget {
+        self.budget.unwrap_or_else(|| {
+            PromptBudget::for_source(&match self.provider_label() {
+                "bedrock" => LlmSource::Bedrock,
+                "anthropic-api" => LlmSource::AnthropicApi,
+                _ => LlmSource::Openrouter,
+            })
+        })
     }
 }
 
@@ -160,18 +196,56 @@ mod tests {
     use super::*;
     use crate::classify::tiers::llm::SYSTEM_PROMPT;
 
-    /// Why (#178): the default must fit the smallest default model window
-    /// (128k, `gpt-4o-mini`) and stay under Claude's 200k with room for
-    /// the reply.
-    /// What: the default is 100k estimated tokens at one byte a token.
+    /// Why (#178): each default must fit its source's model window with
+    /// room for the reply: 128k for `gpt-4o-mini`, 200k for Claude.
+    /// What: at one byte a token, OpenAI-compatible sources default to 100k
+    /// and Bedrock and the Anthropic API to 190k, which leaves room for the
+    /// 2,048-token reply ceiling and the framing allowance.
     /// Test: this test.
     #[test]
     fn default_budget_fits_every_default_model() {
         assert_eq!(BYTES_PER_TOKEN, 1, "tokens <= bytes is the bound relied on");
-        let tokens = PromptBudget::default().max_input_tokens();
-        assert_eq!(tokens, 100_000);
-        // Half of a 200k window, so also under the 128k one.
-        assert!(tokens <= 200_000 / 2, "{tokens}");
+        let openai = PromptBudget::for_source(&LlmSource::Openrouter).max_input_tokens();
+        assert_eq!(openai, PromptBudget::default().max_input_tokens());
+        assert_eq!(openai, 100_000);
+        assert!(openai + 2_048 + FRAMING_TOKENS <= 128_000, "{openai}");
+        for claude in [LlmSource::Bedrock, LlmSource::AnthropicApi] {
+            let tokens = PromptBudget::for_source(&claude).max_input_tokens();
+            assert_eq!(tokens, 190_000, "{claude:?}");
+            assert!(tokens + 2_048 + FRAMING_TOKENS <= 200_000, "{tokens}");
+        }
+    }
+
+    /// Why (#178): a budget the system prompt nearly fills must send
+    /// nothing rather than a marker-only prompt whose verdict is stored.
+    /// What: a budget leaving one byte under [`LLM_MIN_INPUT_ROOM_TOKENS`]
+    /// of room returns `None`; one leaving exactly that room returns text;
+    /// a classifier with such a budget reports a failed call and sends no
+    /// request.
+    /// Test: this test.
+    #[tokio::test]
+    async fn room_under_the_floor_sends_nothing() {
+        let fixed = SYSTEM_PROMPT.len() + USER_PREFIX.len() + FRAMING_TOKENS;
+        let at_floor = PromptBudget::new(fixed + LLM_MIN_INPUT_ROOM_TOKENS);
+        assert!(at_floor.fit(SYSTEM_PROMPT, "fix: a", None).is_some());
+        let under = PromptBudget::new(fixed + LLM_MIN_INPUT_ROOM_TOKENS - 1);
+        assert!(under.fit(SYSTEM_PROMPT, "fix: a", None).is_none());
+        assert!(PromptBudget::new(0)
+            .fit(SYSTEM_PROMPT, "fix: a", None)
+            .is_none());
+
+        let server = wiremock::MockServer::start().await;
+        let llm = LlmClassifier::new("m", Some("sk-test".to_string()))
+            .with_endpoint(format!("{}/v1/chat/completions", server.uri()))
+            .with_max_input_tokens(Some(under.max_input_tokens()));
+        let call = llm.classify_detailed("fix: a").await;
+        assert_eq!(
+            call.outcome,
+            crate::classify::tiers::llm_prompt::LlmOutcome::Failed
+        );
+        assert!(call.verdict.is_none());
+        let sent = server.received_requests().await.expect("recording on");
+        assert!(sent.is_empty(), "{} requests sent", sent.len());
     }
 
     /// Why (#178): a byte-count cut must never split a character, at any
@@ -202,8 +276,8 @@ mod tests {
     #[test]
     fn bedrock_request_fits_the_budget() {
         let message = "chore: vendored lockfile ".repeat(42_000);
-        let budget = PromptBudget::default();
-        let text = budget.fit(SYSTEM_PROMPT, &message, None);
+        let budget = PromptBudget::for_source(&LlmSource::Bedrock);
+        let text = budget.fit(SYSTEM_PROMPT, &message, None).expect("room");
         let req = crate::classify::tiers::bedrock::converse_request("m", SYSTEM_PROMPT, &text);
         let json = serde_json::to_value(&req).expect("serialize");
         let sent: usize = json["messages"]
@@ -215,39 +289,51 @@ mod tests {
         assert!(sent <= budget.max_input_tokens(), "{sent} bytes sent");
         assert!(text.contains(MARKER_OPEN), "marker present");
         let whole = PromptBudget::new(usize::MAX).fit(SYSTEM_PROMPT, &message, None);
-        assert!(matches!(whole, Cow::Borrowed(m) if m == message));
+        assert!(matches!(whole, Some(Cow::Borrowed(m)) if m == message));
     }
 
     /// Why (#178): `llm.max_input_tokens` must reach the classifier, and a
     /// small budget must cut what the default sends whole.
-    /// What: `max_input_tokens: 1000` parses from YAML, an absent key is the
-    /// default, and `from_llm_config` builds a classifier with that budget.
-    /// A 4 KB message fits the default but is cut to fit 1,000 bytes.
+    /// What: `max_input_tokens: 10000` parses from YAML and
+    /// `from_llm_config` builds a classifier with that budget; an absent key
+    /// keeps the source's default. A 40 KB message fits the default but is
+    /// cut to fit 10,000 bytes.
     /// Test: this test.
     #[tokio::test]
     async fn configured_budget_is_the_one_applied() {
         use crate::core::config::LlmConfig;
         use crate::core::creds::CredentialSource;
         let cfg: LlmConfig =
-            serde_yaml::from_str("source: openrouter\napi_key_env: K\nmax_input_tokens: 1000\n")
+            serde_yaml::from_str("source: openrouter\napi_key_env: K\nmax_input_tokens: 10000\n")
                 .expect("parse");
         let unset: LlmConfig = serde_yaml::from_str("source: openrouter\n").expect("parse");
-        assert_eq!(unset.max_input_tokens, LLM_DEFAULT_MAX_INPUT_TOKENS);
+        assert_eq!(unset.max_input_tokens, None);
         let creds = CredentialSource::fixed([("K", "sk-test")]); // pragma: allowlist secret
         let llm = LlmClassifier::from_llm_config_with_creds(&cfg, "m", &creds)
             .await
             .expect("build");
-        assert_eq!(llm.budget, PromptBudget::new(1_000));
+        assert_eq!(llm.prompt_budget(), PromptBudget::new(10_000));
+        let unset_cfg = LlmConfig {
+            api_key_env: "K".to_string(),
+            ..unset
+        };
+        let llm = LlmClassifier::from_llm_config_with_creds(&unset_cfg, "m", &creds)
+            .await
+            .expect("build");
+        assert_eq!(llm.prompt_budget(), PromptBudget::default());
 
-        let message = "x".repeat(4_000);
-        assert_eq!(PromptBudget::default().fit("sys", &message, None), message);
-        let text = PromptBudget::new(1_000).fit("sys", &message, None);
+        let message = "x".repeat(40_000);
+        let whole = PromptBudget::default().fit("sys", &message, None);
+        assert_eq!(whole.as_deref(), Some(message.as_str()));
+        let text = PromptBudget::new(10_000)
+            .fit("sys", &message, None)
+            .expect("room");
         assert!(
-            3 + USER_PREFIX.len() + text.len() <= 1_000,
+            3 + USER_PREFIX.len() + text.len() <= 10_000,
             "{}",
             text.len()
         );
         let (kept, note) = text.split_once(MARKER_OPEN).expect("marker");
-        assert_eq!(note, format!("{}{MARKER_CLOSE}", 4_000 - kept.len()));
+        assert_eq!(note, format!("{}{MARKER_CLOSE}", 40_000 - kept.len()));
     }
 }

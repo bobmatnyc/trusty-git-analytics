@@ -126,8 +126,9 @@ pub struct LlmClassifier {
     /// #111: Jev backend; when `Some`, [`Self::classify_detailed`] routes
     /// through it and nothing else sees the message.
     pub(super) jev: Option<JevClassifier>,
-    /// #178: every prompt but Jev's is cut to this; see [`PromptBudget`].
-    pub(super) budget: PromptBudget,
+    /// #178: every prompt but Jev's is cut to this; `None` uses the
+    /// provider's default. See `LlmClassifier::prompt_budget`.
+    pub(super) budget: Option<PromptBudget>,
 }
 
 /// The model a source uses when neither `llm.model` nor the legacy
@@ -163,7 +164,7 @@ impl LlmClassifier {
             system_prompt: SYSTEM_PROMPT.to_string(),
             effort: None,
             jev: None,
-            budget: PromptBudget::default(),
+            budget: None,
         }
     }
 
@@ -443,7 +444,7 @@ impl LlmClassifier {
             // #111: see `jev_glue::LlmClassifier::build_jev`.
             LlmSource::Jev => Self::build_jev(cfg, model, creds),
         };
-        // #178: `llm.max_input_tokens` caps every prompt this classifier sends.
+        // #178: a set `llm.max_input_tokens` overrides the source's default.
         built.map(|c| c.with_max_input_tokens(cfg.max_input_tokens))
     }
 
@@ -571,8 +572,12 @@ impl LlmClassifier {
         if let Some(jev) = &self.jev {
             return jev.classify_with_context(message, context).await;
         }
-        // #178: cut to the input budget; byte-identical when it fits.
-        let message = self.budget.fit(&self.system_prompt, message, context);
+        // #178: cut to the input budget; byte-identical when it fits, and
+        // nothing sent when the budget leaves no room for the commit.
+        let budget = self.prompt_budget();
+        let Some(message) = budget.fit(&self.system_prompt, message, context) else {
+            return LlmCall::failed(None);
+        };
         let message = message.as_ref();
         let (text, usage) = if let Some(bedrock) = &self.bedrock {
             bedrock.complete(&self.system_prompt, message).await

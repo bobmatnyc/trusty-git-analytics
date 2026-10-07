@@ -226,17 +226,48 @@ pub const LLM_CONTEXT_DEFAULT_MAX_PATHS: usize = 30;
 /// Default for [`LlmConfig::context_max_path_bytes`] (#111).
 pub const LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES: usize = 2048;
 
-/// Default for [`LlmConfig::max_input_tokens`] (#178).
+/// Default for [`LlmConfig::max_input_tokens`] on `openrouter` and every
+/// OpenAI-compatible endpoint (#178).
 ///
 /// Why: a commit message of several hundred kilobytes made every classify
-/// call for that commit fail as over the model's 200k-token context.
+/// call for that commit fail as over the model's context window.
 /// What: 100,000 estimated tokens. The estimate counts one token per byte,
 /// an upper bound (see `classify::tiers::llm_budget::BYTES_PER_TOKEN`), so a
-/// prompt at the cap is at most 100k real tokens. That fits a 128k-token
-/// window (`gpt-4o-mini`, the OpenRouter default) and leaves half of a
-/// 200k-token Claude window for the reply.
+/// prompt at the cap is at most 100k real tokens, which fits a 128k-token
+/// window (`gpt-4o-mini`, the OpenRouter default).
 /// Test: `classify::tiers::llm_budget::tests::default_budget_fits_every_default_model`.
 pub const LLM_DEFAULT_MAX_INPUT_TOKENS: usize = 100_000;
+
+/// Default for [`LlmConfig::max_input_tokens`] on `bedrock` and
+/// `anthropic-api` (#178).
+///
+/// Why: both serve Claude models with a 200k-token window; a 100k default
+/// cut prompts that 10.3.2 sent successfully.
+/// What: 190,000 estimated tokens, at most 190k real ones, leaving 10k of
+/// the window for the reply (at most 2,048 tokens) and request framing.
+/// Test: `classify::tiers::llm_budget::tests::default_budget_fits_every_default_model`,
+/// `classify::tiers::llm_budget_tests::claude_sources_send_150_kb_whole_and_openai_compat_cuts_it`.
+pub const LLM_CLAUDE_DEFAULT_MAX_INPUT_TOKENS: usize = 190_000;
+
+/// Room, in estimated tokens, that [`LlmConfig::max_input_tokens`] must
+/// leave for the commit message after the system prompt (#178).
+pub const LLM_MIN_INPUT_ROOM_TOKENS: usize = 4_096;
+
+/// Smallest [`LlmConfig::max_input_tokens`] a config may set (#178): the
+/// [`LLM_MIN_INPUT_ROOM_TOKENS`] of room plus as much again for the system
+/// prompt and framing. The built-in system prompt is under 1,000 bytes; a
+/// longer configured one is checked again per call.
+pub const LLM_MIN_MAX_INPUT_TOKENS: usize = 2 * LLM_MIN_INPUT_ROOM_TOKENS;
+
+/// The input budget a source uses when `llm.max_input_tokens` is unset
+/// (#178): [`LLM_CLAUDE_DEFAULT_MAX_INPUT_TOKENS`] for `bedrock` and
+/// `anthropic-api`, else [`LLM_DEFAULT_MAX_INPUT_TOKENS`].
+pub fn default_max_input_tokens_for(source: &LlmSource) -> usize {
+    match source {
+        LlmSource::Bedrock | LlmSource::AnthropicApi => LLM_CLAUDE_DEFAULT_MAX_INPUT_TOKENS,
+        LlmSource::Openrouter | LlmSource::Jev => LLM_DEFAULT_MAX_INPUT_TOKENS,
+    }
+}
 
 /// Top-level LLM configuration section (`llm:` in YAML).
 ///
@@ -337,11 +368,13 @@ pub struct LlmConfig {
     pub context_max_path_bytes: usize,
 
     /// Most estimated input tokens one LLM prompt may carry, system prompt
-    /// included (#178; default [`LLM_DEFAULT_MAX_INPUT_TOKENS`]). A longer
-    /// prompt is cut, message first, and marked `[truncated N bytes]`; a
-    /// prompt inside the budget is sent unchanged. Ignored by `jev`.
-    #[serde(default = "default_max_input_tokens")]
-    pub max_input_tokens: usize,
+    /// included (#178). Unset (the default) uses the source's default, see
+    /// [`default_max_input_tokens_for`]. A longer prompt is cut, message
+    /// first, and marked `[truncated N bytes]`; a prompt inside the budget
+    /// is sent unchanged. Below [`LLM_MIN_MAX_INPUT_TOKENS`] the config
+    /// load fails. Ignored by `jev`.
+    #[serde(default)]
+    pub max_input_tokens: Option<usize>,
 }
 
 fn default_context_max_paths() -> usize {
@@ -350,10 +383,6 @@ fn default_context_max_paths() -> usize {
 
 fn default_context_max_path_bytes() -> usize {
     LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES
-}
-
-fn default_max_input_tokens() -> usize {
-    LLM_DEFAULT_MAX_INPUT_TOKENS
 }
 
 fn default_api_key_env() -> String {
@@ -410,6 +439,29 @@ pub(super) fn reject_misplaced_top_level_keys(text: &str) -> Result<()> {
 }
 
 impl LlmConfig {
+    /// Reject an `llm.max_input_tokens` below [`LLM_MIN_MAX_INPUT_TOKENS`].
+    ///
+    /// Why (#178): a budget of 0, or one the system prompt nearly fills,
+    /// would cut every commit to its truncation marker and still store the
+    /// model's verdict on it.
+    /// What: unset passes; a set value under the floor is
+    /// [`TgaError::ConfigError`] naming the key, the value and the minimum.
+    /// Test: `tests::max_input_tokens_below_the_floor_fails_the_config_load`.
+    ///
+    /// # Errors
+    ///
+    /// [`TgaError::ConfigError`] as above.
+    pub fn validate_input_budget(&self) -> Result<()> {
+        match self.max_input_tokens {
+            Some(n) if n < LLM_MIN_MAX_INPUT_TOKENS => Err(TgaError::ConfigError(format!(
+                "llm.max_input_tokens is {n}; the minimum is {LLM_MIN_MAX_INPUT_TOKENS} \
+                 ({LLM_MIN_INPUT_ROOM_TOKENS} tokens of room for the commit after the \
+                 system prompt and framing)"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
     /// The environment variable the configured source reads its key from.
     ///
     /// Why (#111): `api_key_env` defaults to `OPENROUTER_API_KEY` for every
@@ -483,7 +535,7 @@ impl Default for LlmConfig {
             context: Vec::new(),
             context_max_paths: LLM_CONTEXT_DEFAULT_MAX_PATHS,
             context_max_path_bytes: LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES,
-            max_input_tokens: LLM_DEFAULT_MAX_INPUT_TOKENS,
+            max_input_tokens: None,
         }
     }
 }
@@ -726,6 +778,38 @@ mod tests {
             let e = load(yaml).expect_err(yaml).to_string();
             assert!(e.contains(named), "{yaml:?}: {e}");
         }
+    }
+
+    /// Why (#178): a budget too small to hold a commit would send only the
+    /// truncation marker and still store a verdict.
+    /// What: 0 and one token under the floor fail the load with a config
+    /// error naming the key and the minimum; the floor itself and an unset
+    /// key load, the unset key as `None`.
+    /// Test: this test.
+    #[test]
+    fn max_input_tokens_below_the_floor_fails_the_config_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.yaml");
+        let load = |yaml: &str| {
+            std::fs::write(&path, yaml).expect("write");
+            crate::core::config::Config::load(&path)
+        };
+        for n in [0, LLM_MIN_MAX_INPUT_TOKENS - 1] {
+            let yaml = format!("llm:\n  source: bedrock\n  max_input_tokens: {n}\n");
+            let e = load(&yaml).expect_err(&yaml);
+            assert!(matches!(e, TgaError::ConfigError(_)), "{e:?}");
+            let e = e.to_string();
+            assert!(e.contains("llm.max_input_tokens"), "{e}");
+            assert!(e.contains(&LLM_MIN_MAX_INPUT_TOKENS.to_string()), "{e}");
+        }
+        let at_floor = format!("llm:\n  max_input_tokens: {LLM_MIN_MAX_INPUT_TOKENS}\n");
+        let cfg = load(&at_floor).unwrap_or_else(|e| panic!("at the floor: {e}"));
+        assert_eq!(
+            cfg.llm.expect("llm").max_input_tokens,
+            Some(LLM_MIN_MAX_INPUT_TOKENS)
+        );
+        let unset = load("llm:\n  source: bedrock\n").expect("unset loads");
+        assert_eq!(unset.llm.expect("llm").max_input_tokens, None);
     }
 
     /// #111: a duplicate key the typed parse accepts must not skip the check.

@@ -60,9 +60,23 @@ pub use buckets::{
     Bucket, BucketMap, BucketSource, DEFAULT_BUCKETS, MAP_ONLY_CATEGORIES, NO_BUCKET_LABELS,
 };
 pub use llm::{
-    JevOptions, LlmConfig, LlmContextItem, LlmEffort, LlmFallbackScope, LlmSource, JEV_API_KEY_ENV,
-    JEV_DEFAULT_BUDGET_USD, JEV_DEFAULT_NAME_MATCHER_BYTES, LLM_CONTEXT_DEFAULT_MAX_PATHS,
-    LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES, LLM_DEFAULT_MAX_INPUT_TOKENS,
+    // #178: the per-source input budget defaults and the load-time floor.
+    default_max_input_tokens_for,
+    JevOptions,
+    LlmConfig,
+    LlmContextItem,
+    LlmEffort,
+    LlmFallbackScope,
+    LlmSource,
+    JEV_API_KEY_ENV,
+    JEV_DEFAULT_BUDGET_USD,
+    JEV_DEFAULT_NAME_MATCHER_BYTES,
+    LLM_CLAUDE_DEFAULT_MAX_INPUT_TOKENS,
+    LLM_CONTEXT_DEFAULT_MAX_PATHS,
+    LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES,
+    LLM_DEFAULT_MAX_INPUT_TOKENS,
+    LLM_MIN_INPUT_ROOM_TOKENS,
+    LLM_MIN_MAX_INPUT_TOKENS,
 };
 pub use repo_map::{
     RepoMapConfig, RepoMapMode, REPO_MAP_DEFAULT_EXCEPTIONS, REPO_MAP_DEFAULT_MIN_CONFIDENCE,
@@ -1575,6 +1589,11 @@ impl Config {
         }
         cfg.source_path = Some(resolved);
         cfg.validate_ticket_regexes()?;
+        // #178: a budget too small to hold a commit fails the load.
+        cfg.llm
+            .as_ref()
+            .map(LlmConfig::validate_input_budget)
+            .transpose()?;
         Ok(cfg)
     }
 
