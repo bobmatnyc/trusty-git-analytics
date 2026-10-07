@@ -42,6 +42,18 @@ developer_aliases:
 
 classification:
   rules_file: "./configs/my-rules.yaml"  # optional
+  # Repo -> category hard override (#158). Every non-merge commit of a listed
+  # repository gets the category, ahead of every rule and the LLM, and is
+  # never sent to the LLM. Keys are the stored repository name
+  # (repositories[].name, else the path basename), matched exactly and
+  # case-sensitively; each category must be one your rules files define.
+  # repo_categories:
+  #   mcp-services: internal_tooling
+  #   duetto-dashboard: internal_tooling
+  #   cs-system-audit: internal_tooling
+  #   duetto-pa-agents: internal_tooling
+  #   hr-skills: internal_tooling
+  #   duetto-playwright-e2e: qa
 
 output:
   directory: "./reports"

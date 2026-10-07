@@ -531,6 +531,53 @@ the console.
   question: its categories reach Jev only through the rules, as they reach
   Bedrock and the other sources.
 
+### `classification.repo_categories` — repo → category hard override (#158)
+
+Some repositories map to one category for every commit (owner ruling
+2026-10-07). `classification.repo_categories` maps a repository name to a
+category; every non-merge commit of a mapped repository gets that category.
+
+```yaml
+classification:
+  rules_files: [./rules.yaml]
+  repo_categories:
+    mcp-services: internal_tooling
+    duetto-dashboard: internal_tooling
+    cs-system-audit: internal_tooling
+    duetto-pa-agents: internal_tooling
+    hr-skills: internal_tooling
+    duetto-playwright-e2e: qa
+```
+
+- **A hard override.** A mapped commit gets the category at confidence 1.0
+  ahead of every other tier: the manual override
+  (`classification_overrides`), the exact and regex rules (a security fix
+  included), the issue-type and JIRA project tiers, external sources,
+  weighted sum, fuzzy and the LLM.
+- **No LLM spend.** A mapped commit is never sent to the LLM fallback, nor
+  by `tga classify --backfill-complexity`; no `llm_usage` row is written
+  for it.
+- **Method `repo_map`.** The `classifications.method` column, the
+  `tga classify` "by method" counts, and `tga eval`'s per-method precision
+  all show `repo_map`. The eval rule id is `repo_map:<repository>`.
+- **Matching.** A key is the name tga stores in `commits.repository`:
+  `repositories[].name`, else the basename of `repositories[].path`. It
+  matches the whole name, case-sensitively: `mcp-services` does not match
+  `MCP-Services` or `mcp-services-v2`. A key holding `*` is an error; there
+  are no globs.
+- **Merges.** A merge commit is not mapped. It keeps its existing handling:
+  the rules decide it and it never reaches the LLM.
+- **Checks.** Each category must be one the config knows: under
+  `extend_defaults: false`, the rules files' categories and `categories:`
+  entries (the set the LLM tier is restricted to); otherwise the taxonomy
+  plus every rule category. Category names match case-insensitively and are
+  stored in the config's spelling. An unknown category is an error naming
+  the repository and the category, raised when `tga classify`,
+  `tga eval sample` or `tga eval repredict` starts, before any write.
+- **Unmapped repositories** classify exactly as before.
+- Before #158 this key was documented as a last-resort per-repo fallback
+  with glob keys, but `tga classify` never applied it.
+
 ---
 
 ### `repositories[]` — RepositoryConfig

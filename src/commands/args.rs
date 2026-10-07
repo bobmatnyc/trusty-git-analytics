@@ -471,8 +471,9 @@ pub struct ClassifyArgs {
     /// Backfill missing complexity scores (1–5) for already-classified
     /// commits via the LLM, without re-running the full classification.
     ///
-    /// Only rows with `complexity IS NULL` and a non-`exact_rule` method
-    /// are updated; category, confidence, and method are left untouched.
+    /// Only rows with `complexity IS NULL` and a method other than
+    /// `exact_rule` or `repo_map` (#158) are updated; category, confidence,
+    /// and method are left untouched.
     /// Merge commits are skipped; they never reach the LLM.
     #[arg(long)]
     pub backfill_complexity: bool,

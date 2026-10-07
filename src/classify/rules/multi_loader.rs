@@ -17,29 +17,13 @@
 //!     - ./project-overrides.yaml   # wins over base on duplicate IDs
 //! ```
 //!
-//! ## Repo-category fallback (`repo_categories`)
+//! ## Retired repo-category fallback
 //!
-//! [`ClassificationConfig::repo_categories`](crate::core::config::ClassificationConfig::repo_categories) is a map from repo name (or a
-//! simple `*`-glob) to a default subcategory name. When the classification
-//! cascade produces an `"uncategorized"` / `"catch-all"` verdict OR a verdict
-//! below the configured `confidence_threshold`, and the commit's repository
-//! matches one of the configured entries, the subcategory is replaced with the
-//! configured default and the top-level category is resolved through the
-//! taxonomy registry.
-//!
-//! **Precedence** (lowest to highest — later tiers win):
-//! 1. Tier 0 manual overrides (highest)
-//! 2. Exact-keyword / conventional-commit prefix rules (Tier 1)
-//! 3. Regex tier (Tier 2)
-//! 4. Weighted-sum tier (Tier 2.5)
-//! 5. Fuzzy tier (Tier 3)
-//! 6. Issue-type / JIRA-project / external-source tiers (Tier 1.5, 1.6, 1.7)
-//! 7. LLM fallback (Tier 4)
-//! 8. **`repo_categories` fallback** ← fires ONLY for uncategorized or
-//!    confidence < threshold after the full cascade (Tier 5 / last resort)
-//! 9. Catch-all rule result (uncategorized/maintenance, confidence 0.3)
-//!
-//! A confidently-classified commit is NEVER overridden by `repo_categories`.
+//! [`apply_repo_category_fallback`] and [`repo_matches`] implement a
+//! last-resort per-repo fallback with glob keys. No production path calls
+//! them. #158: [`ClassificationConfig::repo_categories`](crate::core::config::ClassificationConfig::repo_categories)
+//! is now a hard override with exact keys, applied by
+//! `classify::pipeline_repo_map`, not by these functions.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -125,7 +109,10 @@ pub fn repo_matches(repo_name: &str, pattern: &str) -> bool {
     repo_name == pattern
 }
 
-/// Apply the `repo_categories` fallback tier to a classification result.
+/// Apply the retired repo-category fallback to a classification result.
+///
+/// #158: not called by `tga classify`; `classification.repo_categories` is a
+/// hard override now (see the module doc).
 ///
 /// Why: reduces the 'uncategorized' rate for known repos without LLM cost.
 /// What: when `result` is uncategorized OR its confidence is below

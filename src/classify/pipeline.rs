@@ -610,6 +610,8 @@ impl ClassificationPipeline {
         // 2. Read candidate commits. The default flow returns only the
         //    rows that lack a verdict; `--force` widens this to every row
         //    (optionally bounded by `--since`/`--until`/`--repos`).
+        // #158: a bad repo map stops the run before any read or write.
+        let repo_map = self.repo_category_map()?;
         if let Some(shas) = &self.shas {
             super::pipeline_db::check_shas_exist(db, shas)?;
         }
@@ -663,7 +665,11 @@ impl ClassificationPipeline {
 
         // 3a. Tier 0 (override) pre-pass — done serially against the live
         //     DB connection. Commits with a hit skip the parallel cascade.
-        let overrides = super::pipeline_db::read_overrides(db, &commits)?;
+        let mut overrides = super::pipeline_db::read_overrides(db, &commits)?;
+        // #158: the repo map outranks every tier, the manual override included.
+        // Held with the overrides, it skips the external sources too;
+        // `llm_eligible` keeps it from the LLM.
+        overrides.extend(repo_map.verdicts(&commits, engine.taxonomy()));
 
         // 3b. Tiers 1–3 in parallel for commits without an override.
         let pairs: Vec<(&str, bool)> = commits

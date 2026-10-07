@@ -95,7 +95,10 @@ should use the vocabulary `tga eval sample` prints.
    the config still reaches that tier: manual overrides always; LLM fallbacks
    when the config enables the LLM tier and the re-derived confidence is at
    or below `llm_fallback_threshold`; external-source verdicts when an
-   external source is configured; repo fallbacks never (#111). The
+   external source is configured; repo fallbacks never (#111). A non-merge
+   commit of a repository in `classification.repo_categories` takes the repo
+   map's category with method `repo_map` and rule id `repo_map:<repository>`,
+   whatever is stored, as `tga classify` would store it (#158). The
    database is opened read-only; the harness refuses a writable handle.
 3. **Strata.** `exact`; `regex_high` (regex, confidence ≥ 0.9); `regex_mid`
    (regex, 0.55–0.7); `regex_other` (other regex bands); `weighted_sum`;

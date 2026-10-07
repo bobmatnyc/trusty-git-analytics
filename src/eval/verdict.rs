@@ -44,7 +44,9 @@ pub(crate) struct Resolved {
 /// configured and
 /// `no_external` is off. The stored verdict does not say which source produced
 /// it, so any configured source keeps it. A stored repo fallback is never
-/// carried: `tga classify` never applies one.
+/// carried: `tga classify` never applies one. #158: a non-merge commit of a
+/// repository in `classification.repo_categories` resolves to the repo map,
+/// whatever is stored, as `tga classify` would store it.
 /// Test: `tests/eval_harness.rs::repredict_carries_a_stored_verdict_only_when_its_tier_is_reached`,
 /// `tests/eval_harness.rs::repredict_never_carries_an_llm_verdict_for_a_merge`.
 pub(crate) struct CarryPolicy {
@@ -54,6 +56,8 @@ pub(crate) struct CarryPolicy {
     /// #131: the LLM's category set when the rules restrict it.
     llm_categories: Option<Vec<String>>,
     external: bool,
+    /// #158: the checked `classification.repo_categories` hard override.
+    repo_map: crate::classify::pipeline_repo_map::RepoCategoryMap,
 }
 
 impl CarryPolicy {
@@ -64,10 +68,12 @@ impl CarryPolicy {
     /// Returns an error if a configured rules file fails to load.
     pub(crate) fn from_config(config: &Config) -> crate::classify::Result<Self> {
         let c = config.classification.as_ref();
-        let llm_categories = crate::classify::ClassificationPipeline::new(config.clone())
+        let pipeline = crate::classify::ClassificationPipeline::new(config.clone());
+        let llm_categories = pipeline
             .llm_categories()?
             .map(|cats| cats.into_iter().map(|c| c.name).collect());
         Ok(Self {
+            repo_map: pipeline.repo_category_map()?,
             llm_categories,
             use_llm: config.llm.is_some() || c.is_some_and(|c| c.use_llm),
             llm_threshold: c.map_or(0.65, |c| c.llm_fallback_threshold),
@@ -85,6 +91,10 @@ impl CarryPolicy {
         t: &TracedVerdict,
         is_merge: bool,
     ) -> bool {
+        // #158: the repo map outranks every stored verdict.
+        if t.trace.tier == TraceTier::RepoMap {
+            return false;
+        }
         match stored {
             TraceTier::Manual => true,
             // #111: `tga classify` never sends a merge to the LLM.
@@ -154,6 +164,11 @@ pub(crate) fn resolve_verdicts(
         .iter()
         .zip(traced)
         .map(|(c, t)| {
+            // #158: a mapped repo's commit takes the repo map's verdict.
+            let t = policy
+                .repo_map
+                .traced(&c.repo, c.is_merge, &c.message, engine.taxonomy())
+                .unwrap_or(t);
             let mut superseded = false;
             if let Some((cat, conf, method)) = &c.stored {
                 match stored_override(method, t.trace.tier) {
@@ -184,4 +199,81 @@ pub(crate) fn resolve_verdicts(
         })
         .collect();
     (resolved, drifted)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+    use crate::classify::ClassificationPipeline;
+    use crate::core::config::ClassificationConfig;
+
+    fn commit(repo: &str, stored: Option<(&str, &str)>) -> CommitRow {
+        CommitRow {
+            id: 1,
+            sha: "sha-a".into(),
+            repo: repo.into(),
+            author_email: "a@x".into(),
+            timestamp: "2024-01-01T00:00:00Z".into(),
+            ts: None,
+            message: "fix: close the security hole".into(),
+            is_merge: false,
+            files: 1,
+            insertions: 1,
+            deletions: 0,
+            ticket_id: None,
+            stored: stored.map(|(c, m)| (c.to_string(), 0.9, m.to_string())),
+        }
+    }
+
+    /// Why (#158 criterion 9): `tga eval sample` and `repredict` must reach
+    /// the verdict `tga classify` stores, so a mapped repo's commit resolves
+    /// to the repo map and shows as `repo_map` in the per-method breakdown,
+    /// ahead of a rule match and of a stored manual verdict.
+    /// What: a `fix: security` message, which the rules call `security`, in
+    /// a mapped repo (with and without a stored manual verdict) and in an
+    /// unmapped one.
+    /// Test: this test.
+    #[test]
+    fn a_mapped_repo_resolves_to_the_repo_map_tier() {
+        let mut rules = tempfile::Builder::new()
+            .suffix(".yaml")
+            .tempfile()
+            .expect("tempfile");
+        rules
+            .write_all(
+                b"extend_defaults: false\nrules:\n  - id: sec\n    category: security\n    \
+                  keywords: [\"security\"]\ncategories:\n  - name: qa\n",
+            )
+            .expect("write");
+        let config = Config {
+            classification: Some(ClassificationConfig {
+                rules_files: vec![rules.path().to_path_buf()],
+                repo_categories: [("e2e".to_string(), "qa".to_string())].into(),
+                ..ClassificationConfig::default()
+            }),
+            ..Config::default()
+        };
+        let engine = ClassificationPipeline::new(config.clone())
+            .build_rule_engine()
+            .expect("engine");
+        let policy = CarryPolicy::from_config(&config).expect("policy");
+        let rows = [
+            commit("e2e", None),
+            commit("e2e", Some(("security", "manual"))),
+            commit("api", None),
+        ];
+        let refs: Vec<&CommitRow> = rows.iter().collect();
+        let (resolved, _) = resolve_verdicts(&engine, &policy, &refs);
+        for r in &resolved[..2] {
+            assert_eq!((r.tier.as_str(), r.category.as_str()), ("repo_map", "qa"));
+            assert_eq!(r.rule_id, "repo_map:e2e");
+            assert!(!r.carried);
+        }
+        assert_eq!(
+            (resolved[2].tier.as_str(), resolved[2].category.as_str()),
+            ("exact", "security")
+        );
+    }
 }
