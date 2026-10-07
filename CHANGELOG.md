@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.3.0] — 2026-10-07
+
+### Breaking
+
+- A `classification.repo_categories` key with a `/` in its repository part (e.g. `acme-mono/api`) now fails `tga classify`, `tga eval` and `tga rules test` before any write, unless it equals a configured `repositories[].name` (`acme-org/widget`). So do an empty repository or prefix around a `:`, and two keys naming the same repository and prefix. A key holding `:` is now read as `<repo>:<prefix>`, not as a repository name, so a 10.2.0 map keyed by a repository name containing `:` no longer matches it (#167).
+
+### Added
+
+- `classification.repo_map` selects how `classification.repo_categories` applies. `mode: override` (the default) is the 10.2.0 hard override, so a config without the block behaves as before. `mode: floor` makes the mapped category the default: the cascade, LLM included, still runs for a mapped commit, and its verdict is kept only when its category is in `exceptions` (default `qa`, `security`, `devops`, `bug_fix`, compared through the taxonomy's canonical names so `bug_fix` matches the built-in rules' `bugfix`) at or above `min_confidence` (default `0.8`). An unknown name in a written `exceptions` list is a config error. `tga eval sample` and `repredict` apply the same rule (#167).
+- A `classification.repo_categories` key may be `<repo>:<prefix>`, mapping a monorepo by subdirectory from the commit's changed paths. The longest matching prefix wins over a bare `<repo>` key; a commit spanning several keys takes the category most of its paths resolve to, with ties going to the longest key, then the alphabetically first category (#167).
+- `tga classify`, `tga eval sample` and `tga eval repredict` warn once per run for each `repo_categories` key that matches no stored repository, or whose prefix matches no stored path (#167).
+
+### Fixed
+
+- `tga rules test` now classifies with the engine `tga classify` builds: it honours `classification.weighted_sum`, `confidence_threshold` and JIRA mapping confidence, checks `classification.repo_categories` as `classify` does, and says whether the LLM tier is enabled when no tier matches. Before, `weighted_sum.enabled: false` still reported a `weighted_sum` verdict (#165).
+- The weighted-sum tier no longer writes a category outside a custom taxonomy. With `extend_defaults: false`, the active set is the rule categories plus any `categories:` entries, the set the LLM tier is restricted to. A weighted-sum verdict outside it is dropped and the commit falls through to the next tier (the LLM, when enabled, else `uncategorized`); one inside it takes the set's spelling. This holds with or without a `categories:` list: custom-only rule sets without `categories:` no longer receive the built-in names (`feature`, `bugfix`, `chore`, `integration`, `platform`, `docs`, `refactor`, `merge`), and `tga classify --force` changes their stored verdicts. With the built-in taxonomy, verdicts are unchanged (#165).
+- A commit whose weighted-sum verdict is dropped and that no later tier answers is stored like any other miss: `uncategorized`, without the ticket id taken from its message (133 of the 769 changed rows in the classify golden fixture) (#165).
+
 ## [10.2.0] — 2026-10-07
 
 ### Breaking
