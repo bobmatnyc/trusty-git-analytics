@@ -431,7 +431,7 @@ intent is: if you wrote `llm:`, you mean to use it.
 Precedence (#175, tga 10.3.2):
 1. `classification.use_llm: false` → LLM tier **off**, whatever the `llm:`
    section says. tga builds no provider client and makes no LLM call in
-   `tga classify`, `tga analyze`, `tga collect`'s classify step or the
+   `tga classify`, `tga analyze`, the `tga audit` sweep's classify stage or the
    complexity backfill. The run logs at info that the `llm:` section is ignored.
 2. `classification.use_llm: true` → LLM tier on, through the `llm:` section when
    present, else the legacy `classification.llm_provider` fields.

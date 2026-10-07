@@ -204,8 +204,8 @@ async fn use_llm_false_backfill_sends_nothing_to_the_configured_provider() {
 /// that never needs the LLM into an error.
 /// What: for each provider source and for both entry points (classify and
 /// the complexity backfill), an empty database and `use_llm: false`; every
-/// run succeeds and no "LLM provider" line is logged, the line every
-/// provider constructor writes.
+/// run succeeds and no "LLM provider" line is logged; every `llm:`-section
+/// constructor logs one.
 /// Test: this test.
 #[tokio::test]
 #[tracing_test::traced_test]
@@ -282,8 +282,8 @@ fn llm_enabled_honours_an_explicit_false() {
     assert!(ClassificationPipeline::new(no_section("  use_llm: true\n")).llm_enabled());
 }
 
-/// `logs_assert` check: no captured line names a provider. Every provider
-/// constructor logs one.
+/// `logs_assert` check: no captured line names a provider; every
+/// `llm:`-section constructor logs one.
 fn no_provider_line(lines: &[&str]) -> Result<(), String> {
     let hits: Vec<&&str> = lines
         .iter()
