@@ -888,7 +888,7 @@ Tier-0 manual overrides and exact-keyword conventional-commit prefixes (e.g. `fi
 
 **Tier 2 — Regex**: applies pre-compiled regex patterns from the rule set. Handles anchored conventional-commit patterns (`^feat(\([^)]*\))?!?:`) and JIRA ticket IDs (`\b[A-Z][A-Z0-9]+-\d+\b`).
 
-**Tier 2.5 — Weighted Sum** (new in 1.3.0): composes five independent signals into per-category scores and emits a verdict when the argmax score meets the minimum confidence threshold (default 0.55). When the rules files declare their own `categories:` (with `extend_defaults: false`), it answers only with a category they define. See [Weighted-Sum Tier](#weighted-sum-tier-250-new-in-130).
+**Tier 2.5 — Weighted Sum** (new in 1.3.0): composes five independent signals into per-category scores and emits a verdict when the argmax score meets the minimum confidence threshold (default 0.55). With `extend_defaults: false` it answers only with a category the rules files define. See [Weighted-Sum Tier](#weighted-sum-tier-250-new-in-130).
 
 **Tier 3 — Fuzzy heuristics**: detects merge commits (via `is_merge` flag or `Merge pull request` prefix) and reverts (via `Revert` prefix). No external dependencies. Suppressed when `extend_defaults: false`.
 
@@ -996,7 +996,7 @@ Five signals are evaluated independently and their scores are summed per categor
 
 If two or more categories share the exact same top score, the tier returns no verdict (tie-breaking falls through to fuzzy or LLM).
 
-The tier votes among built-in category names (`feature`, `bugfix`, `chore`, `integration`, `platform`, `docs`, `refactor`, `merge`). When the rules files declare their own `categories:` with `extend_defaults: false`, a vote outside that set (rule categories plus `categories:`) is dropped and the commit falls through to the next tier, and a vote inside it takes the set's spelling (#165). A custom-only rules file with no `categories:` still receives the built-in names.
+The tier votes among built-in category names (`feature`, `bugfix`, `chore`, `integration`, `platform`, `docs`, `refactor`, `merge`). With `extend_defaults: false` the rules files define the whole category set: the rule categories plus any `categories:` entries. A vote outside that set is dropped and the commit falls through to the next tier, and a vote inside it takes the set's spelling (#165). This holds with or without a `categories:` list, so a custom-only rule set no longer receives the built-in names, and `tga classify --force` changes verdicts that earlier versions stored.
 
 #### Configuration
 
@@ -1049,7 +1049,7 @@ Custom rule files also default to **standalone** mode (`extend_defaults: false`)
 
 **Fuzzy-tier gating (1.2.2)**: the fuzzy heuristic tier (which emits the built-in category strings `merge`, `feature`, `chore`) is suppressed when `extend_defaults: false`. This aligns with the principle that `extend_defaults: false` means "no built-in hardcoded classification." If you see `method=fuzzy_match` rows for a config with `extend_defaults: false`, upgrade to 1.2.2.
 
-**Weighted-sum tier and extend_defaults**: unlike the fuzzy tier, the weighted-sum tier (Tier 2.5) stays on with `extend_defaults: false`. When the rules files also declare `categories:`, it answers only with a category they define; any other vote is dropped (#165). Disabling it requires `classification.weighted_sum.enabled: false`.
+**Weighted-sum tier and extend_defaults**: unlike the fuzzy tier, the weighted-sum tier (Tier 2.5) stays on with `extend_defaults: false`, but answers only with a category the rules files define (rule categories plus any `categories:` entries); any other vote is dropped (#165). Disabling it requires `classification.weighted_sum.enabled: false`.
 
 ```yaml
 # my-rules.yaml — standalone by default (no built-in rules loaded)

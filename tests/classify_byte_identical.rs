@@ -47,7 +47,9 @@ rules:
 "#;
 
 /// A custom-only rule set. With the built-in catch-all gone, the weighted-sum
-/// tier — which the catch-all otherwise pre-empts — carries most of the corpus.
+/// tier — which the catch-all otherwise pre-empts — votes on most of the
+/// corpus; since #165 every vote outside this set's one category (`release`)
+/// is dropped, so those commits are stored as `uncategorized`.
 const CUSTOM_ONLY_RULES: &str = r#"
 extend_defaults: false
 rules:
@@ -211,8 +213,10 @@ async fn classify_scenario(name: &str, rules_yaml: &str, stride: usize) -> Strin
 /// `tga classify --force` must write exactly the rows they wrote before it.
 /// What: runs two scenarios — built-ins plus a layered rules file over the
 /// full corpus, and a custom-only rules file over every fourth commit (the
-/// configuration where the weighted-sum tier fires) — and asserts the combined
-/// dump equals the golden captured before rule tracing existed.
+/// configuration where the weighted-sum tier votes) — and asserts the combined
+/// dump equals the golden captured before rule tracing existed. #165
+/// re-blessed only the `custom_only` scenario: its weighted-sum rows outside
+/// the scenario's category set became `uncategorized`.
 /// Test: this function.
 #[tokio::test]
 async fn classify_rows_are_byte_identical_to_golden() {

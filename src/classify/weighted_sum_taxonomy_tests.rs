@@ -30,12 +30,12 @@ categories:
   - name: upkeep
 ";
 
-fn rules_file() -> tempfile::NamedTempFile {
+fn rules_file(yaml: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .suffix(".yaml")
         .tempfile()
         .expect("tempfile");
-    f.write_all(RULES.as_bytes()).expect("write rules");
+    f.write_all(yaml.as_bytes()).expect("write rules");
     f
 }
 
@@ -83,7 +83,7 @@ fn stored(db: &Database, sha: &str) -> (String, String) {
 /// Test: this test.
 #[tokio::test]
 async fn weighted_sum_never_stores_a_category_outside_a_custom_taxonomy() {
-    let rules = rules_file();
+    let rules = rules_file(RULES);
     let pipeline = pipeline(rules.path());
     let mut db = Database::open_in_memory().expect("db");
     insert(&db, "sha-dep", DEP_BUMP);
@@ -104,6 +104,40 @@ async fn weighted_sum_never_stores_a_category_outside_a_custom_taxonomy() {
     );
 }
 
+/// Why (#165, owner ruling 2026-10-07): a custom-only rules file with no
+/// `categories:` list defines its category set by its rules alone, as the
+/// LLM tier already treats it.
+/// What: the only category is `defect`; the dependency bump and the feature
+/// message are both stored as `uncategorized`, never `chore` or `feature`.
+/// Test: this test.
+#[tokio::test]
+async fn a_rules_only_custom_set_never_stores_a_weighted_sum_name() {
+    let rules = rules_file(
+        "extend_defaults: false
+rules:
+  - id: never
+    category: defect
+    keywords: [\"zzz-never-matches-zzz\"]
+",
+    );
+    let pipeline = pipeline(rules.path());
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-dep", DEP_BUMP);
+    insert(&db, "sha-feat", FEATURE);
+
+    let engine = pipeline.build_rule_engine().expect("rule engine");
+    pipeline
+        .run_with_engine(&mut db, engine)
+        .await
+        .expect("run");
+
+    for sha in ["sha-dep", "sha-feat"] {
+        let (category, method) = stored(&db, sha);
+        assert_eq!(category, "uncategorized", "{sha}: method {method}");
+        assert_ne!(method, "weighted_sum", "{sha}");
+    }
+}
+
 /// Why (#165): a dropped weighted-sum verdict must fall through to the next
 /// tier, not vanish.
 /// What: the LLM is on and sees only unanswered commits. The dependency bump
@@ -111,7 +145,7 @@ async fn weighted_sum_never_stores_a_category_outside_a_custom_taxonomy() {
 /// Test: this test.
 #[tokio::test]
 async fn a_dropped_weighted_sum_verdict_falls_through_to_the_llm() {
-    let rules = rules_file();
+    let rules = rules_file(RULES);
     let pipeline = pipeline(rules.path());
     let server = MockServer::start().await;
     let content =

@@ -277,10 +277,11 @@ working directory.
 
 With `extend_defaults: false` the fuzzy tier is off. The weighted-sum tier
 votes among built-in names (`feature`, `bugfix`, `chore`, `integration`,
-`platform`, `docs`, `refactor`, `merge`). When the rules files also declare
-`categories:`, a vote outside the configured set (rule categories plus
-`categories:`) is dropped and the commit falls through to the next tier
-(#165); without `categories:`, the built-in names are still written.
+`platform`, `docs`, `refactor`, `merge`). A vote outside the configured set
+(rule categories plus any `categories:` entries) is dropped and the commit
+falls through to the next tier (#165), with or without a `categories:` list.
+A custom-only rule set no longer receives the built-in names, so
+`tga classify --force` changes verdicts that earlier versions stored.
 `classification.weighted_sum.enabled: false` turns the tier off; the
 commits it would have named then abstain.
 

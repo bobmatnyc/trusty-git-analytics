@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::classify::classifier::{ClassificationEngine, ClassificationEngineConfig};
-use crate::classify::rules::{default_rules, Rule, RuleSet};
+use crate::classify::rules::{default_rules, CategoryDef, Rule, RuleSet};
 use crate::classify::tiers::weighted_sum::WeightedSumConfig;
 use crate::classify::trace::{RuleSources, TraceTier};
 
@@ -24,11 +24,27 @@ fn deploy_rule() -> Rule {
 /// weighted-sum toggle, so a test can reach the weighted-sum and fuzzy tiers
 /// the built-in catch-all otherwise pre-empts.
 fn custom_engine(extend_defaults: bool, weighted_sum: bool) -> ClassificationEngine {
+    custom_engine_with(extend_defaults, weighted_sum, &[])
+}
+
+/// [`custom_engine`] with `categories` declared after the rule's own, so a
+/// custom-only engine (#165) has an in-set weighted-sum answer to trace.
+fn custom_engine_with(
+    extend_defaults: bool,
+    weighted_sum: bool,
+    categories: &[&str],
+) -> ClassificationEngine {
     let ruleset = RuleSet {
         version: None,
         extend_defaults,
         rules: vec![deploy_rule()],
-        categories: Vec::new(),
+        categories: categories
+            .iter()
+            .map(|name| CategoryDef {
+                name: (*name).to_string(),
+                description: None,
+            })
+            .collect(),
         buckets: None,
     };
     let cfg = ClassificationEngineConfig {
@@ -67,6 +83,7 @@ fn traced_cascade_matches_untraced_verdicts() {
             .expect("engine"),
         jira_engine(),
         custom_engine(false, true),
+        custom_engine_with(false, true, &["bugfix", "docs", "feature"]),
         custom_engine(true, false),
     ];
     let messages: [(&str, bool); 10] = [
@@ -122,7 +139,17 @@ fn traced_cascade_names_rule_sources() {
         trace(&custom, "deploy: prod", false),
         Some((TraceTier::Exact, "team-rules.yaml#deploy".to_string()))
     );
-    let (tier, id) = trace(&custom, "fix null pointer regression hotfix", false).expect("weighted");
+    // #165: this engine's category set is {deployment}. The old expectation,
+    // `weighted_sum:bugfix/keyword`, wrote a built-in category a custom-only
+    // taxonomy does not hold, which is the defect. Declaring `bugfix` puts it
+    // back in the set, so the weighted-sum trace id is still pinned.
+    assert_eq!(
+        trace(&custom, "fix null pointer regression hotfix", false),
+        None
+    );
+    let declared = custom_engine_with(false, true, &["bugfix"]);
+    let (tier, id) =
+        trace(&declared, "fix null pointer regression hotfix", false).expect("weighted");
     assert_eq!(tier, TraceTier::WeightedSum);
     assert_eq!(id, "weighted_sum:bugfix/keyword");
 
