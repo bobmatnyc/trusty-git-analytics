@@ -62,9 +62,10 @@ fn tenant(url: &str) -> Option<&str> {
 /// `github.orgs` and `github.repo`, `bitbucket.workspace`, `workspaces` and
 /// `repo_slug`, the Azure DevOps organisation (from `organization_url`) and
 /// projects, the Jira site name (from `jira.url`), and every
-/// `classification.repo_categories` key that is not a glob. An
-/// `owner/name` slug also gives each part.
-/// Test: `jev_round4_tests::org_and_repo_names_from_every_source_are_redacted`.
+/// `classification.repo_categories` key that is not a glob (#167: only the
+/// repository before a `:`). An `owner/name` slug also gives each part.
+/// Test: `jev_round4_tests::org_and_repo_names_from_every_source_are_redacted`,
+/// `pipeline_repo_map_floor_tests::a_prefix_key_gives_jev_only_its_repository_name`.
 pub(crate) fn known_names(config: &Config) -> KnownNames {
     let mut names = KnownNames::default();
     let repos = &mut names.repos;
@@ -104,8 +105,10 @@ pub(crate) fn known_names(config: &Config) -> KnownNames {
         push_repo(repos, site);
     }
     if let Some(c) = &config.classification {
+        // #167: a `<repo>:<prefix>` key names the repository before the
+        // `:`; the prefix is a path, and its segments are not client names.
         let keys = c.repo_categories.keys().filter(|k| !k.contains('*'));
-        keys.for_each(|n| push_repo(repos, n));
+        keys.for_each(|k| push_repo(repos, k.split_once(':').map_or(k, |(r, _)| r)));
     }
     let mut person = |n: &str| {
         if !n.contains('@') {

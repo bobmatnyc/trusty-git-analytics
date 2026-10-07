@@ -615,3 +615,32 @@ async fn an_out_of_range_min_confidence_is_rejected() {
         .to_string();
     assert!(msg.contains("min_confidence"), "{msg}");
 }
+
+/// Why (#167): Jev learns repository names from the map keys to
+/// pseudonymize them. A prefix is a path; learning its segments would
+/// redact ordinary words such as `api` in every commit message.
+/// What: the key `qmono-repo:services/api` gives Jev `qmono-repo` and no
+/// part of the prefix.
+/// Test: this test.
+#[test]
+fn a_prefix_key_gives_jev_only_its_repository_name() {
+    let rules = rules_file();
+    let cfg = config(
+        rules.path(),
+        &[("qmono-repo:services/api", "qa")],
+        RepoMapConfig::default(),
+    );
+    let names = super::pipeline_jev::known_names(&cfg);
+    assert!(
+        names.repos.iter().any(|n| n == "qmono-repo"),
+        "{:?}",
+        names.repos
+    );
+    for part in ["api", "services", "services/api", "qmono-repo:services/api"] {
+        assert!(
+            !names.repos.iter().any(|n| n == part),
+            "{part}: {:?}",
+            names.repos
+        );
+    }
+}
