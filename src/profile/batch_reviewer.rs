@@ -438,7 +438,7 @@ impl PeriodReviewer {
     /// `trusty_common`'s, and routing it through [`Configurator`] is what keeps
     /// tga from growing a second copy of the "which backend, whose key" decision.
     /// What: registers the default HTTP provider factories (plus the Bedrock
-    /// Converse factory when tga is built `--features bedrock`), then resolves
+    /// Converse factory under tga's default `bedrock` feature), then resolves
     /// `model` against [`default_store`].
     ///
     /// # Errors

@@ -34,7 +34,7 @@ pub enum LlmSource {
     Openrouter,
     /// Route through AWS Bedrock (IAM credential-chain auth, no API key).
     ///
-    /// Only available when the binary is compiled with `--features bedrock`.
+    /// Included in the default build; a `--no-default-features` build rejects it.
     /// Requires valid AWS credentials in the default chain (env vars, profile,
     /// SSO, IMDS, etc.). No secret is stored in the config; region and model
     /// are the only Bedrock-specific fields.

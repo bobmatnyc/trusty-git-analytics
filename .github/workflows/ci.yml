@@ -206,6 +206,33 @@ jobs:
       - run: cargo check --workspace --exclude trusty-audit-ui
 
   # ---------------------------------------------------------------------------
+  # no-default-features — tga's `bedrock` feature is on by default, so every
+  # other job builds it. This job is the one that compiles, lints and tests the
+  # `cfg(not(feature = "bedrock"))` arm (the build without the AWS SDK).
+  # ---------------------------------------------------------------------------
+  no-default-features:
+    name: tga --no-default-features
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install stable toolchain with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: no-default-features
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - run: cargo clippy -p tga --no-default-features --all-targets -- -D warnings
+      - run: cargo test -p tga --no-default-features
+
+  # ---------------------------------------------------------------------------
   # dependency-duplicates — plan risk item: tga and trusty-audit no longer
   # share a `trusty-common` crate to unify their dependency graph on one
   # ratatui major / one rusqlite+libsqlite3-sys pair (Cargo's `links = "sqlite3"`

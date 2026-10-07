@@ -1,13 +1,14 @@
 //! AWS Bedrock LLM provider for tier-4 classification.
 //!
-//! Feature-gated behind `bedrock`. When the feature is disabled the module
-//! still compiles and exposes [`BedrockClassifier`] as a stub that returns
-//! a clear error explaining the build configuration.
+//! Feature-gated behind `bedrock`, which is a default feature: a default
+//! build selects Bedrock through `llm.source: bedrock` alone. Under
+//! `--no-default-features` the module still compiles and exposes
+//! [`BedrockClassifier`] as a stub that returns [`BEDROCK_NOT_BUILT`].
 //!
 //! Why: organizations on AWS often prefer Bedrock (private VPC, IAM-based
 //! auth, no per-request data egress to a third-party SaaS) over OpenRouter
-//! or OpenAI for LLM access. Making it an optional feature keeps the
-//! default binary lean for users who don't need it. As of #2411 the Bedrock
+//! or OpenAI for LLM access. The feature stays so a build that never uses
+//! Bedrock can drop the AWS SDK stack. As of #2411 the Bedrock
 //! wire integration (region resolution, the AWS credential chain, and the
 //! Converse request/response conversion) is NO LONGER a private aws-sdk
 //! `InvokeModel` port here — it bridges onto the shared
@@ -37,6 +38,17 @@ pub struct BedrockClassifier {
     #[cfg(feature = "bedrock")]
     inner: trusty_common::inference::BedrockAdapter,
 }
+
+/// The error a `--no-default-features` build returns for the Bedrock source.
+///
+/// Why: the default build includes Bedrock, so the only way to reach this is
+/// a build that dropped the default features; the text says how to get it back.
+/// What: defined in every build so callers and tests can name it; only a
+/// build without the `bedrock` feature returns it.
+/// Test: `bedrock_stub_returns_error_without_feature`,
+/// `tests/bedrock_default_feature.rs::bedrock_source_errors_without_the_feature`.
+pub const BEDROCK_NOT_BUILT: &str = "bedrock feature not compiled in — this tga was built with \
+     --no-default-features; rebuild with the default features (or --features bedrock)";
 
 /// Default Bedrock model id when the caller doesn't override it.
 ///
@@ -74,8 +86,8 @@ impl BedrockClassifier {
     ///
     /// # Errors
     ///
-    /// Returns `Err` with a clear message when the binary was built without
-    /// `--features bedrock`. With the feature enabled, this always returns
+    /// Returns `Err` ([`BEDROCK_NOT_BUILT`]) when the binary was built with
+    /// `--no-default-features`. With the feature enabled, this always returns
     /// `Ok` — the shared adapter defers AWS credential/client construction to
     /// the first `classify_one` call (#2245 lazy-construction guarantee).
     ///
@@ -84,8 +96,8 @@ impl BedrockClassifier {
     /// What: builds a [`trusty_common::inference::BedrockAdapter`] pinned to
     /// the default region resolution (`TRUSTY_AWS_REGION` > `AWS_REGION` >
     /// `us-east-1`).
-    /// Test: building with and without `--features bedrock` verifies both
-    /// arms compile and behave correctly at startup.
+    /// Test: `tests/bedrock_default_feature.rs` covers both arms; the gate's
+    /// `no-default-features` step runs the stub arm.
     #[cfg(feature = "bedrock")]
     pub async fn new(model: &str) -> Result<Self, String> {
         Ok(Self {
@@ -112,24 +124,24 @@ impl BedrockClassifier {
         })
     }
 
-    /// Stub constructor returned when the `bedrock` feature is disabled.
+    /// Stub constructor for a `--no-default-features` build.
     ///
     /// Always errors so the caller can surface a build-time guidance
     /// message to the operator.
     ///
-    /// Why: the SDK is heavy (~10MB of generated code) — gating it behind
-    /// a feature avoids paying that cost for users who don't need Bedrock.
-    /// What: returns a clear `Err` with rebuild instructions.
+    /// Why: the SDK is heavy (~10MB of generated code); a build that opts
+    /// out of the default features does not pay for it.
+    /// What: returns [`BEDROCK_NOT_BUILT`].
     /// Test: confirmed by `bedrock_stub_returns_error_without_feature`.
     #[cfg(not(feature = "bedrock"))]
     pub async fn new(_model: &str) -> Result<Self, String> {
-        Err("bedrock feature not compiled in — rebuild with --features bedrock".to_string())
+        Err(BEDROCK_NOT_BUILT.to_string())
     }
 
     /// Stub `with_region` when the `bedrock` feature is disabled.
     #[cfg(not(feature = "bedrock"))]
     pub async fn with_region(_model: &str, _region: Option<&str>) -> Result<Self, String> {
-        Err("bedrock feature not compiled in — rebuild with --features bedrock".to_string())
+        Err(BEDROCK_NOT_BUILT.to_string())
     }
 
     /// Send one commit message to Bedrock and return the raw reply text and

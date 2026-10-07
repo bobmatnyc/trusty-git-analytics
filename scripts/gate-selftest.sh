@@ -160,6 +160,8 @@ if [[ ${STATUS} -eq 0 ]] && has_line '^GATE: PASS' && ! has_line 'FAIL' \
     && logged "cargo clippy --workspace --exclude trusty-audit-ui --all-targets -- -D warnings" \
     && logged "cargo test --workspace --exclude trusty-audit-ui" \
     && logged "cargo +1.94 check --workspace --exclude trusty-audit-ui" \
+    && logged "cargo clippy -p tga --no-default-features --all-targets -- -D warnings" \
+    && logged "cargo test -p tga --no-default-features" \
     && logged "cargo tree --workspace --exclude trusty-audit-ui -d" \
     && logged "cargo clippy -p trusty-audit-ui --all-targets -- -D warnings" \
     && logged "cargo test -p trusty-audit-ui" \

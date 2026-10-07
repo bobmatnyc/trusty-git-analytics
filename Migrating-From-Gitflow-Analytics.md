@@ -44,8 +44,8 @@ gfa-era gaps have been **closed in v1.0.0**:
 - Story point extraction — `jira_integration.fetch_story_points` + `story_point_fields`
   supported; `qualitative_commits.story_points` populated
 - Override management — `tga override add|list|remove` (Tier 0 manual overrides)
-- AWS Bedrock LLM provider — available behind the `bedrock` cargo feature; OpenRouter is
-  the default
+- AWS Bedrock LLM provider — in the default build; select it with `llm.source: bedrock`.
+  OpenRouter is the default source; `anthropic-api` and `jev` are the other two
 - `--weeks N` flag — supported on `analyze` / `collect` / `classify` / `report` /
   `fetch` / `pr-metrics`
 - `backfill-*` subcommands — `tga backfill ai-detection|revert-flags|ticket-ids`
@@ -238,14 +238,17 @@ analysis:
 # tga
 classification:
   rules_file: "./my-rules.yaml"   # replaces ML categorization
-  use_llm: true                   # OpenAI only; reads OPENAI_API_KEY env var
-  # AWS Bedrock not supported — omit provider/bedrock_model_id/aws_region
+llm:
+  source: bedrock                 # bedrock | openrouter | anthropic-api | jev
+  model: us.anthropic.claude-haiku-4-5-20251001-v1:0   # replaces bedrock_model_id
+  region: us-east-1               # replaces aws_region
 ```
 
-⚠️ **Migration note — Bedrock**: tga's LLM tier is OpenAI-only. If you rely on AWS Bedrock for
-classification, either stay on gfa for the classify stage or switch to `use_llm: true` with an
-`OPENAI_API_KEY`. If LLM classification is not critical, the built-in rules (80+ patterns) cover
-conventional commits and most common patterns without it.
+⚠️ **Migration note — Bedrock**: the default tga build includes Bedrock. Credentials come from
+the AWS default chain, as in gfa. Current Claude models need a cross-region inference-profile id
+(`us.anthropic.…`), not the bare `anthropic.…` id gfa used. If LLM classification is not
+critical, the built-in rules (80+ patterns) cover conventional commits and most common patterns
+without it.
 
 ⚠️ **Migration note — ML categorization**: tga has no spaCy-based ML tier. The rules cascade
 (exact keyword → regex → fuzzy → LLM) replaces it. For most organizations the built-in ruleset
@@ -378,8 +381,8 @@ remove them for a clean config:
 |-------|--------|
 | `analysis.ml_categorization` | No ML tier in tga |
 | `analysis.llm_classification.provider` | Use `classification.use_llm: true` (OpenAI only) |
-| `analysis.llm_classification.bedrock_model_id` | Bedrock not supported |
-| `analysis.llm_classification.aws_region` | Bedrock not supported |
+| `analysis.llm_classification.bedrock_model_id` | Use `llm.model` with `llm.source: bedrock` |
+| `analysis.llm_classification.aws_region` | Use `llm.region` with `llm.source: bedrock` |
 | `analysis.ticket_detection.*` | tga auto-detects; no config |
 | `jira.fetch_story_points` | Not supported |
 | `jira.story_point_fields` | Not supported |
@@ -579,14 +582,14 @@ To replace built-in rules entirely, set `extend_defaults: false` (or omit it —
 [ ] 12. Run full historical backfill with desired --since date
 [ ] 13. Point output.directory to existing gfa reports path for continuity
 [ ] 14. Update automation scripts using gfa CLI (see command mapping table in section 4)
-[ ] 15. Note features requiring gfa fallback: story points, DORA, Bedrock LLM, overrides
+[ ] 15. Note features requiring gfa fallback: story points, DORA, overrides
 ```
 
 ---
 
 ## 8. Running Both in Parallel
 
-If you depend on gfa features not yet in tga (story points, DORA metrics, overrides, Bedrock),
+If you depend on gfa features not yet in tga (story points, DORA metrics, overrides),
 you can run both tools against the same repositories simultaneously.
 
 - Both tools read from the same git repos on disk (read-only access)
@@ -602,7 +605,7 @@ Suggested split:
 | Fast incremental collection | Story point extraction |
 | Two-level taxonomy reporting | DORA metrics |
 | Linear ticket integration | Override management |
-| `ticketed: bool` compliance | Bedrock LLM classification |
+| `ticketed: bool` compliance | |
 | CSV/JSON/Markdown output | Confluence publishing |
 
 ```bash

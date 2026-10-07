@@ -83,6 +83,22 @@ stops the run instead of being ignored.
 
 #### Source variants
 
+`llm.source: bedrock | openrouter | anthropic-api | jev`. All four are in the
+default build (`cargo install tga`, the release binaries); the configuration
+alone selects one. Credentials each source needs:
+
+| Source | Credentials |
+|--------|-------------|
+| `bedrock` | AWS credentials from the default chain (env vars, `~/.aws` profile, SSO, instance or task role) with Bedrock model access in the region. No API key. |
+| `openrouter` | OpenRouter API key in the variable named by `api_key_env` (default `OPENROUTER_API_KEY`). |
+| `anthropic-api` | Anthropic API key in the variable named by `api_key_env`. |
+| `jev` | TypeSafe API key in the variable named by `api_key_env` (default `TYPESAFE_API_KEY`). |
+
+A binary built with `--no-default-features` leaves out the AWS SDK. In that
+build `source: bedrock` stops `tga classify` with "bedrock feature not
+compiled in"; rebuild with the default features. `--features bedrock` is
+accepted and changes nothing.
+
 **`openrouter`** (default)
 
 Uses the OpenRouter API (OpenAI-compatible schema). The API key is read from
@@ -103,8 +119,8 @@ llm:
 Uses AWS Bedrock with IAM credential-chain auth — no secret is stored in
 the config file. Requires:
 
-- Binary compiled with `--features bedrock` (if not, `tga classify` exits
-  non-zero with "reinstall with --features bedrock").
+- Nothing at build time: the default build includes Bedrock. Only a
+  `--no-default-features` build rejects this source (see above).
 - Valid AWS credentials in the default chain: `AWS_ACCESS_KEY_ID` /
   `AWS_SECRET_ACCESS_KEY` env vars, `~/.aws/credentials` profile, EC2
   instance metadata, ECS task role, or AWS SSO.

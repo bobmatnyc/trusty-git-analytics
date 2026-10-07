@@ -63,6 +63,16 @@ this one). Before publishing `trusty-audit`, confirm the versions it pins are
 already live on crates.io; there is nothing this repo's CI can check for that,
 since the dependency lives in a different repo's release process.
 
+## tga's feature set
+
+tga's `default` feature set includes `bedrock`, so the crates.io package, a
+plain `cargo install tga`, step 11's `cargo install --path` and every
+release.yml binary carry all four LLM sources (`bedrock`, `openrouter`,
+`anthropic-api`, `jev`) with no build flag. Never pass `--no-default-features`
+to a release build: that binary rejects `llm.source: bedrock`. `--features
+bedrock` is accepted and changes nothing. The local gate's
+`no-default-features` step keeps the build without the AWS SDK compiling.
+
 ## Per-crate checklist
 
 Repeat this for each crate being published (`tga` = repo root, `trusty-audit` =
