@@ -705,10 +705,11 @@ async fn a_bare_key_naming_a_configured_slash_repository_maps_it() {
     let rules = rules_file();
     let with_repo = |key: &str| {
         let mut cfg = config(rules.path(), &[(key, "qa")], RepoMapConfig::default());
-        let mut repo = crate::core::config::RepositoryConfig::default();
-        repo.path = "/nonexistent/widget".into();
-        repo.name = Some("acme-org/widget".into());
-        cfg.repositories = vec![repo];
+        cfg.repositories = vec![crate::core::config::RepositoryConfig {
+            path: "/nonexistent/widget".into(),
+            name: Some("acme-org/widget".into()),
+            ..Default::default()
+        }];
         ClassificationPipeline::new(cfg)
     };
     let mut db = Database::open_in_memory().expect("db");
