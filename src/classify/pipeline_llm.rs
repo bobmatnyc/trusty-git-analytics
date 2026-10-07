@@ -38,12 +38,14 @@ pub(crate) fn is_unanswered(r: &ClassificationResult) -> bool {
 ///
 /// Why: one predicate for `tga classify` and `tga eval repredict`, so the
 /// eval replays exactly the routing the pipeline uses.
-/// What: never a `repo_map` verdict (#158); otherwise `LowConfidence` →
-/// `confidence <= threshold`; `Unanswered` → [`is_unanswered`], threshold
-/// ignored.
+/// What: never a `repo_map` verdict (#158; in floor mode, #167, the map
+/// applies after the LLM, so a mapped commit is eligible); otherwise
+/// `LowConfidence` → `confidence <= threshold`; `Unanswered` →
+/// [`is_unanswered`], threshold ignored.
 /// Test: `pipeline_llm_tests::unanswered_scope_sends_only_abstentions`,
 /// `pipeline_llm_tests::low_confidence_scope_also_sends_weak_rule_hits`,
-/// `pipeline_repo_map_tests::mapped_repo_commits_never_reach_the_llm`.
+/// `pipeline_repo_map_tests::mapped_repo_commits_never_reach_the_llm`,
+/// `pipeline_repo_map_floor_tests::floor_overrides_a_non_exception_rule_and_llm_verdict`.
 pub(crate) fn llm_eligible(
     scope: LlmFallbackScope,
     r: &ClassificationResult,
