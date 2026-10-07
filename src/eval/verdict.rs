@@ -276,4 +276,59 @@ mod tests {
             ("exact", "security")
         );
     }
+
+    /// Why (#167): `tga eval` must reach the verdict a floor-mode
+    /// `tga classify` stores: an exception verdict at or above the threshold
+    /// survives, everything else takes the mapped category.
+    /// What: floor mode, repo `e2e` mapped to `qa`. A `security` rule hit at
+    /// 0.9 keeps its tier; an unanswered commit and a stored manual
+    /// `new_feature` verdict (not an exception) resolve to the repo map.
+    /// Test: this test.
+    #[test]
+    fn floor_mode_keeps_an_exception_and_floors_the_rest() {
+        let mut rules = tempfile::Builder::new()
+            .suffix(".yaml")
+            .tempfile()
+            .expect("tempfile");
+        rules
+            .write_all(
+                b"extend_defaults: false\nrules:\n  - id: sec\n    category: security\n    \
+                  keywords: [\"security\"]\n    confidence: 0.9\ncategories:\n  - name: qa\n  \
+                  - name: new_feature\n",
+            )
+            .expect("write");
+        let config = Config {
+            classification: Some(ClassificationConfig {
+                rules_files: vec![rules.path().to_path_buf()],
+                repo_categories: [("e2e".to_string(), "qa".to_string())].into(),
+                repo_map: crate::core::config::RepoMapConfig {
+                    mode: crate::core::config::RepoMapMode::Floor,
+                    ..Default::default()
+                },
+                ..ClassificationConfig::default()
+            }),
+            ..Config::default()
+        };
+        let engine = ClassificationPipeline::new(config.clone())
+            .build_rule_engine()
+            .expect("engine");
+        let policy = CarryPolicy::from_config(&config).expect("policy");
+        let mut quiet = commit("e2e", None);
+        quiet.message = "zzz qqq vvv".into();
+        let mut manual = commit("e2e", Some(("new_feature", "manual")));
+        manual.message = "zzz qqq vvv".into();
+        let rows = [commit("e2e", None), quiet, manual];
+        let refs: Vec<&CommitRow> = rows.iter().collect();
+        let (resolved, _) = resolve_verdicts(&engine, &policy, &refs);
+        assert_eq!(
+            (resolved[0].tier.as_str(), resolved[0].category.as_str()),
+            ("exact", "security")
+        );
+        for r in &resolved[1..] {
+            assert_eq!((r.tier.as_str(), r.category.as_str()), ("repo_map", "qa"));
+            assert_eq!(r.rule_id, "repo_map:e2e");
+            assert!(!r.carried);
+        }
+        assert!(resolved[2].superseded, "the manual verdict was floored");
+    }
 }

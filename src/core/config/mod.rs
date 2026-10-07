@@ -50,6 +50,8 @@ pub mod database_path;
 mod llm;
 // #111: anchor a config's relative paths to its own directory.
 mod relative_paths;
+// #167: the `classification.repo_map` block (floor mode).
+mod repo_map;
 pub mod validator;
 
 pub use aliases::{AliasFile, DeveloperAliasEntry};
@@ -61,6 +63,9 @@ pub use llm::{
     JevOptions, LlmConfig, LlmContextItem, LlmEffort, LlmFallbackScope, LlmSource, JEV_API_KEY_ENV,
     JEV_DEFAULT_BUDGET_USD, JEV_DEFAULT_NAME_MATCHER_BYTES, LLM_CONTEXT_DEFAULT_MAX_PATHS,
     LLM_CONTEXT_DEFAULT_MAX_PATH_BYTES,
+};
+pub use repo_map::{
+    RepoMapConfig, RepoMapMode, REPO_MAP_DEFAULT_EXCEPTIONS, REPO_MAP_DEFAULT_MIN_CONFIDENCE,
 };
 pub use validator::{ConfigError, ConfigValidator};
 
@@ -556,8 +561,18 @@ pub struct ClassificationConfig {
     ///     duetto-playwright-e2e: qa
     /// ```
     /// Test: `classify::pipeline_repo_map_tests`.
+    ///
+    /// #167: a key may also be `<repo>:<prefix>`, and
+    /// [`Self::repo_map`] selects floor mode; see
+    /// `docs/requirements/configuration.md`.
     #[serde(default)]
     pub repo_categories: HashMap<String, String>,
+
+    /// How [`Self::repo_categories`] applies (#167): `override` (default,
+    /// the #158 behaviour) or `floor`, with the floor's exception categories
+    /// and their minimum confidence. See [`RepoMapConfig`].
+    #[serde(default)]
+    pub repo_map: RepoMapConfig,
 
     /// Whether to engage the LLM fallback tier.
     #[serde(default)]
@@ -793,6 +808,7 @@ impl Default for ClassificationConfig {
         Self {
             rules_files: Vec::new(),
             repo_categories: HashMap::new(),
+            repo_map: RepoMapConfig::default(),
             use_llm: false,
             llm_model: None,
             llm_provider: default_llm_provider(),

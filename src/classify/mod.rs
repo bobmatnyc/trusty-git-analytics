@@ -59,6 +59,10 @@ mod trace_tests;
 #[cfg(test)]
 mod pipeline_repo_map_tests;
 
+// #167: repo map v2 — floor mode, path-prefix keys, unmatched-key warning.
+#[cfg(test)]
+mod pipeline_repo_map_floor_tests;
+
 // #165: the weighted-sum tier stays inside the active category set.
 #[cfg(test)]
 mod weighted_sum_taxonomy_tests;
