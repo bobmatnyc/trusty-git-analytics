@@ -43,10 +43,13 @@ pub struct RepoMapConfig {
     /// `override` (default) or `floor`.
     #[serde(default)]
     pub mode: RepoMapMode,
-    /// Categories a cascade verdict may keep in `floor` mode, matched
-    /// case-insensitively. Default `[qa, security, devops, bug_fix]`.
-    #[serde(default = "default_exceptions")]
-    pub exceptions: Vec<String>,
+    /// Categories a cascade verdict may keep in `floor` mode, compared
+    /// through the taxonomy's canonical names (`bug_fix` matches `bugfix`).
+    /// `None` (the key absent) means [`REPO_MAP_DEFAULT_EXCEPTIONS`]; read
+    /// it through [`Self::exceptions`]. #167 review: a name the config does
+    /// not know is an error in a written list, a warning in the default.
+    #[serde(default)]
+    pub exceptions: Option<Vec<String>>,
     /// Lowest confidence at which an exception verdict is kept, in
     /// `[0.0, 1.0]`. Default `0.8`.
     #[serde(default = "default_min_confidence")]
@@ -59,22 +62,28 @@ pub const REPO_MAP_DEFAULT_EXCEPTIONS: [&str; 4] = ["qa", "security", "devops", 
 /// The owner-confirmed default exception confidence (#167).
 pub const REPO_MAP_DEFAULT_MIN_CONFIDENCE: f64 = 0.8;
 
-fn default_exceptions() -> Vec<String> {
-    REPO_MAP_DEFAULT_EXCEPTIONS
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
-}
-
 fn default_min_confidence() -> f64 {
     REPO_MAP_DEFAULT_MIN_CONFIDENCE
+}
+
+impl RepoMapConfig {
+    /// The exception list in effect: the written one, else the default.
+    pub fn exceptions(&self) -> Vec<String> {
+        match &self.exceptions {
+            Some(list) => list.clone(),
+            None => REPO_MAP_DEFAULT_EXCEPTIONS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
 }
 
 impl Default for RepoMapConfig {
     fn default() -> Self {
         Self {
             mode: RepoMapMode::default(),
-            exceptions: default_exceptions(),
+            exceptions: None,
             min_confidence: default_min_confidence(),
         }
     }
@@ -98,7 +107,8 @@ mod tests {
         let absent = parse("repo_categories: {}\n").expect("absent");
         assert_eq!(absent.repo_map, RepoMapConfig::default());
         assert_eq!(absent.repo_map.mode, RepoMapMode::Override);
-        assert_eq!(absent.repo_map.exceptions, REPO_MAP_DEFAULT_EXCEPTIONS);
+        assert_eq!(absent.repo_map.exceptions, None);
+        assert_eq!(absent.repo_map.exceptions(), REPO_MAP_DEFAULT_EXCEPTIONS);
         assert!((absent.repo_map.min_confidence - 0.8).abs() < 1e-12);
 
         let empty = parse("repo_map: {}\n").expect("empty");
@@ -107,7 +117,7 @@ mod tests {
         let full = parse("repo_map:\n  mode: floor\n  exceptions: [qa]\n  min_confidence: 0.9\n")
             .expect("full");
         assert_eq!(full.repo_map.mode, RepoMapMode::Floor);
-        assert_eq!(full.repo_map.exceptions, ["qa"]);
+        assert_eq!(full.repo_map.exceptions(), ["qa"]);
         assert!((full.repo_map.min_confidence - 0.9).abs() < 1e-12);
     }
 

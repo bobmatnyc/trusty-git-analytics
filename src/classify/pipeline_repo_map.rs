@@ -24,7 +24,7 @@ use tracing::warn;
 use crate::classify::errors::{ClassifyError, Result};
 use crate::classify::pipeline::ClassificationPipeline;
 use crate::classify::repo_map_keys::{parse_key, MapKey, RepoKeys};
-use crate::classify::taxonomy::TaxonomyRegistry;
+use crate::classify::taxonomy::{canonical_category, TaxonomyRegistry};
 use crate::classify::tiers::regex_tier::RegexMatcher;
 use crate::classify::tiers::ClassificationResult;
 use crate::classify::trace::{RuleTrace, TraceTier, TracedVerdict};
@@ -36,6 +36,7 @@ use super::pipeline_db::CommitRow;
 /// Floor mode's exception rule (#167).
 #[derive(Debug, Clone)]
 struct Floor {
+    /// Canonical names ([`canonical_category`]).
     exceptions: Vec<String>,
     min_confidence: f64,
 }
@@ -60,22 +61,22 @@ const KEY: &str = "classification.repo_categories";
 impl RepoCategoryMap {
     /// Check `raw` and `settings` against the category set `known`.
     ///
-    /// What: a key is `<repo>` or `<repo>:<prefix>` ([`parse_key`]). A
-    /// category matches a known name case-insensitively and is stored in the
-    /// known spelling. In floor mode an exception `known` does not hold is
-    /// warned about, not refused: the default list names categories a
-    /// built-in taxonomy may lack.
+    /// What: a key is `<repo>` or `<repo>:<prefix>` ([`parse_key`]); the
+    /// repository may hold a `/` only when it is one of `configured`, the
+    /// `repositories[].name` values. A category matches a known name
+    /// case-insensitively and is stored in the known spelling.
     ///
     /// # Errors
     ///
     /// [`ClassifyError::Config`] naming every glob key, every malformed key,
     /// every pair of keys naming the same repository and prefix, every
-    /// repository whose category `known` does not hold, or a
-    /// `min_confidence` outside `[0, 1]`.
+    /// repository whose category `known` does not hold, or a floor setting
+    /// [`Self::checked_floor`] refuses.
     pub(crate) fn checked(
         raw: &HashMap<String, String>,
         settings: &RepoMapConfig,
         known: &[String],
+        configured: &HashSet<&str>,
     ) -> Result<Self> {
         let sorted: BTreeMap<&String, &String> = raw.iter().collect();
         let globs: Vec<&str> = sorted
@@ -95,7 +96,7 @@ impl RepoCategoryMap {
         let mut seen: BTreeMap<MapKey, &str> = BTreeMap::new();
         let mut duplicates = Vec::new();
         for raw_key in sorted.keys() {
-            match parse_key(raw_key) {
+            match parse_key(raw_key, configured) {
                 Ok(key) => {
                     if let Some(first) = seen.insert(key.clone(), raw_key.as_str()) {
                         duplicates.push(format!("'{first}' and '{raw_key}'"));
@@ -122,7 +123,9 @@ impl RepoCategoryMap {
         for (raw_key, category) in sorted {
             match known.iter().find(|k| k.eq_ignore_ascii_case(category)) {
                 Some(name) => {
-                    let key = &keys[raw_key.as_str()];
+                    let key = keys.get(raw_key.as_str()).ok_or_else(|| {
+                        ClassifyError::Config(format!("{KEY} key '{raw_key}' was not parsed"))
+                    })?;
                     repos
                         .entry(key.repo.clone())
                         .or_default()
@@ -145,6 +148,15 @@ impl RepoCategoryMap {
     }
 
     /// The floor of `settings`, or `None` in override mode.
+    ///
+    /// What: exceptions compare through [`canonical_category`]. An exception
+    /// `known` does not hold is an error in a written list; in the default
+    /// list it is a warning, since a built-in taxonomy lacks `qa`.
+    ///
+    /// # Errors
+    ///
+    /// A `min_confidence` outside `[0, 1]`, or a written exception `known`
+    /// does not hold.
     fn checked_floor(settings: &RepoMapConfig, known: &[String]) -> Result<Option<Floor>> {
         if settings.mode != RepoMapMode::Floor {
             return Ok(None);
@@ -155,16 +167,29 @@ impl RepoCategoryMap {
                 "classification.repo_map.min_confidence must be within [0, 1], got {min}"
             )));
         }
-        for e in &settings.exceptions {
-            if !known.iter().any(|k| k.eq_ignore_ascii_case(e)) {
-                warn!(
-                    "classification.repo_map.exceptions names '{e}', a category this config \
-                     does not know; no verdict can match it"
-                );
-            }
+        let exceptions = settings.exceptions();
+        let known: HashSet<String> = known.iter().map(|k| canonical_category(k)).collect();
+        let unknown: Vec<&str> = exceptions
+            .iter()
+            .filter(|e| !known.contains(&canonical_category(e)))
+            .map(String::as_str)
+            .collect();
+        // #167 review: a written list fails closed; only the default warns.
+        if settings.exceptions.is_some() && !unknown.is_empty() {
+            return Err(ClassifyError::Config(format!(
+                "classification.repo_map.exceptions names categories this config does not \
+                 know: {}",
+                unknown.join(", ")
+            )));
+        }
+        for e in unknown {
+            warn!(
+                "classification.repo_map default exception '{e}' is a category this config \
+                 does not know; no verdict can match it"
+            );
         }
         Ok(Some(Floor {
-            exceptions: settings.exceptions.clone(),
+            exceptions: exceptions.iter().map(|e| canonical_category(e)).collect(),
             min_confidence: min,
         }))
     }
@@ -175,14 +200,12 @@ impl RepoCategoryMap {
     }
 
     /// Whether floor mode keeps a cascade verdict of `category` at
-    /// `confidence`: an exception, case-insensitively, at or above
-    /// `min_confidence`. Always false in override mode.
+    /// `confidence`: an exception, by canonical name (#167 review: `bugfix`
+    /// matches `bug_fix`), at or above `min_confidence`. Always false in
+    /// override mode.
     pub(crate) fn keeps(&self, category: &str, confidence: f64) -> bool {
         self.floor.as_ref().is_some_and(|f| {
-            confidence >= f.min_confidence
-                && f.exceptions
-                    .iter()
-                    .any(|e| e.eq_ignore_ascii_case(category))
+            confidence >= f.min_confidence && f.exceptions.contains(&canonical_category(category))
         })
     }
 
@@ -292,7 +315,12 @@ impl RepoCategoryMap {
                 continue;
             }
             if let Some(v) = self.verdict_of(c, paths, taxonomy) {
-                *r = v;
+                // #167 review: the complexity backfill skips `repo_map`
+                // rows, so keep the score the replaced (LLM) verdict carried.
+                *r = ClassificationResult {
+                    complexity: r.complexity,
+                    ..v
+                };
             }
         }
     }
@@ -376,6 +404,13 @@ impl ClassificationPipeline {
             Some(defs) => defs.into_iter().map(|d| d.name).collect(),
             None => self.known_categories()?,
         };
-        RepoCategoryMap::checked(raw, settings, &known)
+        // #167 review: a `repositories[].name` may hold a `/` (`org/repo`).
+        let configured: HashSet<&str> = self
+            .config
+            .repositories
+            .iter()
+            .filter_map(|r| r.name.as_deref())
+            .collect();
+        RepoCategoryMap::checked(raw, settings, &known, &configured)
     }
 }

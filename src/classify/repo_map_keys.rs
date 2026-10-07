@@ -7,7 +7,7 @@
 //! with a deterministic rule (see [`RepoKeys::resolve`]).
 //! Test: `classify::pipeline_repo_map_floor_tests`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// One parsed `classification.repo_categories` key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,29 +23,37 @@ pub(crate) struct MapKey {
 ///
 /// What: splits at the first `:`. The prefix loses a leading `./`, and
 /// leading and trailing `/`. A key holding `*` is checked by the caller.
+/// The repository may hold a `/` only when it is one of `configured`, the
+/// `repositories[].name` values (#167 review: `org/repo` names).
 ///
 /// # Errors
 ///
-/// The reason the key is malformed: a `/` in the repository part (a bare
-/// `acme-mono/api` means `acme-mono:api`), or an empty repository or
-/// prefix.
-pub(crate) fn parse_key(raw: &str) -> std::result::Result<MapKey, &'static str> {
+/// The reason the key is malformed: a `/` in a repository part no
+/// configured name matches (a bare `acme-mono/api` means `acme-mono:api`),
+/// or an empty repository or prefix.
+pub(crate) fn parse_key(
+    raw: &str,
+    configured: &HashSet<&str>,
+) -> std::result::Result<MapKey, String> {
     let (repo, prefix) = match raw.split_once(':') {
         Some((repo, prefix)) => (repo, Some(prefix)),
         None => (raw, None),
     };
     if repo.is_empty() {
-        return Err("empty repository name");
+        return Err("empty repository name".into());
     }
-    if repo.contains('/') {
-        return Err("a '/' in the repository name; a path prefix follows a ':'");
+    if repo.contains('/') && !configured.contains(repo) {
+        return Err(format!(
+            "a '/' in the repository name, and no repositories[].name is '{repo}'; \
+             a path prefix follows a ':'"
+        ));
     }
     let prefix = match prefix {
         None => None,
         Some(p) => {
             let p = p.trim_start_matches("./").trim_matches('/');
             if p.is_empty() {
-                return Err("empty path prefix after ':'");
+                return Err("empty path prefix after ':'".into());
             }
             Some(p.to_string())
         }
@@ -136,7 +144,11 @@ impl RepoKeys {
                 prefix,
             });
             t.votes += 1;
-            if specificity > t.specificity {
+            // #167 review: an equal-length key breaks on the prefix string,
+            // so the deciding key never depends on path order.
+            if (specificity, std::cmp::Reverse(prefix))
+                > (t.specificity, std::cmp::Reverse(t.prefix))
+            {
                 t.specificity = specificity;
                 t.prefix = prefix;
             }

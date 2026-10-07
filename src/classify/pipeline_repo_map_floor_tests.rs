@@ -276,7 +276,7 @@ async fn exceptions_and_threshold_are_config_values() {
     let rules = rules_file();
     let repo_map = RepoMapConfig {
         mode: RepoMapMode::Floor,
-        exceptions: vec!["new_feature".into(), "security".into()],
+        exceptions: Some(vec!["new_feature".into(), "security".into()]),
         min_confidence: 0.85,
     };
     let pipeline = ClassificationPipeline::new(config(
