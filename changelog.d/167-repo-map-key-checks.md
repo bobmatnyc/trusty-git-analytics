@@ -1,2 +1,0 @@
-Breaking
-- A `classification.repo_categories` key with a `/` in its repository part (e.g. `acme-mono/api`) now fails `tga classify`, `tga eval` and `tga rules test` before any write, unless it equals a configured `repositories[].name` (`acme-org/widget`). So do an empty repository or prefix around a `:`, and two keys naming the same repository and prefix. A key holding `:` is now read as `<repo>:<prefix>`, not as a repository name, so a 10.2.0 map keyed by a repository name containing `:` no longer matches it (#167).
