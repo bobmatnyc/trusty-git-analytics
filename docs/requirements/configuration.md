@@ -245,7 +245,8 @@ rules can emit. A category may not be named `NO_MATCH` or
   organisation (from `pm.azure_devops.organization_url`) and its `project`
   and `projects`, the Jira site name (`acme` in
   `jira.url: https://acme.atlassian.net`), and every
-  `classification.repo_categories` key that is not a glob; from the
+  `classification.repo_categories` key that is not a glob (for a
+  `<repo>:<prefix>` key, only the repository before the `:`, #167); from the
   database, every distinct `repository` in `commits` and `pull_requests`.
   An `owner/name` slug also gives each part. Names are matched whole, in
   any case, hyphens included (`port acme-fin invoicing-api client` →
@@ -531,11 +532,13 @@ the console.
   question: its categories reach Jev only through the rules, as they reach
   Bedrock and the other sources.
 
-### `classification.repo_categories` — repo → category hard override (#158)
+### `classification.repo_categories` — repo → category map (#158, #167)
 
 Some repositories map to one category for every commit (owner ruling
-2026-10-07). `classification.repo_categories` maps a repository name to a
-category; every non-merge commit of a mapped repository gets that category.
+2026-10-07). `classification.repo_categories` maps a repository name, or a
+repository plus a path prefix, to a category. How the mapped category
+combines with the cascade is set by `classification.repo_map` (below): a
+hard override (the default) or a floor.
 
 ```yaml
 classification:
@@ -549,22 +552,28 @@ classification:
     duetto-playwright-e2e: qa
 ```
 
-- **A hard override.** A mapped commit gets the category at confidence 1.0
-  ahead of every other tier: the manual override
+- **A hard override** (`repo_map.mode: override`, the default). A mapped
+  commit gets the category at confidence 1.0 ahead of every other tier: the manual override
   (`classification_overrides`), the exact and regex rules (a security fix
   included), the issue-type and JIRA project tiers, external sources,
   weighted sum, fuzzy and the LLM.
-- **No LLM spend.** A mapped commit is never sent to the LLM fallback, nor
+- **No LLM spend** in override mode. A mapped commit is never sent to the
+  LLM fallback, nor
   by `tga classify --backfill-complexity`; no `llm_usage` row is written
   for it.
 - **Method `repo_map`.** The `classifications.method` column, the
   `tga classify` "by method" counts, and `tga eval`'s per-method precision
-  all show `repo_map`. The eval rule id is `repo_map:<repository>`.
+  all show `repo_map`. The eval rule id is `repo_map:<key>`, naming the
+  key that decided the commit (`repo_map:<repository>` or
+  `repo_map:<repository>:<prefix>`).
 - **Matching.** A key is the name tga stores in `commits.repository`:
   `repositories[].name`, else the basename of `repositories[].path`. It
   matches the whole name, case-sensitively: `mcp-services` does not match
   `MCP-Services` or `mcp-services-v2`. A key holding `*` is an error; there
-  are no globs.
+  are no globs. A key with a `:` is a path-prefix key (below); a key with a
+  `/` and no `:` (`duetto-repos/api`), or an empty repository or prefix
+  around the `:`, is an error. Two keys naming the same repository and
+  prefix (`r:api` and `r:api/`) are an error.
 - **Merges.** A merge commit is not mapped. It keeps its existing handling:
   the rules decide it and it never reaches the LLM.
 - **Checks.** Each category must be one the config knows: under
@@ -574,9 +583,84 @@ classification:
   stored in the config's spelling. An unknown category is an error naming
   the repository and the category, raised when `tga classify`,
   `tga eval sample` or `tga eval repredict` starts, before any write.
+- **Unmatched keys warn.** When `tga classify`, `tga eval sample` or
+  `tga eval repredict` starts, each key whose repository is not in
+  `commits.repository`, and each prefix key whose repository holds no
+  stored path under the prefix, gets one warning naming the key.
 - **Unmapped repositories** classify exactly as before.
 - Before #158 this key was documented as a last-resort per-repo fallback
   with glob keys, but `tga classify` never applied it.
+
+#### Path-prefix keys: `<repo>:<prefix>` (#167)
+
+A monorepo maps by subdirectory. A key `<repo>:<prefix>` applies to the
+commits of `<repo>` whose changed paths (the `files` table) lie under
+`<prefix>`. The prefix loses a leading `./` and leading or trailing `/`,
+and matches whole path segments: `services` holds `services/api/main.rs`,
+not `services-legacy/x.rs`. Paths match case-sensitively.
+
+```yaml
+classification:
+  repo_categories:
+    duetto-repos: internal_tooling            # bare key: every other path
+    duetto-repos:services: platform_infrastructure
+    duetto-repos:services/qa-harness: qa      # longest prefix wins
+```
+
+Each changed path resolves to one key: the longest prefix key it lies
+under, else the bare `<repo>` key, else no key. A commit whose paths span
+several keys is resolved by a vote, so the result never depends on path
+order:
+
+1. Each path votes for its key's category; a path with no key votes
+   "unmapped".
+2. The category with the most votes wins. Two keys with the same category
+   pool their votes.
+3. A tie goes to the category whose most specific voting key is longest (a
+   bare key is the least specific), then to the alphabetically first
+   category.
+4. "Unmapped" wins only with strictly more votes than every category; the
+   commit is then not mapped.
+
+A commit with no stored paths, or a repository with no prefix keys, uses
+the bare key alone. The rule id names the winning category's most specific
+voting key.
+
+#### `classification.repo_map` — override or floor (#167)
+
+```yaml
+classification:
+  repo_map:
+    mode: floor                                 # override (default) | floor
+    exceptions: [qa, security, devops, bug_fix] # default
+    min_confidence: 0.8                         # default
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | `override` \| `floor` | `override` | `override` is the #158 hard override above. `floor` makes the mapped category the default and lets the cascade infer exceptions. |
+| `exceptions` | list of categories | `[qa, security, devops, bug_fix]` | Categories a cascade verdict may keep in floor mode, matched case-insensitively. A name the config's category set lacks gets a warning; no verdict can match it. |
+| `min_confidence` | float in `[0, 1]` | `0.8` | Lowest confidence at which an exception verdict is kept. A value outside `[0, 1]` is an error. |
+
+Without the block, or with `mode: override`, behaviour is exactly that of
+10.2.0. Unknown keys in the block fail the load, as elsewhere in
+`classification:`.
+
+In floor mode:
+
+- The whole cascade runs for a mapped commit: the manual override, rules,
+  external sources, weighted sum, fuzzy and the LLM. A mapped commit is
+  LLM-eligible again under the usual `llm_fallback_scope` and
+  `llm_fallback_threshold` routing.
+- After the cascade, a mapped commit keeps the cascade's verdict only when
+  its category is in `exceptions` and its confidence is at or above
+  `min_confidence`. Every other mapped commit gets the mapped category at
+  confidence 1.0 with method `repo_map`. The rule applies to every tier
+  alike, the manual override included.
+- A merge commit is never mapped, as in override mode.
+- `tga eval sample` and `tga eval repredict` apply the same rule to the
+  carried or re-derived verdict; a carried verdict the floor replaces counts
+  as superseded.
 
 ---
 

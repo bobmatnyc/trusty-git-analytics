@@ -6,14 +6,22 @@ a rule-based fallback ensuring every commit receives a classification.
 
 ## Four-Tier Cascade
 
-### Repo map: `classification.repo_categories` (confidence: 1.0, #158)
+### Repo map: `classification.repo_categories` (confidence: 1.0, #158, #167)
 
-- Source: the `classification.repo_categories` config map, repository name → category
-  (see `configuration.md`)
-- Key: the commit's `repository` column, matched whole and case-sensitively
-- A hard override: every non-merge commit of a mapped repository gets the mapped category
-  with method `repo_map`, ahead of every tier below, the manual override included
-- A mapped commit is never sent to the LLM, nor by `tga classify --backfill-complexity`
+- Source: the `classification.repo_categories` config map, repository name (or
+  `<repo>:<prefix>`) → category; `classification.repo_map` sets the mode (see
+  `configuration.md`)
+- Key: the commit's `repository` column, matched whole and case-sensitively; a
+  `<repo>:<prefix>` key also needs the commit's changed paths under the prefix, and a
+  commit spanning several keys is resolved by a per-path vote
+- Override mode (default): every non-merge commit of a mapped repository gets the mapped
+  category with method `repo_map`, ahead of every tier below, the manual override
+  included. A mapped commit is never sent to the LLM, nor by
+  `tga classify --backfill-complexity`
+- Floor mode: the tiers below run as for any commit, the LLM included; afterwards a mapped
+  commit keeps the cascade's verdict only when it is in `repo_map.exceptions` (default
+  `qa`, `security`, `devops`, `bug_fix`) at or above `repo_map.min_confidence` (default
+  0.8), and otherwise gets the mapped category with method `repo_map`
 - A merge commit is not mapped; it keeps the handling below
 
 ### Tier 0: Manual Overrides (confidence: 1.0)
@@ -21,7 +29,8 @@ a rule-based fallback ensuring every commit receives a classification.
 - Source: `classification_overrides` table
 - Key: `(commit_hash, repo_path)`
 - Set via `tga override --commit <HASH> --repo <PATH> --change-type <TYPE> --reason <...>`
-- Always wins when present, except for a commit the repo map decides
+- Always wins when present, except for a commit the repo map decides (in floor mode, a
+  manual verdict is kept only as an exception, like any other tier's)
 
 ### Tier 1.5: Issue Type Classifier (confidence: 0.90)
 
