@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.3.1] — 2026-10-07
+
+### Fixed
+
+- In `classification.repo_map` floor mode, the exception `qa` now matches `test` and `devops` matches `ci`, so a floor-mode repository on the built-in rules keeps its `test:` and `ci:` commits (rule or LLM verdicts) instead of replacing them with the mapped category, and `tga classify` no longer warns that the default exception `qa` is unknown. A config whose rules or `custom_categories` define `qa` or `devops` keeps matching those names exactly. `tga eval sample` and `repredict` apply the same rule (#171).
+
 ## [10.3.0] — 2026-10-07
 
 ### Breaking
