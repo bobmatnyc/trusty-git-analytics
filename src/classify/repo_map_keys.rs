@@ -1,6 +1,6 @@
 //! `classification.repo_categories` keys: `<repo>` and `<repo>:<prefix>` (#167).
 //!
-//! Why: the duetto-repos monorepo holds about 39% of commits and needs a
+//! Why: a monorepo holds commits of several categories and needs a
 //! category per subdirectory, so a key may name a path prefix.
 //! What: [`parse_key`] splits and checks one key; [`RepoKeys`] holds one
 //! repository's keys and resolves a commit's changed paths to one category
@@ -27,7 +27,7 @@ pub(crate) struct MapKey {
 /// # Errors
 ///
 /// The reason the key is malformed: a `/` in the repository part (a bare
-/// `duetto-repos/api` means `duetto-repos:api`), or an empty repository or
+/// `acme-mono/api` means `acme-mono:api`), or an empty repository or
 /// prefix.
 pub(crate) fn parse_key(raw: &str) -> std::result::Result<MapKey, &'static str> {
     let (repo, prefix) = match raw.split_once(':') {

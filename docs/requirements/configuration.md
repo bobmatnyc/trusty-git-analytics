@@ -571,7 +571,7 @@ classification:
   matches the whole name, case-sensitively: `mcp-services` does not match
   `MCP-Services` or `mcp-services-v2`. A key holding `*` is an error; there
   are no globs. A key with a `:` is a path-prefix key (below); a key with a
-  `/` and no `:` (`duetto-repos/api`), or an empty repository or prefix
+  `/` and no `:` (`acme-mono/api`), or an empty repository or prefix
   around the `:`, is an error. Two keys naming the same repository and
   prefix (`r:api` and `r:api/`) are an error.
 - **Merges.** A merge commit is not mapped. It keeps its existing handling:
@@ -602,9 +602,9 @@ not `services-legacy/x.rs`. Paths match case-sensitively.
 ```yaml
 classification:
   repo_categories:
-    duetto-repos: internal_tooling            # bare key: every other path
-    duetto-repos:services: platform_infrastructure
-    duetto-repos:services/qa-harness: qa      # longest prefix wins
+    acme-mono: internal_tooling            # bare key: every other path
+    acme-mono:services: platform_infrastructure
+    acme-mono:services/qa-harness: qa      # longest prefix wins
 ```
 
 Each changed path resolves to one key: the longest prefix key it lies

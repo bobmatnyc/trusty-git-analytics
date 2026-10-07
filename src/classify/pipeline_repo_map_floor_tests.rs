@@ -41,9 +41,9 @@ categories:
   - name: bug_fix
 ";
 
-const MAPPED: &str = "mcp-services";
-const UNMAPPED: &str = "billing-api";
-const MONO: &str = "duetto-repos";
+const MAPPED: &str = "acme-tools";
+const UNMAPPED: &str = "acme-billing";
+const MONO: &str = "acme-mono";
 /// A message no rule matches, so the cascade leaves it unanswered.
 const NOTHING: &str = "zzz qqq vvv";
 
@@ -376,8 +376,8 @@ async fn an_absent_repo_map_block_leaves_output_unchanged() {
 
 /// Why (#167 path-prefix keys): a monorepo maps by subdirectory, and the
 /// most specific key wins.
-/// What: keys `duetto-repos`, `duetto-repos:services` and
-/// `duetto-repos:services/qa-harness/`. A commit under
+/// What: keys `acme-mono`, `acme-mono:services` and
+/// `acme-mono:services/qa-harness/`. A commit under
 /// `services/qa-harness` gets the longest key; one under `services/api` the
 /// shorter one. `services-legacy/` is not under `services` (prefixes match
 /// whole path segments), so it falls back to the bare key.
@@ -387,8 +387,8 @@ async fn the_longest_matching_prefix_wins() {
     let rules = rules_file();
     let map = [
         (MONO, "internal_tooling"),
-        ("duetto-repos:services", "platform_infrastructure"),
-        ("duetto-repos:services/qa-harness/", "qa"),
+        ("acme-mono:services", "platform_infrastructure"),
+        ("acme-mono:services/qa-harness/", "qa"),
     ];
     let pipeline =
         ClassificationPipeline::new(config(rules.path(), &map, RepoMapConfig::default()));
@@ -413,9 +413,9 @@ async fn the_longest_matching_prefix_wins() {
 /// Why (#167 path-prefix keys): the bare `<repo>` key covers every path no
 /// prefix key holds, and a repo with only prefix keys maps nothing outside
 /// them.
-/// What: `duetto-repos` has a bare key and a `services` key; a commit under
+/// What: `acme-mono` has a bare key and a `services` key; a commit under
 /// `docs/` and a commit with no stored paths take the bare category.
-/// `platform-mono` has only a `services` key; its `docs/` commit stays
+/// `acme-platform` has only a `services` key; its `docs/` commit stays
 /// unmapped.
 /// Test: this test.
 #[tokio::test]
@@ -423,8 +423,8 @@ async fn a_bare_repo_key_is_the_fallback() {
     let rules = rules_file();
     let map = [
         (MONO, "internal_tooling"),
-        ("duetto-repos:services", "qa"),
-        ("platform-mono:services", "qa"),
+        ("acme-mono:services", "qa"),
+        ("acme-platform:services", "qa"),
     ];
     let pipeline =
         ClassificationPipeline::new(config(rules.path(), &map, RepoMapConfig::default()));
@@ -432,7 +432,7 @@ async fn a_bare_repo_key_is_the_fallback() {
     insert_with_paths(&db, "sha-docs", MONO, &["docs/readme.md"]);
     insert_with_paths(&db, "sha-nopaths", MONO, &[]);
     insert_with_paths(&db, "sha-svc", MONO, &["services/a.rs"]);
-    insert_with_paths(&db, "sha-other-docs", "platform-mono", &["docs/readme.md"]);
+    insert_with_paths(&db, "sha-other-docs", "acme-platform", &["docs/readme.md"]);
 
     run(&pipeline, &mut db).await.expect("run");
 
@@ -528,8 +528,8 @@ async fn an_unmatched_key_warns_once_per_run() {
     let map = [
         (MAPPED, "internal_tooling"),
         ("ghost-repo", "qa"),
-        ("duetto-repos:nowhere", "qa"),
-        ("duetto-repos:services", "qa"),
+        ("acme-mono:nowhere", "qa"),
+        ("acme-mono:services", "qa"),
     ];
     let pipeline =
         ClassificationPipeline::new(config(rules.path(), &map, RepoMapConfig::default()));
@@ -549,9 +549,9 @@ async fn an_unmatched_key_warns_once_per_run() {
         };
         for (key, want) in [
             ("ghost-repo", 1),
-            ("duetto-repos:nowhere", 1),
+            ("acme-mono:nowhere", 1),
             (MAPPED, 0),
-            ("duetto-repos:services", 0),
+            ("acme-mono:services", 0),
         ] {
             if warned(key) != want {
                 return Err(format!("{key}: {} warnings, want {want}", warned(key)));
@@ -569,12 +569,7 @@ async fn an_unmatched_key_warns_once_per_run() {
 #[tokio::test]
 async fn a_malformed_key_is_rejected() {
     let rules = rules_file();
-    for key in [
-        "duetto-repos/api",
-        "duetto-repos:",
-        ":api",
-        "duetto-repos:/",
-    ] {
+    for key in ["acme-mono/api", "acme-mono:", ":api", "acme-mono:/"] {
         let pipeline = ClassificationPipeline::new(config(
             rules.path(),
             &[(key, "qa")],
