@@ -204,7 +204,7 @@ fn llm_key_missing(
     cls: &ClassificationConfig,
     env_lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    if !cls.use_llm {
+    if cls.use_llm != Some(true) {
         return None;
     }
     let provider = cls.llm_provider.as_str();

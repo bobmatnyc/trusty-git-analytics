@@ -65,17 +65,30 @@ impl super::pipeline::ClassificationPipeline {
     /// Whether this config turns the LLM tier on.
     ///
     /// Why (#165): `tga classify` and `tga rules test` must agree on it.
-    /// What: true when the top-level `llm:` section is present (it enables
-    /// the tier by itself, even with `classification.use_llm: false`), else
-    /// `classification.use_llm`.
-    /// Test: `tests/rules_test_cli.rs::rules_test_honours_weighted_sum_enabled_false`.
+    /// What: [`crate::core::config::Config::llm_tier_enabled`]. #175: an
+    /// explicit `classification.use_llm: false` turns the tier off whatever
+    /// the `llm:` section says; with the key absent, the section turns it on.
+    /// Test: `tests/rules_test_cli.rs::rules_test_honours_weighted_sum_enabled_false`,
+    /// `classify::use_llm_off_tests::llm_enabled_honours_an_explicit_false`.
     pub(crate) fn llm_enabled(&self) -> bool {
-        self.config.llm.is_some()
-            || self
-                .config
-                .classification
-                .as_ref()
-                .is_some_and(|c| c.use_llm)
+        self.config.llm_tier_enabled()
+    }
+
+    /// [`Self::llm_enabled`] for the run about to build its engine.
+    ///
+    /// Why (#175): an operator whose `llm:` section is switched off must see
+    /// that in the log, not infer it from the absence of LLM calls.
+    /// What: logs once at info when `use_llm: false` overrides a present
+    /// `llm:` section, then returns [`Self::llm_enabled`].
+    /// Test: `classify::use_llm_off_tests::use_llm_false_classify_sends_nothing_to_the_configured_provider`.
+    pub(super) fn llm_enabled_for_run(&self) -> bool {
+        if self.config.llm_section_switched_off() {
+            info!(
+                "the llm: section is ignored because classification.use_llm is false; \
+                 no LLM client is built and no LLM call is made"
+            );
+        }
+        self.llm_enabled()
     }
 }
 

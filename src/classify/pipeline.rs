@@ -254,7 +254,8 @@ impl ClassificationPipeline {
 
         // Wire the LLM tier when requested, preferring the `llm:` section.
         // #165: `llm_enabled` is shared with `tga rules test`.
-        if self.llm_enabled() {
+        // #175: `use_llm: false` builds no client, whatever `llm:` says.
+        if self.llm_enabled_for_run() {
             let llm_classifier = if let Some(llm_cfg) = self.config.llm.as_ref() {
                 // New path: `llm:` section present.
                 //
@@ -353,7 +354,7 @@ impl ClassificationPipeline {
     fn engine_config(&self) -> ClassificationEngineConfig {
         match self.config.classification.as_ref() {
             Some(c) => ClassificationEngineConfig {
-                use_llm: c.use_llm,
+                use_llm: c.use_llm == Some(true),
                 llm_model: c.llm_model.clone().unwrap_or_else(|| "gpt-4o-mini".into()),
                 llm_provider: c.llm_provider.clone(),
                 openrouter_api_key: c.openrouter_api_key.clone(),
@@ -848,6 +849,12 @@ impl ClassificationPipeline {
         db: &mut Database,
         engine: &ClassificationEngine,
     ) -> Result<usize> {
+        // #175: complexity is LLM-only; with no LLM tier there is nothing to
+        // ask, so skip the per-row loop rather than warn once per commit.
+        if engine.llm_has_api_key().is_none() {
+            warn!("complexity backfill skipped: the LLM tier is off (see classification.use_llm)");
+            return Ok(0);
+        }
         // Collect candidate rows. Rows produced by the `exact_rule` tier and
         // merge commits are excluded — neither is LLM-eligible (#111).
         let candidates = super::pipeline_db::read_complexity_backfill_candidates(db)?;

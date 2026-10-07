@@ -36,8 +36,9 @@ pub(crate) struct Resolved {
 ///
 /// Why: #111 review — a stored LLM or external verdict must not survive a
 /// config that no longer runs that tier. What: mirrors
-/// `ClassificationPipeline`: the LLM tier runs when an `llm:` section exists or
-/// `classification.use_llm` is set, on the verdicts `llm_fallback_scope`
+/// `ClassificationPipeline`: the LLM tier runs when `Config::llm_tier_enabled`
+/// says so (#175: `classification.use_llm: false` turns it off whatever the
+/// `llm:` section says), on the verdicts `llm_fallback_scope`
 /// selects (#111: at or below `llm_fallback_threshold`, or only unanswered
 /// ones), never for a merge commit (#111), and only for a stored category
 /// inside a custom-only rules set (#131); external sources run when any is
@@ -81,7 +82,8 @@ impl CarryPolicy {
             repo_map: pipeline.repo_category_map()?,
             paths: std::collections::HashMap::new(),
             llm_categories,
-            use_llm: config.llm.is_some() || c.is_some_and(|c| c.use_llm),
+            // #175: the predicate `tga classify` reads; `use_llm: false` wins.
+            use_llm: config.llm_tier_enabled(),
             llm_threshold: c.map_or(0.65, |c| c.llm_fallback_threshold),
             llm_scope: c.map(|c| c.llm_fallback_scope).unwrap_or_default(),
             external: c.is_some_and(|c| !c.no_external && !c.sources.is_empty()),

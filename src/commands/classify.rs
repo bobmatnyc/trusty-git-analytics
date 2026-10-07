@@ -33,7 +33,8 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
             c.rules_files.insert(0, rules);
         }
         if args.use_llm {
-            c.use_llm = true;
+            // #175: an explicit flag outranks `use_llm: false` in the config.
+            c.use_llm = Some(true);
         }
         // When --no-external is passed, suppress all external classification
         // sources for this run regardless of what the rules file configures.

@@ -175,7 +175,7 @@ fn empty_jira_block_is_fine() {
 /// Build a `ClassificationConfig` with LLM classification on.
 fn llm_enabled(provider: &str, config_key: Option<&str>) -> ClassificationConfig {
     ClassificationConfig {
-        use_llm: true,
+        use_llm: Some(true),
         llm_provider: provider.into(),
         openrouter_api_key: config_key.map(str::to_string),
         ..Default::default()
@@ -268,7 +268,7 @@ fn llm_key_missing_across_providers_and_env() {
 
     // LLM off means no key is required.
     let mut off = llm_enabled("openrouter", None);
-    off.use_llm = false;
+    off.use_llm = Some(false);
     assert_eq!(llm_key_missing(&off, none), None);
 }
 

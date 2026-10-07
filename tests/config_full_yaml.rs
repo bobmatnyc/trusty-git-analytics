@@ -169,7 +169,7 @@ fn full_config_every_section_deserializes() {
         class.repo_categories["infra-api"],
         "platform_infrastructure"
     );
-    assert!(class.use_llm);
+    assert_eq!(class.use_llm, Some(true));
     assert_eq!(class.confidence_threshold, 0.6);
     assert_eq!(class.llm_fallback_scope, LlmFallbackScope::Unanswered);
     assert_eq!(class.llm_fallback_concurrency, 4);
