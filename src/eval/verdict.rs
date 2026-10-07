@@ -384,6 +384,55 @@ mod tests {
         assert!(resolved[2].superseded, "the manual verdict was floored");
     }
 
+    /// Why (#171): `tga eval` must keep the built-in rules' `test` and `ci`
+    /// verdicts in a floor-mode repo, as `tga classify` does, because the
+    /// default exceptions' `qa` and `devops` stand for them.
+    /// What: built-in rules, floor mode with the default exceptions, repo
+    /// `e2e` mapped to `tooling`. A `test:` and a `ci:` commit resolve to
+    /// their own category on the exact tier; a `feat:` commit to the map.
+    /// Test: this test.
+    #[test]
+    fn floor_mode_keeps_built_in_test_and_ci_verdicts() {
+        let config = Config {
+            classification: Some(ClassificationConfig {
+                repo_categories: [("e2e".to_string(), "tooling".to_string())].into(),
+                repo_map: crate::core::config::RepoMapConfig {
+                    mode: crate::core::config::RepoMapMode::Floor,
+                    ..Default::default()
+                },
+                ..ClassificationConfig::default()
+            }),
+            ..Config::default()
+        };
+        let engine = ClassificationPipeline::new(config.clone())
+            .build_rule_engine()
+            .expect("engine");
+        let policy = CarryPolicy::from_config(&config).expect("policy");
+        let messages = [
+            "test: cover the parser edge cases",
+            "ci: pin the runner image",
+            "feat: add the export button",
+        ];
+        let rows: Vec<CommitRow> = messages
+            .iter()
+            .map(|m| {
+                let mut c = commit("e2e", None);
+                c.message = (*m).into();
+                c
+            })
+            .collect();
+        let refs: Vec<&CommitRow> = rows.iter().collect();
+        let (resolved, _) = resolve_verdicts(&engine, &policy, &refs);
+        let got: Vec<(&str, &str)> = resolved
+            .iter()
+            .map(|r| (r.tier.as_str(), r.category.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [("exact", "test"), ("exact", "ci"), ("repo_map", "tooling")]
+        );
+    }
+
     /// Why (#167 review): `tga eval` reads the changed paths a prefix key
     /// needs through [`CarryPolicy::prepare`], so it resolves a monorepo
     /// commit as `tga classify` does.
