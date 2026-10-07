@@ -145,7 +145,12 @@ name = "tga"
 # #157 (docs). The public types it touches are `#[non_exhaustive]`; the config
 # load now rejects unknown `llm:` keys and misplaced `jev`/`llm.*` keys, recorded
 # as a `Breaking` changelog entry.
-version = "10.1.0"
+# 10.1.0 -> 10.2.0 (Architect request, 2026-10-07): MINOR under the internal
+# numbering policy (docs/PUBLISHING.md, owner ruling 2026-09-26): a feature bumps
+# the minor, a break does not go major. Carries #162 (`classification.repo_categories`
+# as a repo -> category hard override). It adds the `ClassificationMethod::RepoMap`
+# variant, recorded as a `Breaking` changelog entry.
+version = "10.2.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for

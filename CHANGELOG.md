@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.2.0] — 2026-10-07
+
+### Breaking
+
+- `ClassificationMethod` gains the variant `RepoMap` (stored as `repo_map`). The enum is not `#[non_exhaustive]`, so an exhaustive `match` on it outside the crate no longer compiles. `TraceTier::RepoMap` is added too; that enum is already `#[non_exhaustive]` Under the internal numbering policy (`docs/PUBLISHING.md`, owner ruling 2026-09-26) it ships in a minor release (#158, #162).
+
+### Added
+
+- `classification.repo_categories` is now a repo → category hard override. Every non-merge commit of a mapped repository gets the mapped category at confidence 1.0 with method `repo_map`, ahead of every other tier (manual override, rules including security fixes, external sources, weighted sum, fuzzy and the LLM). A mapped commit is never sent to the LLM fallback or the complexity backfill. Keys are the stored repository name (`repositories[].name`, else the path basename), matched whole and case-sensitively; a `*` key is an error. Each category must be one the config knows, else `tga classify` and `tga eval` stop before any write with an error naming the repository and the category. `tga eval sample` and `tga eval repredict` resolve mapped commits the same way, so `repo_map` appears in the per-method breakdown. Before this change the key was documented as a last-resort fallback that `tga classify` never applied (#158, #162).
+
 ## [10.1.0] — 2026-10-06
 
 ### Breaking
