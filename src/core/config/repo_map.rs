@@ -45,6 +45,8 @@ pub struct RepoMapConfig {
     pub mode: RepoMapMode,
     /// Categories a cascade verdict may keep in `floor` mode, compared
     /// through the taxonomy's canonical names (`bug_fix` matches `bugfix`).
+    /// #171: `qa` matches `test` and `devops` matches `ci` unless the
+    /// config's rules or custom taxonomy define `qa` or `devops`.
     /// `None` (the key absent) means [`REPO_MAP_DEFAULT_EXCEPTIONS`]; read
     /// it through [`Self::exceptions`]. #167 review: a name the config does
     /// not know is an error in a written list, a warning in the default.

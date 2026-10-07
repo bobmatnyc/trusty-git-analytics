@@ -33,10 +33,15 @@ use crate::core::models::ClassificationMethod;
 
 use super::pipeline_db::CommitRow;
 
+/// Floor-exception aliases: an exception name and the built-in category it
+/// stands for when the config defines no category of that name (#171).
+const FLOOR_EXCEPTION_ALIASES: [(&str, &str); 2] = [("qa", "test"), ("devops", "ci")];
+
 /// Floor mode's exception rule (#167).
 #[derive(Debug, Clone)]
 struct Floor {
-    /// Canonical names ([`canonical_category`]).
+    /// Canonical names ([`canonical_category`]), after
+    /// [`FLOOR_EXCEPTION_ALIASES`].
     exceptions: Vec<String>,
     min_confidence: f64,
 }
@@ -64,7 +69,9 @@ impl RepoCategoryMap {
     /// What: a key is `<repo>` or `<repo>:<prefix>` ([`parse_key`]); the
     /// repository may hold a `/` only when it is one of `configured`, the
     /// `repositories[].name` values. A category matches a known name
-    /// case-insensitively and is stored in the known spelling.
+    /// case-insensitively and is stored in the known spelling. `defined`
+    /// holds the canonical names the config's rules and custom taxonomy
+    /// define; see [`Self::checked_floor`].
     ///
     /// # Errors
     ///
@@ -77,6 +84,7 @@ impl RepoCategoryMap {
         settings: &RepoMapConfig,
         known: &[String],
         configured: &HashSet<&str>,
+        defined: &HashSet<String>,
     ) -> Result<Self> {
         let sorted: BTreeMap<&String, &String> = raw.iter().collect();
         let globs: Vec<&str> = sorted
@@ -143,21 +151,28 @@ impl RepoCategoryMap {
         Ok(Self {
             repos,
             keys,
-            floor: Self::checked_floor(settings, known)?,
+            floor: Self::checked_floor(settings, known, defined)?,
         })
     }
 
     /// The floor of `settings`, or `None` in override mode.
     ///
-    /// What: exceptions compare through [`canonical_category`]. An exception
-    /// `known` does not hold is an error in a written list; in the default
-    /// list it is a warning, since a built-in taxonomy lacks `qa`.
+    /// What: exceptions compare through [`canonical_category`], then
+    /// [`FLOOR_EXCEPTION_ALIASES`] unless `defined` holds the name. An
+    /// exception `known` does not hold is an error in a written list; in
+    /// the default list it is a warning.
+    /// Test: `pipeline_repo_map_floor_tests::floor_keeps_built_in_test_and_ci_rule_verdicts`,
+    /// `pipeline_repo_map_floor_tests::a_taxonomy_defining_qa_and_devops_matches_them_exactly`.
     ///
     /// # Errors
     ///
     /// A `min_confidence` outside `[0, 1]`, or a written exception `known`
     /// does not hold.
-    fn checked_floor(settings: &RepoMapConfig, known: &[String]) -> Result<Option<Floor>> {
+    fn checked_floor(
+        settings: &RepoMapConfig,
+        known: &[String],
+        defined: &HashSet<String>,
+    ) -> Result<Option<Floor>> {
         if settings.mode != RepoMapMode::Floor {
             return Ok(None);
         }
@@ -168,10 +183,22 @@ impl RepoCategoryMap {
             )));
         }
         let exceptions = settings.exceptions();
+        // #171: the built-in rules emit `test` and `ci`, never the default
+        // exceptions' `qa` and `devops`; a config defining them keeps them.
+        let matched = |e: &str| {
+            let name = canonical_category(e);
+            if defined.contains(&name) {
+                return name;
+            }
+            FLOOR_EXCEPTION_ALIASES
+                .iter()
+                .find(|(alias, _)| *alias == name)
+                .map_or(name, |(_, target)| (*target).to_string())
+        };
         let known: HashSet<String> = known.iter().map(|k| canonical_category(k)).collect();
         let unknown: Vec<&str> = exceptions
             .iter()
-            .filter(|e| !known.contains(&canonical_category(e)))
+            .filter(|e| !known.contains(&matched(e)))
             .map(String::as_str)
             .collect();
         // #167 review: a written list fails closed; only the default warns.
@@ -189,7 +216,7 @@ impl RepoCategoryMap {
             );
         }
         Ok(Some(Floor {
-            exceptions: exceptions.iter().map(|e| canonical_category(e)).collect(),
+            exceptions: exceptions.iter().map(|e| matched(e)).collect(),
             min_confidence: min,
         }))
     }
@@ -201,8 +228,9 @@ impl RepoCategoryMap {
 
     /// Whether floor mode keeps a cascade verdict of `category` at
     /// `confidence`: an exception, by canonical name (#167 review: `bugfix`
-    /// matches `bug_fix`), at or above `min_confidence`. Always false in
-    /// override mode.
+    /// matches `bug_fix`; #171: `test` matches `qa`, `ci` matches `devops`
+    /// when the config defines neither), at or above `min_confidence`.
+    /// Always false in override mode.
     pub(crate) fn keeps(&self, category: &str, confidence: f64) -> bool {
         self.floor.as_ref().is_some_and(|f| {
             confidence >= f.min_confidence && f.exceptions.contains(&canonical_category(category))
@@ -411,6 +439,20 @@ impl ClassificationPipeline {
             .iter()
             .filter_map(|r| r.name.as_deref())
             .collect();
-        RepoCategoryMap::checked(raw, settings, &known, &configured)
+        // #171: the names the rules and the custom taxonomy define, so a
+        // floor exception naming one is never aliased. The built-in
+        // taxonomy's passive entries (e.g. `devops`) do not count.
+        let custom = self
+            .config
+            .classification
+            .iter()
+            .flat_map(|c| c.custom_categories.iter().map(|d| d.name.clone()));
+        let defined: HashSet<String> = self
+            .rule_categories()?
+            .into_iter()
+            .chain(custom)
+            .map(|n| canonical_category(&n))
+            .collect();
+        RepoCategoryMap::checked(raw, settings, &known, &configured, &defined)
     }
 }

@@ -21,7 +21,9 @@ a rule-based fallback ensuring every commit receives a classification.
 - Floor mode: the tiers below run as for any commit, the LLM included; afterwards a mapped
   commit keeps the cascade's verdict only when it is in `repo_map.exceptions` (default
   `qa`, `security`, `devops`, `bug_fix`) at or above `repo_map.min_confidence` (default
-  0.8), and otherwise gets the mapped category with method `repo_map`
+  0.8), and otherwise gets the mapped category with method `repo_map`. An exception
+  `qa` matches `test` and `devops` matches `ci`, unless the config's rules or
+  `custom_categories` define `qa` or `devops` (#171)
 - A merge commit is not mapped; it keeps the handling below
 
 ### Tier 0: Manual Overrides (confidence: 1.0)

@@ -1,0 +1,2 @@
+Fixed
+- In `classification.repo_map` floor mode, the exception `qa` now matches `test` and `devops` matches `ci`, so a floor-mode repository on the built-in rules keeps its `test:` and `ci:` commits (rule or LLM verdicts) instead of replacing them with the mapped category, and `tga classify` no longer warns that the default exception `qa` is unknown. A config whose rules or `custom_categories` define `qa` or `devops` keeps matching those names exactly. `tga eval sample` and `repredict` apply the same rule (#171).

@@ -10,6 +10,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
+use crate::classify::taxonomy::{SubcategoryDef, TopLevelCategory};
 use crate::classify::tiers::llm::LlmClassifier;
 use crate::classify::tiers::weighted_sum::WeightedSumConfig;
 use crate::core::config::{
@@ -831,4 +832,202 @@ async fn floor_keeps_the_llm_complexity_when_it_replaces_an_llm_verdict() {
         )
         .expect("complexity");
     assert_eq!(complexity, Some(2));
+}
+
+/// Floor mode on the built-in rules (no rules file), [`MAPPED`] mapped to
+/// `tooling`. The signal-voting tier is off, so an unmatched message stays
+/// unanswered and reaches the LLM.
+fn built_in_floor(repo_map: RepoMapConfig) -> Config {
+    Config {
+        classification: Some(ClassificationConfig {
+            repo_categories: [(MAPPED.to_string(), "tooling".to_string())].into(),
+            repo_map,
+            llm_fallback_scope: LlmFallbackScope::LowConfidence,
+            weighted_sum: WeightedSumConfig {
+                enabled: false,
+                ..WeightedSumConfig::default()
+            },
+            ..ClassificationConfig::default()
+        }),
+        ..Config::default()
+    }
+}
+
+/// Why (#171): the default exceptions name `qa` and `devops`, but the
+/// built-in rules emit `test` and `ci`; the floor replaced test and CI
+/// commits with the mapped category, against the #167 owner ruling.
+/// What: built-in rules, floor mode, default exceptions. A `test:` commit
+/// keeps `test` and a `ci:` commit keeps `ci`, each under its own name (no
+/// rewrite to `qa`/`devops`); a `feat:` commit takes the mapped category.
+/// Test: this test.
+#[tokio::test]
+async fn floor_keeps_built_in_test_and_ci_rule_verdicts() {
+    let pipeline = ClassificationPipeline::new(built_in_floor(floor()));
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-test", MAPPED, "test: cover the parser edge cases");
+    insert(&db, "sha-ci", MAPPED, "ci: pin the runner image");
+    insert(&db, "sha-feat", MAPPED, "feat: add the export button");
+
+    run(&pipeline, &mut db).await.expect("run");
+
+    for (sha, want) in [("sha-test", "test"), ("sha-ci", "ci")] {
+        let (category, method) = cat_method(&db, sha);
+        assert_eq!(category, want, "{sha}: method {method}");
+        assert_ne!(method, "repo_map", "{sha}");
+    }
+    assert_eq!(cat_method(&db, "sha-feat"), pair("tooling", "repo_map"));
+}
+
+/// Why (#171): the LLM tier on the built-in list answers `test` and `ci`,
+/// never `qa` or `devops`; a high-confidence answer must survive the floor
+/// like a rule verdict.
+/// What: built-in rules, floor mode, default exceptions. The LLM answers
+/// `test` (then `ci`) at 0.9 for an unanswered commit in the mapped repo;
+/// the stored verdict is the LLM's, under its own name.
+/// Test: this test.
+#[tokio::test]
+async fn floor_keeps_built_in_llm_test_and_ci_verdicts() {
+    for answer in ["test", "ci"] {
+        let pipeline = ClassificationPipeline::new(built_in_floor(floor()));
+        let server = mock_llm(answer, 0.9).await;
+        let mut db = Database::open_in_memory().expect("db");
+        insert(&db, "sha-none", MAPPED, NOTHING);
+
+        run_with_llm(&pipeline, &mut db, &server).await;
+
+        assert_eq!(
+            cat_method(&db, "sha-none"),
+            pair(answer, "llm_fallback"),
+            "{answer}"
+        );
+    }
+}
+
+/// Why (#171): every classify run on the built-in rules logged "default
+/// exception 'qa' is a category this config does not know".
+/// What: built-in rules, floor mode, default exceptions; one run logs no
+/// default-exception warning.
+/// Test: this test.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn the_default_exceptions_warn_nothing_under_the_built_in_rules() {
+    let pipeline = ClassificationPipeline::new(built_in_floor(floor()));
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-a", MAPPED, NOTHING);
+
+    run(&pipeline, &mut db).await.expect("run");
+
+    logs_assert(|lines: &[&str]| {
+        let warned: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("default exception"))
+            .collect();
+        if warned.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("unexpected warnings: {warned:?}"))
+        }
+    });
+}
+
+/// Why (#171): the matcher treats `qa` as `test` and `devops` as `ci`, so a
+/// written list naming them works on the built-in rules as the default does.
+/// What: `exceptions: [qa, devops]` on the built-in rules loads without
+/// error; a `test:` and a `ci:` commit keep their own category.
+/// Test: this test.
+#[tokio::test]
+async fn a_written_qa_devops_list_works_on_the_built_in_rules() {
+    let repo_map: RepoMapConfig =
+        serde_yaml::from_str("mode: floor\nexceptions: [qa, devops]\n").expect("block");
+    let pipeline = ClassificationPipeline::new(built_in_floor(repo_map));
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-test", MAPPED, "test: cover the parser edge cases");
+    insert(&db, "sha-ci", MAPPED, "ci: pin the runner image");
+
+    run(&pipeline, &mut db).await.expect("run");
+
+    assert_eq!(cat_method(&db, "sha-test").0, "test");
+    assert_eq!(cat_method(&db, "sha-ci").0, "ci");
+}
+
+/// Rules defining `qa`, `devops`, `test` and `ci` side by side.
+const QA_DEVOPS_RULES: &str = "extend_defaults: false
+rules:
+  - id: qa
+    category: qa
+    keywords: [\"qa:\"]
+    confidence: 0.9
+  - id: devops
+    category: devops
+    keywords: [\"devops:\"]
+    confidence: 0.9
+  - id: test
+    category: test
+    keywords: [\"test:\"]
+    confidence: 0.9
+  - id: ci
+    category: ci
+    keywords: [\"ci:\"]
+    confidence: 0.9
+categories:
+  - name: internal_tooling
+";
+
+/// Why (#171): a taxonomy that defines `qa` or `devops` keeps matching
+/// those names exactly; the alias is only for a config that does not
+/// define them.
+/// What: (1) a rules file defining `qa`, `devops`, `test` and `ci`: `qa`
+/// and `devops` verdicts are kept, `test` and `ci` take the mapped
+/// category. (2) the built-in rules plus `custom_categories` defining `qa`
+/// and `devops`: `test` and `ci` take the mapped category.
+/// Test: this test.
+#[tokio::test]
+async fn a_taxonomy_defining_qa_and_devops_matches_them_exactly() {
+    let mut rules = tempfile::Builder::new()
+        .suffix(".yaml")
+        .tempfile()
+        .expect("tempfile");
+    rules
+        .write_all(QA_DEVOPS_RULES.as_bytes())
+        .expect("write rules");
+    let pipeline = ClassificationPipeline::new(config(
+        rules.path(),
+        &[(MAPPED, "internal_tooling")],
+        floor(),
+    ));
+    let mut db = Database::open_in_memory().expect("db");
+    for (sha, message) in [
+        ("sha-qa", "qa: retry the login check"),
+        ("sha-devops", "devops: rotate the runners"),
+        ("sha-test", "test: cover the parser"),
+        ("sha-ci", "ci: pin the image"),
+    ] {
+        insert(&db, sha, MAPPED, message);
+    }
+    run(&pipeline, &mut db).await.expect("run");
+    assert_eq!(cat_method(&db, "sha-qa").0, "qa");
+    assert_eq!(cat_method(&db, "sha-devops").0, "devops");
+    for sha in ["sha-test", "sha-ci"] {
+        assert_eq!(
+            cat_method(&db, sha),
+            pair("internal_tooling", "repo_map"),
+            "{sha}"
+        );
+    }
+
+    let mut config = built_in_floor(floor());
+    if let Some(c) = config.classification.as_mut() {
+        c.custom_categories = vec![
+            SubcategoryDef::new("qa", TopLevelCategory::Maintenance),
+            SubcategoryDef::new("devops", TopLevelCategory::PlatformWork),
+        ];
+    }
+    let pipeline = ClassificationPipeline::new(config);
+    let mut db = Database::open_in_memory().expect("db");
+    insert(&db, "sha-test", MAPPED, "test: cover the parser edge cases");
+    insert(&db, "sha-ci", MAPPED, "ci: pin the runner image");
+    run(&pipeline, &mut db).await.expect("run");
+    for sha in ["sha-test", "sha-ci"] {
+        assert_eq!(cat_method(&db, sha), pair("tooling", "repo_map"), "{sha}");
+    }
 }
