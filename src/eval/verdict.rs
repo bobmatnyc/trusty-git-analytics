@@ -503,4 +503,27 @@ mod tests {
             ("repo_map:mono", "qa")
         );
     }
+
+    /// Why (#175): `tga eval repredict` carries a stored LLM verdict only
+    /// when `tga classify` would run the LLM, and `use_llm: false` turns it
+    /// off whatever the `llm:` section says.
+    /// What: the carry policy's LLM flag for an explicit false, an absent
+    /// key, and an explicit true, each beside a Bedrock `llm:` section.
+    /// Test: this test.
+    #[test]
+    fn carry_policy_honours_an_explicit_use_llm_false() {
+        for (line, want) in [
+            ("  use_llm: false\n", false),
+            ("", true),
+            ("  use_llm: true\n", true),
+        ] {
+            let yaml = format!(
+                "classification:\n  confidence_threshold: 0.7\n{line}\
+                 llm:\n  source: bedrock\n  region: us-east-1\n"
+            );
+            let config: Config = serde_yaml::from_str(&yaml).expect("config");
+            let policy = CarryPolicy::from_config(&config).expect("policy");
+            assert_eq!(policy.use_llm, want, "{line:?}");
+        }
+    }
 }
