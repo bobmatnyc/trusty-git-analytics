@@ -68,3 +68,7 @@ mod pipeline_repo_map_floor_tests;
 // #165: the weighted-sum tier stays inside the active category set.
 #[cfg(test)]
 mod weighted_sum_taxonomy_tests;
+
+// #175: `use_llm: false` builds no LLM client and sends nothing.
+#[cfg(test)]
+mod use_llm_off_tests;

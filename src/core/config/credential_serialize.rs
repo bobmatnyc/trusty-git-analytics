@@ -239,7 +239,11 @@ impl Serialize for ClassificationConfig {
         s.serialize_field("rules_files", rules_files)?;
         s.serialize_field("repo_categories", repo_categories)?;
         s.serialize_field("repo_map", repo_map)?;
-        s.serialize_field("use_llm", use_llm)?;
+        // #175: an absent key stays absent; `null` does not deserialize.
+        match use_llm {
+            Some(on) => s.serialize_field("use_llm", on)?,
+            None => s.skip_field("use_llm")?,
+        }
         s.serialize_field("llm_model", llm_model)?;
         s.serialize_field("llm_provider", llm_provider)?;
         s.serialize_field("openrouter_api_key", &mask(openrouter_api_key.as_ref()))?;

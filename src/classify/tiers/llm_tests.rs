@@ -224,7 +224,7 @@ async fn anthropic_default_model_used_when_none_configured() {
 /// self-enable the LLM tier without requiring `classification.use_llm: true`.
 /// What: build a Config with llm.source = anthropic-api but no
 /// classification section; assert that the effective use_llm flag is true.
-/// Test: pure logic check on the precedence computation used in build_engine.
+/// Test: `Config::llm_tier_enabled`, the predicate build_engine reads.
 #[test]
 fn llm_section_presence_self_enables_tier() {
     let cfg = crate::core::config::Config {
@@ -240,15 +240,9 @@ fn llm_section_presence_self_enables_tier() {
         classification: None,
         ..crate::core::config::Config::default()
     };
-    // Replicate the logic from build_engine to verify it evaluates to true.
-    let use_llm = cfg.llm.is_some()
-        || cfg
-            .classification
-            .as_ref()
-            .map(|c| c.use_llm)
-            .unwrap_or(false);
+    // #175: the predicate build_engine reads, not a copy of it.
     assert!(
-        use_llm,
+        cfg.llm_tier_enabled(),
         "llm: section presence must self-enable the LLM tier"
     );
 }

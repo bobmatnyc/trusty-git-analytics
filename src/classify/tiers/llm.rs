@@ -11,7 +11,9 @@
 //!
 //! The LLM is consulted only when tiers 1–3 all failed and the engine has been
 //! configured with `use_llm = true` (or when the top-level `llm:` section is
-//! present in the config, which self-enables the tier).
+//! present in the config, which self-enables the tier unless
+//! `classification.use_llm: false` switches it off, #175; see
+//! `Config::llm_tier_enabled`).
 //!
 //! All failures are **non-fatal** (from the engine perspective): a network error,
 //! parse error, or missing API key results in `None` so the pipeline can fall back

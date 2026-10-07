@@ -209,7 +209,7 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `output.include_merges` | bool | `false` | Include merge commits |
 | `output.include_files` | bool | `false` | Include file-level change detail |
 | `classification.rules_file` | path | — | Path to custom rules YAML/JSON |
-| `classification.use_llm` | bool | `false` | Enable LLM fallback tier |
+| `classification.use_llm` | bool | absent | `false` turns the LLM tier off even when an `llm:` section is present: no provider client, no LLM call. `true` turns it on. Absent: on when an `llm:` section is present, else off. `--use-llm` overrides it for one run. |
 | `classification.llm_model` | string | `gpt-4o-mini` | LLM model identifier |
 | `classification.confidence_threshold` | float | `0.7` | Minimum acceptance confidence |
 | `classification.llm_fallback_threshold` | float | `0.65` | Commits with confidence above this value skip the LLM tier. Raised from `0.0` in 1.3.0; see [LLM fallback threshold](#llm-fallback-threshold-migration). |

@@ -403,6 +403,51 @@ impl LlmConfig {
     }
 }
 
+/// Deserialize `classification.use_llm`: a boolean becomes `Some`, an absent
+/// key stays `None` through `#[serde(default)]`.
+///
+/// Why (#175): `None` lets a present `llm:` section turn the tier on, so a
+/// YAML `null` read as `None` would turn an operator's half-written off
+/// switch into LLM spend. It is an error instead.
+/// What: deserializes a plain `bool` and wraps it.
+/// Test: `core::config::llm::tests::use_llm_null_is_an_error`.
+pub(super) fn deserialize_use_llm<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool::deserialize(deserializer).map(Some)
+}
+
+impl super::Config {
+    /// Whether this config turns the LLM tier on.
+    ///
+    /// Why (#175): `use_llm: false` beside a populated `llm:` section still
+    /// sent every commit to the provider. `tga classify`, the complexity
+    /// backfill, `tga rules test` and `tga eval repredict` all read this one
+    /// predicate.
+    /// What: `classification.use_llm` decides when it is set: `false` is a
+    /// hard off switch, whatever the `llm:` section says, and `true` turns
+    /// the tier on. When the key is absent, or there is no `classification:`
+    /// section, a present `llm:` section turns the tier on by itself.
+    /// The `--use-llm` flags set the key to `true` before this is read.
+    /// Test: `classify::use_llm_off_tests::llm_enabled_honours_an_explicit_false`,
+    /// `eval::verdict::tests::carry_policy_honours_an_explicit_use_llm_false`.
+    pub fn llm_tier_enabled(&self) -> bool {
+        match self.classification.as_ref().and_then(|c| c.use_llm) {
+            Some(on) => on,
+            None => self.llm.is_some(),
+        }
+    }
+
+    /// Whether an `llm:` section is present but `classification.use_llm:
+    /// false` switches it off (#175), so a run can say it is ignored.
+    pub fn llm_section_switched_off(&self) -> bool {
+        self.llm.is_some() && self.classification.as_ref().and_then(|c| c.use_llm) == Some(false)
+    }
+}
+
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
@@ -439,6 +484,32 @@ mod tests {
         assert_eq!(scope, LlmFallbackScope::Unanswered);
         assert_eq!(LlmFallbackScope::default(), LlmFallbackScope::LowConfidence);
         assert!(serde_yaml::from_str::<LlmFallbackScope>("abstentions").is_err());
+    }
+
+    /// Why (#175): an absent `use_llm` lets the `llm:` section turn the
+    /// tier on, so a `null` must not read as absent.
+    /// What: absent → `None`; `true`/`false` → `Some`; `null` and a
+    /// non-boolean are errors.
+    /// Test: this test.
+    #[test]
+    fn use_llm_null_is_an_error() {
+        use super::super::ClassificationConfig;
+        let parse = |y: &str| serde_yaml::from_str::<ClassificationConfig>(y);
+        assert_eq!(
+            parse("min_coverage_pct: 20\n").expect("absent").use_llm,
+            None
+        );
+        assert_eq!(
+            parse("use_llm: false\n").expect("false").use_llm,
+            Some(false)
+        );
+        assert_eq!(parse("use_llm: true\n").expect("true").use_llm, Some(true));
+        assert!(parse("use_llm: null\n").is_err(), "null read as absent");
+        assert!(parse("use_llm:\n").is_err(), "empty value read as absent");
+        assert!(
+            parse("use_llm: \"no\"\n").is_err(),
+            "a string read as a bool"
+        );
     }
 
     /// Why (#111): `source: jev` must parse, read `TYPESAFE_API_KEY` unless

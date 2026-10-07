@@ -53,7 +53,8 @@ pub(super) async fn backfill_complexity(
         let classification = cfg
             .classification
             .get_or_insert_with(tga::core::config::ClassificationConfig::default);
-        classification.use_llm = true;
+        // #175: an explicit flag outranks `use_llm: false` in the config.
+        classification.use_llm = Some(true);
     }
 
     let pipeline = ClassificationPipeline::new(cfg);

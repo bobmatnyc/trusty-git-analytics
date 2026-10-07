@@ -380,7 +380,7 @@ async fn pipeline_writes_complexity_to_db() {
     // fallback threshold above any rule-tier confidence. Without this a
     // low-confidence catch-all rule would pre-empt the LLM tier.
     let classification = crate::core::config::ClassificationConfig {
-        use_llm: true,
+        use_llm: Some(true),
         llm_fallback_threshold: 1.0,
         ..crate::core::config::ClassificationConfig::default()
     };

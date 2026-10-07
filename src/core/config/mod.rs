@@ -574,9 +574,15 @@ pub struct ClassificationConfig {
     #[serde(default)]
     pub repo_map: RepoMapConfig,
 
-    /// Whether to engage the LLM fallback tier.
-    #[serde(default)]
-    pub use_llm: bool,
+    /// Whether to engage the LLM fallback tier; `None` when the key is absent.
+    ///
+    /// `Some(false)` is a hard off switch: no LLM client is built and no LLM
+    /// call is made, whatever the top-level `llm:` section says (#175).
+    /// `Some(true)` turns the tier on. `None` leaves it to the `llm:`
+    /// section, whose presence turns the tier on. A YAML `null` is an error,
+    /// not an absent key. Read through [`Config::llm_tier_enabled`].
+    #[serde(default, deserialize_with = "llm::deserialize_use_llm")]
+    pub use_llm: Option<bool>,
 
     /// LLM model identifier (provider-specific).
     #[serde(default)]
@@ -627,7 +633,7 @@ pub struct ClassificationConfig {
     ///
     /// After tiers 1–3 produce a verdict, the LLM fallback fires for any
     /// commit whose `confidence <= llm_fallback_threshold` (and only when
-    /// [`Self::use_llm`] is true).
+    /// [`Config::llm_tier_enabled`] is true).
     ///
     /// **Default (1.3.0+): `0.65`** — The weighted-sum tier (Tier 2.5) emits
     /// calibrated verdicts in `[0.55, 0.95]`. The legacy fuzzy tier emits
@@ -809,7 +815,7 @@ impl Default for ClassificationConfig {
             rules_files: Vec::new(),
             repo_categories: HashMap::new(),
             repo_map: RepoMapConfig::default(),
-            use_llm: false,
+            use_llm: None,
             llm_model: None,
             llm_provider: default_llm_provider(),
             openrouter_api_key: None,
