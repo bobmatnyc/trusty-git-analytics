@@ -155,7 +155,7 @@ name = "tga"
 # honours enabled:false and the custom taxonomy) and #169 (repo map v2: floor mode,
 # path-prefix keys, unmatched-key warning). The stricter `repo_categories` key
 # checks are recorded as a `Breaking` changelog entry, not a major bump.
-version = "10.3.1"
+version = "10.3.2"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
