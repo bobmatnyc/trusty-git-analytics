@@ -14,9 +14,9 @@
 
 use clap::{Args, Subcommand, ValueEnum};
 
-use tga::classify::classifier::{ClassificationEngine, ClassificationEngineConfig};
 use tga::classify::rules::{default_rules, Rule};
 use tga::classify::taxonomy::{TaxonomyRegistry, TopLevelCategory};
+use tga::classify::ClassificationPipeline;
 use tga::core::config::{BucketMap, BucketSource, Config};
 use tga::core::db::Database;
 
@@ -155,15 +155,7 @@ fn list(config: &Config, args: ListArgs) -> anyhow::Result<()> {
 /// Test: `list_json_format_emits_taxonomy_rollup`,
 /// `tests/rules_buckets_cli.rs::rules_list_json_reports_the_bucket_map_and_its_source`.
 fn print_taxonomy_json(config: &Config, cli_rules: Option<&std::path::Path>) -> anyhow::Result<()> {
-    let mut effective = config.clone();
-    if let Some(path) = cli_rules {
-        effective
-            .classification
-            .get_or_insert_with(Default::default)
-            .rules_files = vec![path.to_path_buf()];
-    }
-    let (buckets, source) =
-        tga::classify::ClassificationPipeline::new(effective).bucket_map_with_source()?;
+    let (buckets, source) = pipeline_for(config, cli_rules).bucket_map_with_source()?;
     let custom = config
         .classification
         .as_ref()
@@ -309,28 +301,35 @@ fn show(db: &Database, args: ShowArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Implementation of `tga rules test "<message>"`.
-fn test(config: &Config, args: TestArgs) -> anyhow::Result<()> {
-    let ruleset = resolve_rules(config, args.rules.as_deref())?;
-    let engine_cfg = ClassificationEngineConfig::default();
-    let custom_taxonomy = config
-        .classification
-        .as_ref()
-        .map(|c| c.custom_categories.clone())
-        .unwrap_or_default();
-    let jira_mappings = config
-        .jira
-        .as_ref()
-        .map(|j| j.jira_project_mappings.clone())
-        .unwrap_or_default();
+/// The classification pipeline for `config`, with `--rules` (when given)
+/// replacing `classification.rules_files`.
+fn pipeline_for(config: &Config, cli_rules: Option<&std::path::Path>) -> ClassificationPipeline {
+    let mut effective = config.clone();
+    if let Some(path) = cli_rules {
+        effective
+            .classification
+            .get_or_insert_with(Default::default)
+            .rules_files = vec![path.to_path_buf()];
+    }
+    ClassificationPipeline::new(effective)
+}
 
-    let engine = ClassificationEngine::with_taxonomy_and_mappings(
-        ruleset,
-        engine_cfg,
-        custom_taxonomy,
-        jira_mappings,
-        None,
-    )?;
+/// Implementation of `tga rules test "<message>"`.
+///
+/// Why (#165): the dry run must give the verdict `tga classify` writes, so
+/// it reuses the pipeline's rule engine instead of a default engine config.
+/// What: builds [`ClassificationPipeline::build_rule_engine`] (rules,
+/// taxonomy, JIRA mappings, `weighted_sum`, `confidence_threshold`), checks
+/// `classification.repo_categories` as `tga classify` does before any read,
+/// and prints the synchronous cascade's verdict. The LLM tier is never
+/// called; with no verdict, the output says whether it is enabled.
+/// Test: `tests/rules_test_cli.rs::rules_test_honours_weighted_sum_enabled_false`.
+fn test(config: &Config, args: TestArgs) -> anyhow::Result<()> {
+    let pipeline = pipeline_for(config, args.rules.as_deref());
+    // #165: a bad repo map stops `tga classify`; stop here too. The map
+    // keys on repository, which a bare message does not have.
+    pipeline.repo_category_map()?;
+    let engine = pipeline.build_rule_engine()?;
 
     println!("Message: {}", args.message);
     println!("is_merge: {}", args.is_merge);
@@ -352,8 +351,12 @@ fn test(config: &Config, args: TestArgs) -> anyhow::Result<()> {
                 println!("  ticket_id   : {id}");
             }
         }
+        // #165: report the LLM tier as this config sets it.
+        None if pipeline.llm_enabled() => {
+            println!("No tier matched. The LLM tier is enabled and would run next.");
+        }
         None => {
-            println!("No tier matched. The async LLM tier (if enabled) would run next.");
+            println!("No tier matched. The LLM tier is not enabled.");
         }
     }
     Ok(())
@@ -407,6 +410,7 @@ fn resolve_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tga::classify::classifier::{ClassificationEngine, ClassificationEngineConfig};
 
     /// Why: `tga rules list` is the operator's primary debugging tool for
     /// a misbehaving ruleset; the resolve helper must return the same

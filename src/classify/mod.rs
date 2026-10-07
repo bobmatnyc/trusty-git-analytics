@@ -58,3 +58,7 @@ mod trace_tests;
 // #158: the repo → category hard override, end to end.
 #[cfg(test)]
 mod pipeline_repo_map_tests;
+
+// #165: the weighted-sum tier stays inside the active category set.
+#[cfg(test)]
+mod weighted_sum_taxonomy_tests;

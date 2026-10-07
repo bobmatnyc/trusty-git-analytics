@@ -4,7 +4,8 @@
 //! unanswered and must price that before any full run. Extracted from
 //! `pipeline.rs` to keep it under the size cap.
 //! What: [`llm_eligible`] decides which verdicts reach the LLM (shared with
-//! `tga eval repredict`); [`load_contexts`] reads the `llm.context` facts
+//! `tga eval repredict`); `ClassificationPipeline::llm_enabled` says whether
+//! the tier is on (#165); [`load_contexts`] reads the `llm.context` facts
 //! (#111); [`run_llm_fallback`] makes the calls and totals the tokens;
 //! [`record_usage`] writes one `llm_usage` row per call.
 //! Test: `classify::pipeline_llm_tests`.
@@ -55,6 +56,24 @@ pub(crate) fn llm_eligible(
     match scope {
         LlmFallbackScope::LowConfidence => r.confidence <= threshold,
         LlmFallbackScope::Unanswered => is_unanswered(r),
+    }
+}
+
+impl super::pipeline::ClassificationPipeline {
+    /// Whether this config turns the LLM tier on.
+    ///
+    /// Why (#165): `tga classify` and `tga rules test` must agree on it.
+    /// What: true when the top-level `llm:` section is present (it enables
+    /// the tier by itself, even with `classification.use_llm: false`), else
+    /// `classification.use_llm`.
+    /// Test: `tests/rules_test_cli.rs::rules_test_honours_weighted_sum_enabled_false`.
+    pub(crate) fn llm_enabled(&self) -> bool {
+        self.config.llm.is_some()
+            || self
+                .config
+                .classification
+                .as_ref()
+                .is_some_and(|c| c.use_llm)
     }
 }
 

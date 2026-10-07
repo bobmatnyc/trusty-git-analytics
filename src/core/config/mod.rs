@@ -651,10 +651,14 @@ pub struct ClassificationConfig {
     ///
     /// Set `weighted_sum.enabled: false` to disable the tier entirely and
     /// restore pre-1.3.0 behaviour (regex falls directly to fuzzy).
-    /// This tier is intentionally active even when `extend_defaults: false`
-    /// because it composes signals rather than emitting hardcoded built-in
-    /// category strings; it respects user taxonomies through the engine's
-    /// taxonomy registry.
+    /// The tier votes among built-in category names (`feature`, `bugfix`,
+    /// `chore`, `integration`, `platform`, `docs`, `refactor`, `merge`).
+    /// #165: when the rules files define the whole category set
+    /// (`extend_defaults: false`), that set is the rule categories plus any
+    /// `categories:` entries, the set the LLM tier is restricted to. A
+    /// verdict whose category is outside it is dropped and the commit falls
+    /// through to the next tier; one inside it is kept in the set's
+    /// spelling. This holds with or without a `categories:` list.
     #[serde(default)]
     pub weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig,
 
