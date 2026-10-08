@@ -17,7 +17,8 @@
 //! - `^revert` — any subject beginning with the word "revert"
 //!   (case-insensitive), e.g. `Revert this change`.
 //! - `^fix.*revert` — a fix commit that mentions a revert in its subject,
-//!   e.g. `Fix botched revert of #42`.
+//!   e.g. `Fix botched revert of #42`. A `-`-prefixed CLI flag such as
+//!   `--revert` does not count (#182).
 //!
 //! False-positive guard: matching is anchored to the start of the *first
 //! line only* and requires the literal token `revert` at a word boundary.
@@ -54,10 +55,15 @@ fn patterns() -> &'static RevertPatterns {
             // `reverted` (which continue the word) do NOT match.
             leading_revert: Regex::new(r"(?i)^\s*revert\b")
                 .expect("leading_revert pattern compiles"),
-            // `fix` (optionally `fix:` / `fixes` / `fixed`) followed anywhere
-            // on the subject line by the word `revert`.
-            fix_revert: Regex::new(r"(?i)^\s*fix\w*\b.*\brevert\b")
-                .expect("fix_revert pattern compiles"),
+            // `fix` (optionally `fix:` / `fixes` / `fixed`) followed on the
+            // subject line by the word `revert`.
+            // #182: `revert` must sit in the first token or in a later
+            // whitespace-delimited token that does not start with `-`, so a
+            // CLI flag such as `--revert` or `--no-revert` is not a revert.
+            fix_revert: Regex::new(
+                r"(?i)^\s*fix\w*\b(?:\S*?\brevert\b|.*\s(?:[^\s-]\S*?)?\brevert\b)",
+            )
+            .expect("fix_revert pattern compiles"),
         }
     })
 }
@@ -113,6 +119,24 @@ mod tests {
         assert!(is_revert("Fix botched revert of #42"));
         assert!(is_revert("fix: re-apply after revert"));
         assert!(is_revert("fixes the revert that broke CI"));
+    }
+
+    /// #182: a `-`-prefixed CLI flag such as `--revert` is not a revert;
+    /// every real `fix ... revert` form still matches.
+    #[test]
+    fn fix_revert_ignores_cli_flags() {
+        assert!(!is_revert(
+            "fix(deploy): pin the task definition on --revert scale-up"
+        ));
+        assert!(!is_revert("fix: pass --revert to the deploy script"));
+        assert!(!is_revert("fix: add a --no-revert option"));
+        assert!(!is_revert("fix: honour the -revert switch"));
+        assert!(is_revert("fix: revert X"));
+        assert!(is_revert("fix(scope): revert the cache change"));
+        assert!(is_revert("fix:revert X"));
+        assert!(is_revert("fix: (revert) the bad merge"));
+        assert!(is_revert("fix: --revert flag, and revert the bad merge"));
+        assert!(is_revert("Revert \"fix: pass --revert to deploy\""));
     }
 
     #[test]
