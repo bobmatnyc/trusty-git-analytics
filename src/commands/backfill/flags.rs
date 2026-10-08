@@ -72,21 +72,37 @@ pub(super) fn is_revert(message: &str) -> bool {
     tga::core::revert::is_revert(message)
 }
 
-/// Scan every commit message for revert patterns and update `is_revert`.
+/// Row counts from one `tga backfill revert-flags` pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RevertFlagCounts {
+    /// Commits the repos/since/until filter selected.
+    pub scanned: usize,
+    /// Commits moved from `is_revert = 0` to 1 (or that would be, on dry-run).
+    pub set: usize,
+}
+
+/// Set `is_revert` on commits whose message matches the revert pattern.
 ///
-/// Why: the `is_revert` boolean must mirror the verdict produced by the
-/// classification cascade so DORA queries (CFR, MTTR) can join through it.
-/// What: scans `commits` (filtered by repos/since/until when supplied),
-/// detects revert prefixes, and updates changed rows. Supports dry-run.
-/// Test: see `tests::backfill_revert_flags_updates_only_changed_rows`.
+/// Why: `tga classify` writes `is_revert` as the revert verdict OR the
+/// message match, so a row at 1 may carry a message the matcher rejects.
+/// The backfill sees only the message; it can add flags but cannot judge a
+/// verdict, so it never clears one (#182).
+/// What: scans `commits` (filtered by repos/since/until when supplied) and
+/// moves `is_revert` from 0 to 1 where [`is_revert`] matches. A row already
+/// at 1 is left alone. Supports dry-run. Returns the scanned and set counts
+/// it prints.
+/// Test: `tests::backfill_revert_flags_never_clears_a_verdict_set_flag`,
+/// `tests::backfill_revert_flags_reports_scanned_and_set_counts`,
+/// `tests::backfill_revert_flags_updates_only_changed_rows`.
 pub(super) fn backfill_revert_flags(
     db: &mut Database,
     dry_run: bool,
     repos_filter: &[String],
     since: Option<&str>,
     until: Option<&str>,
-) -> anyhow::Result<()> {
-    let mut to_update: Vec<(i64, bool)> = Vec::new();
+) -> anyhow::Result<RevertFlagCounts> {
+    let mut to_set: Vec<i64> = Vec::new();
+    let mut scanned = 0usize;
     {
         let conn = db.connection();
         // Build filtered SQL for repos/since/until.
@@ -106,38 +122,43 @@ pub(super) fn backfill_revert_flags(
         })?;
         for r in rows {
             let (id, message, current) = r?;
-            let detected = is_revert(&message);
-            let target = if detected { 1 } else { 0 };
-            if target != current {
-                to_update.push((id, detected));
+            scanned += 1;
+            // #182: set-only. A 1 may come from a classify verdict the message
+            // match cannot see, so the backfill never writes 0.
+            if current == 0 && is_revert(&message) {
+                to_set.push(id);
             }
         }
     }
 
     if dry_run {
         println!(
-            "Would update {} commits ({} would be marked as reverts). No changes written.",
-            to_update.len(),
-            to_update.iter().filter(|(_, v)| *v).count(),
+            "Would set is_revert on {} of {scanned} scanned commits. No changes written.",
+            to_set.len(),
         );
-        return Ok(());
+        return Ok(RevertFlagCounts {
+            scanned,
+            set: to_set.len(),
+        });
     }
 
     let conn = db.connection_mut();
     let tx = conn.transaction()?;
+    let mut set = 0usize;
     {
-        let mut up = tx.prepare("UPDATE commits SET is_revert = ?1 WHERE id = ?2")?;
-        for (id, flag) in &to_update {
-            up.execute(params![if *flag { 1 } else { 0 }, id])?;
+        // #182: the `is_revert = 0` guard keeps the write set-only even if the
+        // row changed after the scan; the count is the rows actually written.
+        let mut up =
+            tx.prepare("UPDATE commits SET is_revert = 1 WHERE id = ?1 AND is_revert = 0")?;
+        for id in &to_set {
+            set += up.execute(params![id])?;
         }
     }
     tx.commit()?;
     println!(
-        "Updated is_revert on {} commits ({} are reverts).",
-        to_update.len(),
-        to_update.iter().filter(|(_, v)| *v).count(),
+        "Set is_revert on {set} of {scanned} scanned commits. Existing flags are never cleared."
     );
-    Ok(())
+    Ok(RevertFlagCounts { scanned, set })
 }
 
 /// Scan every commit message, extract the first ticket reference, and

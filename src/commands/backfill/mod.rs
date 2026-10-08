@@ -80,7 +80,8 @@ pub async fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyho
             &repos,
             since.as_deref(),
             until.as_deref(),
-        ),
+        )
+        .map(|_| ()),
         BackfillSubcommand::TicketIds => {
             flags::backfill_ticket_ids(db, args.dry_run, &repos, since.as_deref(), until.as_deref())
         }
