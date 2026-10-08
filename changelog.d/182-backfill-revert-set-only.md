@@ -1,2 +1,0 @@
-Fixed
-- `tga backfill revert-flags` no longer clears `commits.is_revert` (#182). It used to recompute the flag from the commit message alone and write 0 where the message did not match, which erased flags a classification verdict had set, such as an `undo:` commit a rule categorised as a revert. The backfill now only moves a flag from 0 to 1 where the message matches; a row already at 1 stays 1. Its summary reports the commits scanned and the flags set, with and without `--dry-run`.

@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.3.4] — 2026-10-08
+
+### Fixed
+
+- `tga classify` no longer clears `commits.is_revert` on a revert commit whose verdict is not a revert category (#182). The flag is now the revert verdict OR the commit-message revert match that `tga backfill revert-flags` uses, whichever tier answered (rule, repo map, LLM, weighted sum or default) and with or without `--force`. Before, `tga classify --force` with a rules set that had no revert rule reset existing `is_revert = 1` rows to 0. To repair a database a forced run already cleared, run `tga backfill revert-flags`.
+- The commit-message revert match no longer counts a `-`-prefixed CLI flag such as `--revert` or `--no-revert` in a `fix ...` subject as a revert (#182). `fix: revert X`, `fix(scope): revert ...` and `Revert "..."` still match. `tga classify` and `tga backfill revert-flags` share this match, so both change. A row flagged this way earlier keeps its flag until a classify run rewrites it; `tga backfill revert-flags` never clears a flag.
+- `tga backfill revert-flags` no longer clears `commits.is_revert` (#182). It used to recompute the flag from the commit message alone and write 0 where the message did not match, which erased flags a classification verdict had set, such as an `undo:` commit a rule categorised as a revert. The backfill now only moves a flag from 0 to 1 where the message matches; a row already at 1 stays 1. Its summary reports the commits scanned and the flags set, with and without `--dry-run`.
+
 ## [10.3.3] — 2026-10-07
 
 ### Fixed

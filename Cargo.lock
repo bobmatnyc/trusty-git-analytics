@@ -6217,7 +6217,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "10.3.3"
+version = "10.3.4"
 dependencies = [
  "aho-corasick",
  "anyhow",
