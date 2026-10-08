@@ -14,10 +14,11 @@
 //! GitHub-specific async code here.
 
 use futures::StreamExt as _;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::collect::errors::CollectError;
 use crate::collect::github::budget::RunBudget;
+use crate::collect::github::fetch_faults::{http_status, FaultWording, FetchFaults};
 use crate::collect::github::org_discovery::{discover_org_repos_within, effective_orgs};
 use crate::collect::github::repo_resolver::build_http_client;
 use crate::collect::github::reviewer_store::upsert_github_pr_reviewer;
@@ -103,10 +104,13 @@ pub(super) async fn run_github_org_discovery(
 /// `review_fetch_concurrency.max(1)` concurrent in-flight calls via
 /// `futures::stream::buffer_unordered`, then serializes DB upserts after
 /// collecting results. A value of 0 or 1 produces serial behaviour
-/// (identical to the previous implementation). Per-PR HTTP failures are
-/// logged and non-fatal.
-/// Test: `fetch_reviewers_concurrency_upserts_all` in this module; the
-/// live API path is gated `#[ignore]`.
+/// (identical to the previous implementation). A per-PR HTTP failure skips
+/// that PR, and the pass continues; at the end a 404 is a counted warning and
+/// any other failure fails the reviewer stage (#146, see [`ingest_reviews`]).
+/// Test: `fetch_reviewers_concurrency_upserts_all`,
+/// `a_reviewer_fetch_404_is_a_counted_warning_not_a_stage_failure`,
+/// `a_reviewer_fetch_403_fails_the_stage_once` in this module; the live API
+/// path is gated `#[ignore]`.
 ///
 /// #6553: a secondary rate limit no longer fails the run — see
 /// [`ingest_reviews`], which this delegates to once the client is built.
@@ -189,12 +193,21 @@ pub(super) async fn fetch_and_store_github_reviewers(
 /// What: the three outcomes the pass treats differently — reviews came back,
 /// this PR alone failed, or GitHub was rate-limiting so this PR contributed no
 /// reviewer rows.
-/// Test: `a_secondary_rate_limit_leaves_the_reviewer_pass_partial_not_failed`.
+/// Test: `a_secondary_rate_limit_leaves_the_reviewer_pass_partial_not_failed`,
+/// `a_reviewer_fetch_404_is_a_counted_warning_not_a_stage_failure`,
+/// `a_reviewer_fetch_403_fails_the_stage_once`.
 enum ReviewFetch {
     /// Reviews came back; the vector may legitimately be empty.
     Fetched(Vec<GitHubReview>),
     /// This PR alone failed and the pass carried on.
-    Failed(String),
+    // #146: the status decides warning (404) or stage failure (anything else).
+    Failed {
+        /// HTTP status GitHub answered with; `None` for a transport, parse or
+        /// slug failure that carries no status.
+        status: Option<u16>,
+        /// The error text, for the per-PR debug line.
+        message: String,
+    },
     /// GitHub was rate-limiting, so no reviewer rows exist for this PR.
     RateLimited,
 }
@@ -223,12 +236,19 @@ async fn fetch_reviews(
                     match client.fetch_pr_reviews_for_repo(o, r, pr_number).await {
                         Ok(reviews) => ReviewFetch::Fetched(reviews),
                         Err(CollectError::Throttled { .. }) => ReviewFetch::RateLimited,
-                        Err(e) => ReviewFetch::Failed(e.to_string()),
+                        // #146: keep the status code the run's faults report.
+                        Err(e) => ReviewFetch::Failed {
+                            status: http_status(&e),
+                            message: e.to_string(),
+                        },
                     }
                 }
-                _ => ReviewFetch::Failed(format!(
-                    "malformed repository slug '{repository}'; skipping reviewer fetch"
-                )),
+                _ => ReviewFetch::Failed {
+                    status: None,
+                    message: format!(
+                        "malformed repository slug '{repository}'; skipping reviewer fetch"
+                    ),
+                },
             };
             (pr_db_id, repository, pr_number, outcome)
         })
@@ -248,8 +268,13 @@ async fn fetch_reviews(
 /// [`crate::collect::CollectionStats::skip_item`] rather than `fail_stage`: the
 /// PR query is forward-only, so the next `tga collect` resumes at the PRs this
 /// run never reached, and failing the whole run made `fetch_pr_reviews: true`
-/// unusable unattended.
+/// unusable unattended. Every other per-PR failure skips that PR and the pass
+/// continues; at the end [`FetchFaults`] records the 404s as one counted
+/// warning (exit 0) and every other failure as one stage failure (exit
+/// non-zero), each naming the pull requests (#146, owner ruling D28).
 /// Test: `a_secondary_rate_limit_leaves_the_reviewer_pass_partial_not_failed`,
+/// `a_reviewer_fetch_404_is_a_counted_warning_not_a_stage_failure`,
+/// `a_reviewer_fetch_403_fails_the_stage_once`,
 /// `fetch_reviewers_concurrency_upserts_all`.
 async fn ingest_reviews(
     db: &mut Database,
@@ -261,6 +286,7 @@ async fn ingest_reviews(
     let fetched = fetch_reviews(gh_client, prs, concurrency).await;
 
     let mut rate_limited = 0usize;
+    let mut faults = FetchFaults::default();
     for (pr_db_id, repository, pr_number, outcome) in fetched {
         match outcome {
             ReviewFetch::Fetched(reviews) => {
@@ -278,20 +304,22 @@ async fn ingest_reviews(
                     }
                 }
             }
-            ReviewFetch::Failed(msg) => {
-                // Per-PR failure is non-fatal; log and continue.
-                warn!(
+            ReviewFetch::Failed { status, message } => {
+                // #146: skip this PR and continue, but count it — a warning
+                // line alone let 20,916 dropped 403s report a clean run.
+                debug!(
                     repository = %repository,
                     pr_number,
-                    "GitHub reviewer fetch failed for PR: {msg}; continuing"
+                    "GitHub reviewer fetch failed for PR: {message}"
                 );
+                faults.record(format!("{repository}#{pr_number}"), status);
             }
             // #6553: counted, not logged — see the aggregate below.
             ReviewFetch::RateLimited => rate_limited += 1,
         }
     }
 
-    // #6084: per-PR review failures are logged and skipped, which is right for
+    // #6084: per-PR review failures are counted and skipped, which is right for
     // one bad PR and wrong for a rate limit — under a limit every remaining PR
     // "fails" and the pass would report a clean run holding partial data.
     for notice in gh_client.fetch_notices() {
@@ -311,6 +339,11 @@ async fn ingest_reviews(
         warn!("{msg}");
         stats.skip_item(msg);
     }
+    // #146: 404s as one warning, every other failure as one stage failure.
+    for fault in faults.into_faults(&REVIEWER_WORDING, prs.len()) {
+        warn!("{fault}");
+        stats.errors.push(fault);
+    }
 
     if stats.reviewers_fetched > 0 {
         info!(
@@ -319,6 +352,14 @@ async fn ingest_reviews(
         );
     }
 }
+
+/// Fault wording for the reviewer pass (#146).
+const REVIEWER_WORDING: FaultWording<'static> = FaultWording {
+    label: "github reviewers",
+    noun: "pull request(s)",
+    fetch: "reviewer fetch",
+    lost: "got no reviewer rows",
+};
 
 #[cfg(test)]
 mod tests {
@@ -503,6 +544,119 @@ mod tests {
                 .expect("count")
         };
         assert_eq!(rows, 0, "a throttled pass writes no reviewer rows");
+    }
+
+    /// Run the reviewer pass at `concurrency = 1` against a mock that answers
+    /// each `(repository, pr_number, status)` with that status (200 carries one
+    /// review), and return the stats plus the stored reviewer-row count.
+    async fn ingest_against(answers: &[(&str, u64, u16)]) -> (CollectionStats, i64) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for (repo, n, status) in answers {
+            let reply = if *status == 200 {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "id": n, "state": "APPROVED", "user": { "login": "alice" }
+                }]))
+            } else {
+                // No rate-limit headers: the SAML / token-scope / missing shape.
+                ResponseTemplate::new(*status)
+                    .set_body_json(serde_json::json!({ "message": "denied or missing" }))
+            };
+            Mock::given(method("GET"))
+                .and(path(format!("/repos/{repo}/pulls/{n}/reviews")))
+                .respond_with(reply)
+                .mount(&server)
+                .await;
+        }
+
+        let mut db = open_db();
+        let prs: Vec<(i64, String, u64)> = {
+            let conn = db.connection();
+            answers
+                .iter()
+                .map(|(repo, n, _)| (seed_pr(conn, repo, *n as i64), repo.to_string(), *n))
+                .collect()
+        };
+        let client = GitHubClient::new_for_reviews(&make_gh_cfg(1))
+            .expect("client builds")
+            .with_api_base(server.uri());
+
+        let mut stats = CollectionStats::default();
+        ingest_reviews(&mut db, &client, 1, &prs, &mut stats).await;
+
+        let rows: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM pr_reviewers", [], |r| r.get(0))
+            .expect("count");
+        (stats, rows)
+    }
+
+    /// Why: #146 (D28) — a 404 means the repository or pull request is gone,
+    /// which a later run cannot fix, so it must not fail every future
+    /// `tga collect`. It must not be silent either: an unreported 404 is the
+    /// original bug.
+    /// What: PRs answer 200, 404, 200. Asserts the PR after the 404 was still
+    /// stored, no stage failed (so `tga collect` exits 0), and exactly one
+    /// warning names the 404'd PR and the count.
+    /// Test: this test itself. Catches "404 fails the stage" and "404 silent".
+    #[tokio::test]
+    async fn a_reviewer_fetch_404_is_a_counted_warning_not_a_stage_failure() {
+        let (stats, rows) = ingest_against(&[
+            ("acme/widgets", 1, 200),
+            ("acme/gone", 3, 404),
+            ("acme/widgets", 4, 200),
+        ])
+        .await;
+
+        assert_eq!(rows, 2, "PRs 1 and 4 must store their reviewers");
+        assert!(
+            stats.stage_failures().is_empty(),
+            "a 404 must not fail the reviewer stage; got: {:?}",
+            stats.errors
+        );
+        assert_eq!(
+            stats.errors.len(),
+            1,
+            "a 404 must be one counted warning, not silent; got: {:?}",
+            stats.errors
+        );
+        let msg = &stats.errors[0].message;
+        for needle in ["1 of 3", "HTTP 404", "acme/gone#3"] {
+            assert!(msg.contains(needle), "missing `{needle}` in: {msg}");
+        }
+    }
+
+    /// Why: #146 (D28) — a field run dropped 20,916 HTTP 403 reviewer fetches
+    /// as per-PR warnings and still reported success. A 403 must skip that
+    /// PR, keep the pass going, and fail the reviewer stage once.
+    /// What: PRs answer 200, plain 403 (no rate-limit headers), 200. Asserts
+    /// the PR after the 403 was still stored (no abort), and exactly one stage
+    /// failure names the PR and its status code.
+    /// Test: this test itself. Catches "403 only warns" and "abort on 403".
+    #[tokio::test]
+    async fn a_reviewer_fetch_403_fails_the_stage_once() {
+        let (stats, rows) = ingest_against(&[
+            ("acme/widgets", 1, 200),
+            ("acme/widgets", 2, 403),
+            ("acme/widgets", 4, 200),
+        ])
+        .await;
+
+        assert_eq!(rows, 2, "PRs 1 and 4 must store their reviewers");
+        let failures = stats.stage_failures();
+        assert_eq!(
+            failures.len(),
+            1,
+            "a 403 must fail the reviewer stage exactly once; got: {:?}",
+            stats.errors
+        );
+        assert_eq!(stats.errors.len(), 1, "no extra faults: {:?}", stats.errors);
+        let msg = &failures[0].message;
+        for needle in ["1 of 3", "HTTP 403: 1", "acme/widgets#2 (HTTP 403)"] {
+            assert!(msg.contains(needle), "missing `{needle}` in: {msg}");
+        }
     }
 
     /// Why: a `review_fetch_concurrency` value of 0 must be clamped to 1

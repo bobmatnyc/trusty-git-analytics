@@ -66,4 +66,20 @@ pub trait PrProvider: Send + Sync {
     fn fetch_notices(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Per-repository fetch failures from the last `fetch_pull_requests`, with
+    /// the severity the run must record them at.
+    ///
+    /// Why (#146): a provider that skips a failed repository and returns the
+    /// rest answers `Ok`, so without this the skip is invisible to the run's
+    /// fault list and exit code.
+    /// What: empty by default. Overridden by
+    /// [`crate::collect::github::GitHubClient`]: a 404 is an
+    /// [`crate::collect::FaultSeverity::ItemSkipped`] warning, any other
+    /// failure a [`crate::collect::FaultSeverity::StageFailed`].
+    /// Test: `crate::collect::pr_pipeline::tests::a_pr_list_404_is_a_counted_warning_not_a_stage_failure`,
+    /// `crate::collect::pr_pipeline::tests::a_pr_list_403_fails_the_stage_once`.
+    fn fetch_faults(&self) -> Vec<crate::collect::CollectionFault> {
+        Vec::new()
+    }
 }
