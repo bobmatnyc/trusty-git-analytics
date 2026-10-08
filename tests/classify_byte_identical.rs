@@ -216,7 +216,9 @@ async fn classify_scenario(name: &str, rules_yaml: &str, stride: usize) -> Strin
 /// configuration where the weighted-sum tier votes) — and asserts the combined
 /// dump equals the golden captured before rule tracing existed. #165
 /// re-blessed only the `custom_only` scenario: its weighted-sum rows outside
-/// the scenario's category set became `uncategorized`.
+/// the scenario's category set became `uncategorized`. #182 re-blessed one
+/// `layered` row's `is_revert` (0 to 1): its `fix(...): revert ...` subject
+/// matches `core::revert::is_revert`, and no verdict changed.
 /// Test: this function.
 #[tokio::test]
 async fn classify_rows_are_byte_identical_to_golden() {

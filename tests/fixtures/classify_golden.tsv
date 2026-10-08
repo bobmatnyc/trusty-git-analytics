@@ -1291,7 +1291,7 @@
 00000508	beta	Some(0.9)	0	Some("test")	None	Some("ADR-0020")	Some(0.9)	Some("exact_rule")	None	Some("maintenance")
 00000509	gamma	Some(0.9)	0	Some("chore")	Some("initial")	Some("ADR-0049")	Some(0.9)	Some("exact_rule")	None	Some("maintenance")
 0000050a	alpha	Some(0.9)	0	Some("test")	None	None	Some(0.9)	Some("exact_rule")	None	Some("maintenance")
-0000050b	beta	Some(0.95)	0	Some("bugfix")	None	None	Some(0.95)	Some("regex_rule")	None	Some("bugfix")
+0000050b	beta	Some(0.95)	1	Some("bugfix")	None	None	Some(0.95)	Some("regex_rule")	None	Some("bugfix")
 0000050c	gamma	Some(0.9)	0	Some("documentation")	None	Some("ADR-0044")	Some(0.9)	Some("exact_rule")	None	Some("content")
 0000050d	alpha	Some(0.85)	0	Some("bugfix")	None	Some("ADR-0037")	Some(0.85)	Some("exact_rule")	None	Some("bugfix")
 0000050e	beta	Some(0.75)	0	Some("chore")	Some("config")	None	Some(0.75)	Some("exact_rule")	None	Some("maintenance")
