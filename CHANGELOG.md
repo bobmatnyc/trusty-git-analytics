@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [10.3.5] — 2026-10-08
 
+### Breaking
+
+- `tga collect` now exits non-zero when a GitHub PR-list or PR-reviewer fetch fails with HTTP 403, 401, 410 or 5xx after retries (or a transport or parse error); before, each was only a warning and the run exited 0. An HTTP 404 is a counted warning, not a failure, and the run still exits 0. A rate limit is unchanged. A script or CI job that ran `tga collect` against a token without access to every configured repository now fails (#146).
+
 ### Fixed
 
 - `tga collect` no longer reports success when a GitHub PR-list or PR-reviewer fetch fails (#146). Before, each failed repository or pull request was only a warning log line, so a run that dropped thousands of HTTP 403s ended with 0 failures. A failed repository or pull request is still skipped, and the pass carries on with the rest. At the end of the pass:
