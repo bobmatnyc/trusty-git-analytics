@@ -446,8 +446,12 @@ pub(super) fn write_results(
 /// Why: extracted from `write_results` so the periodic-checkpoint loop stays
 /// readable and the transaction boundary is explicit.
 /// What: inserts or updates `classifications` rows and updates `commits` for
-/// every `(commit, result)` pair in the chunk. Stats are accumulated in place.
-/// Test: exercised indirectly by all `write_results` callers.
+/// every `(commit, result)` pair in the chunk, setting `is_revert` to the
+/// revert verdict OR `core::revert::is_revert(message)` (#182). Stats are
+/// accumulated in place.
+/// Test: exercised indirectly by all `write_results` callers;
+/// `revert_flag_tests::revert_message_sets_is_revert_under_a_repo_map_verdict`,
+/// `revert_flag_tests::revert_verdict_sets_is_revert_without_a_revert_message`.
 pub(super) fn write_results_chunk(
     db: &mut Database,
     commits: &[CommitRow],
@@ -479,12 +483,10 @@ pub(super) fn write_results_chunk(
                  WHERE id = ?8",
             )
             .map_err(crate::core::TgaError::from)?;
-        // The UPDATE also sets `is_revert` so the column stays in sync with
-        // the verdict category. Without this branch, the column remains 0
-        // forever even when classification correctly identified a revert
-        // (issue #210). The downstream `backfill revert-flags` path relies on
-        // commit-message heuristics rather than classification verdicts, so
-        // syncing here is the only place `is_revert` is set automatically.
+        // The UPDATE also sets `is_revert`: the verdict category (issue #210)
+        // OR the commit-message revert match (#182), so a verdict tier with
+        // no revert rule cannot clear the flag. This is the only place
+        // `is_revert` is set automatically.
         let mut update_commit = tx
             .prepare(
                 "UPDATE commits SET classification_id = ?1, confidence = ?2, is_revert = ?3 \
@@ -531,7 +533,10 @@ pub(super) fn write_results_chunk(
             // the revert signal at the subcategory level (e.g. a merge
             // whose subcategory is "revert"). Comparison is
             // case-insensitive to absorb taxonomy-extension variations.
-            let is_revert = is_revert_verdict(&result.category, result.subcategory.as_deref());
+            // #182: OR the message match, so a repo_map / LLM / non-revert
+            // rule verdict (or `--force` with no revert rule) keeps the flag.
+            let is_revert = is_revert_verdict(&result.category, result.subcategory.as_deref())
+                || crate::core::revert::is_revert(&commit.message);
             update_commit
                 .execute(params![
                     classification_id,

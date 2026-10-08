@@ -1,0 +1,2 @@
+Fixed
+- `tga classify` no longer clears `commits.is_revert` on a revert commit whose verdict is not a revert category (#182). The flag is now the revert verdict OR the commit-message revert match that `tga backfill revert-flags` uses, whichever tier answered (rule, repo map, LLM, weighted sum or default) and with or without `--force`. Before, `tga classify --force` with a rules set that had no revert rule reset existing `is_revert = 1` rows to 0. To repair a database a forced run already cleared, run `tga backfill revert-flags`.

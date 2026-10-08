@@ -72,3 +72,7 @@ mod weighted_sum_taxonomy_tests;
 // #175: `use_llm: false` builds no LLM client and sends nothing.
 #[cfg(test)]
 mod use_llm_off_tests;
+
+// #182: `is_revert` is the verdict OR the commit-message revert match.
+#[cfg(test)]
+mod revert_flag_tests;
