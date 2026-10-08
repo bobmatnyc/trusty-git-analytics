@@ -70,6 +70,81 @@ fn backfill_revert_flags_updates_only_changed_rows() {
     assert_eq!(reverts, 1);
 }
 
+/// Reads `commits.is_revert` for one seeded sha.
+fn revert_flag(db: &Database, sha: &str) -> i64 {
+    db.connection()
+        .query_row(
+            "SELECT is_revert FROM commits WHERE sha = ?1",
+            params![sha],
+            |r| r.get(0),
+        )
+        .expect("read is_revert")
+}
+
+/// Why: regression guard for #182. Classify sets `is_revert` from the
+/// revert verdict OR the message match, so a row can hold 1 with a message
+/// the matcher rejects (an `undo:` commit a rule categorised as revert).
+/// A backfill that recomputed the flag from the message cleared it.
+/// What: seeds a verdict-set row (1, non-matching message), a 0 row with a
+/// revert message and a 0 row without one; runs the backfill; asserts the
+/// flags end at 1, 1, 0. Fails on "still clears" (row `verdict` drops to 0)
+/// and on "sets every row" (row `plain` rises to 1).
+/// Test: this test.
+#[test]
+fn backfill_revert_flags_never_clears_a_verdict_set_flag() {
+    let mut db = Database::open_in_memory().expect("open");
+    seed(&db, "verdict", "undo: roll back the login change");
+    seed(&db, "message", "Revert \"feat: add login\"");
+    seed(&db, "plain", "feat: thing");
+    db.connection()
+        .execute("UPDATE commits SET is_revert = 1 WHERE sha = 'verdict'", [])
+        .expect("set verdict flag");
+    assert!(!is_revert("undo: roll back the login change"));
+
+    backfill_revert_flags(&mut db, false, &[], None, None).expect("backfill");
+
+    assert_eq!(revert_flag(&db, "verdict"), 1, "verdict-set flag cleared");
+    assert_eq!(revert_flag(&db, "message"), 1, "revert message not flagged");
+    assert_eq!(revert_flag(&db, "plain"), 0, "non-revert row flagged");
+}
+
+/// Why: #182 made the backfill set-only, so its printed counts must count
+/// only 0 -> 1 writes, never rows it skipped or flags it left at 1.
+/// What: seeds two rows already at 1 (one matching, one not) and two at 0
+/// (one matching, one not); checks dry-run counts and no write, then the
+/// real run's counts and flags, then that a second run sets nothing.
+/// Test: this test.
+#[test]
+fn backfill_revert_flags_reports_scanned_and_set_counts() {
+    use super::flags::RevertFlagCounts;
+    let mut db = Database::open_in_memory().expect("open");
+    seed(&db, "verdict", "undo: roll back the login change");
+    seed(&db, "already", "Revert \"fix: old\"");
+    seed(&db, "message", "revert: bad merge");
+    seed(&db, "plain", "feat: thing");
+    db.connection()
+        .execute(
+            "UPDATE commits SET is_revert = 1 WHERE sha IN ('verdict', 'already')",
+            [],
+        )
+        .expect("set flags");
+
+    let dry = backfill_revert_flags(&mut db, true, &[], None, None).expect("dry run");
+    assert_eq!(dry, RevertFlagCounts { scanned: 4, set: 1 });
+    assert_eq!(revert_flag(&db, "message"), 0, "dry run wrote a flag");
+
+    let real = backfill_revert_flags(&mut db, false, &[], None, None).expect("backfill");
+    assert_eq!(real, RevertFlagCounts { scanned: 4, set: 1 });
+    let flags: Vec<i64> = ["verdict", "already", "message", "plain"]
+        .iter()
+        .map(|sha| revert_flag(&db, sha))
+        .collect();
+    assert_eq!(flags, vec![1, 1, 1, 0]);
+
+    let again = backfill_revert_flags(&mut db, false, &[], None, None).expect("rerun");
+    assert_eq!(again, RevertFlagCounts { scanned: 4, set: 0 });
+}
+
 #[test]
 fn backfill_ticket_ids_populates_ticket_id() {
     let mut db = Database::open_in_memory().expect("open");

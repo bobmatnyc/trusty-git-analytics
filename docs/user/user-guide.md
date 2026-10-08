@@ -484,8 +484,10 @@ the commits unclassified so the cascade will retry them.
 
 ### Backfill revert flags
 
-If you updated your revert-detection patterns, rescan all commit messages to update
-the `is_revert` flag:
+If you updated your revert-detection patterns, rescan all commit messages and set
+the `is_revert` flag on commits whose message matches. The backfill only sets the
+flag: a commit already marked as a revert, for example by a classification verdict,
+stays marked whatever its message says.
 
 ```bash
 tga backfill revert-flags

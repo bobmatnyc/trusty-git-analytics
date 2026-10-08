@@ -73,10 +73,12 @@ pub enum BackfillSubcommand {
     /// on the next `tga classify` run. Use `tga classify --force` after
     /// this to immediately re-process the cleared commits.
     AiDetection,
-    /// Scan commit messages for revert patterns and update `is_revert`.
+    /// Scan commit messages for revert patterns and set `is_revert`.
     ///
     /// Detects `Revert "..."`, `revert:`, and `revert"` prefixes
-    /// (case-insensitive). Use --repos/--since/--until to limit scope.
+    /// (case-insensitive). Only sets the flag: a commit already marked as a
+    /// revert, for example by a classification verdict, stays marked.
+    /// Use --repos/--since/--until to limit scope.
     RevertFlags,
     /// Scan commit messages for ticket references and update `ticket_id`/`ticketed`.
     ///
