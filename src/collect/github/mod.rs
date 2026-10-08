@@ -2,6 +2,7 @@
 
 pub mod budget;
 pub mod client;
+pub(crate) mod fetch_faults;
 pub mod issue_writer;
 pub mod org_discovery;
 pub(crate) mod repo_resolver;

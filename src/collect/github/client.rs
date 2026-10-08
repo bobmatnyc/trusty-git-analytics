@@ -7,7 +7,9 @@ use tracing::{debug, warn};
 use async_trait::async_trait;
 
 use crate::collect::errors::{CollectError, Result};
+use crate::collect::fault::CollectionFault;
 use crate::collect::github::budget::{RunBudget, MAX_PAGES};
+use crate::collect::github::fetch_faults::{http_status, FaultWording, FetchFaults};
 use crate::collect::github::repo_resolver::{build_http_client, parse_slug};
 use crate::collect::github::retry::retry_get;
 use crate::collect::github::types::{ApiPull, GitHubIssue, GitHubPrCommit, GitHubReview};
@@ -61,6 +63,10 @@ pub struct GitHubClient {
     /// budget for standalone callers; a run hands its own in with
     /// [`Self::with_run_budget`].
     budget: RunBudget,
+    /// #146: faults the last [`Self::fetch_pull_requests`] recorded for
+    /// repositories whose PR list failed; read through
+    /// [`PrProvider::fetch_faults`].
+    pr_list_faults: std::sync::Mutex<Vec<CollectionFault>>,
 }
 
 /// Compute the JSON-encoded `commit_shas` value for a PR row.
@@ -111,6 +117,7 @@ impl GitHubClient {
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
             budget: RunBudget::new(),
+            pr_list_faults: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -149,6 +156,7 @@ impl GitHubClient {
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
             budget: RunBudget::new(),
+            pr_list_faults: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -177,6 +185,7 @@ impl GitHubClient {
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
             budget: RunBudget::new(),
+            pr_list_faults: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -220,104 +229,154 @@ impl GitHubClient {
     /// Fetch all PRs (open + closed + merged) by paginating through the
     /// GitHub REST API.
     ///
+    /// Why: one bad repository must not abort PR collection for the rest of
+    /// the org (#87), and it must not vanish either: a warning line alone let
+    /// 119 HTTP 404s and every 403 report a clean run (#146).
+    /// What: walks every configured repository. A repository whose fetch
+    /// fails is recorded and the walk moves on; pages it fetched before the
+    /// error are kept. A rate limit stays a warning log line, as before (#6553
+    /// handles it run-wide). At the end the recorded failures replace
+    /// [`PrProvider::fetch_faults`]: 404s as one counted warning, every other
+    /// failure (403, 5xx after retries, transport) as one stage failure.
+    /// Test: `crate::collect::pr_pipeline::tests::a_pr_list_404_is_a_counted_warning_not_a_stage_failure`,
+    /// `crate::collect::pr_pipeline::tests::a_pr_list_403_fails_the_stage_once`,
+    /// `crate::collect::pr_pipeline::tests::a_page_2_404_keeps_page_1_and_is_a_counted_warning`,
+    /// `crate::collect::pr_pipeline::tests::a_page_2_403_keeps_page_1_and_fails_the_stage_once`.
+    ///
     /// # Errors
     ///
-    /// Returns [`crate::collect::errors::CollectError::Http`] on transport or
-    /// non-success status, and [`crate::collect::errors::CollectError::Json`]
-    /// on payload parse failures.
+    /// None today: per-repository failures are recorded, not returned. The
+    /// `Result` is the [`PrProvider`] contract.
     pub async fn fetch_pull_requests(&self) -> Result<Vec<PullRequest>> {
         let mut out: Vec<PullRequest> = Vec::new();
+        let mut faults = FetchFaults::default();
         for (owner, repo) in &self.repos {
-            match self.fetch_pull_requests_for_repo(owner, repo).await {
-                Ok(mut prs) => out.append(&mut prs),
-                Err(e) => {
-                    // Partial-success semantics (issue #87): one bad repo
-                    // (404, no token access, transient 5xx after retries)
-                    // must not abort PR collection for the rest of the org.
-                    warn!(
-                        owner = %owner,
-                        repo = %repo,
-                        error = %e,
-                        "GitHub PR fetch failed for repo; continuing with remaining repos"
-                    );
-                }
+            let (mut prs, stopped) = self.fetch_pull_requests_for_repo(owner, repo).await;
+            // #146: pages fetched before an error are kept and stored, exactly
+            // as a full fetch would store them.
+            out.append(&mut prs);
+            let Some((page, e)) = stopped else { continue };
+            warn!(
+                owner = %owner,
+                repo = %repo,
+                page,
+                error = %e,
+                "GitHub PR fetch failed for repo; continuing with remaining repos"
+            );
+            // #146: count it unless it is a rate limit (#6553), naming the
+            // pages lost when earlier ones were kept.
+            if !matches!(e, CollectError::Throttled { .. }) {
+                let item = if page > 1 {
+                    format!(
+                        "{owner}/{repo} (pull requests after page {} not collected)",
+                        page - 1
+                    )
+                } else {
+                    format!("{owner}/{repo}")
+                };
+                faults.record(item, http_status(&e));
             }
         }
+        let recorded = faults.into_faults(&PR_LIST_WORDING, self.repos.len());
+        *self
+            .pr_list_faults
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = recorded;
         Ok(out)
     }
 
     /// Fetch all PRs for a single `(owner, repo)` pair, paginating until
     /// exhausted. Internal helper for [`Self::fetch_pull_requests`].
+    ///
+    /// Why: #146 — this returned `Err` for an error on any page, which threw
+    /// away every pull request the earlier pages had already fetched.
+    /// What: returns the pull requests fetched so far, plus `Some((page,
+    /// error))` naming the page that failed, or `None` for a complete walk.
+    /// Test: `crate::collect::pr_pipeline::tests::a_page_2_404_keeps_page_1_and_is_a_counted_warning`.
     async fn fetch_pull_requests_for_repo(
         &self,
         owner: &str,
         repo: &str,
-    ) -> Result<Vec<PullRequest>> {
-        let base = self.api_base();
+    ) -> (Vec<PullRequest>, Option<(u32, CollectError)>) {
         let mut out: Vec<PullRequest> = Vec::new();
         let mut page = 1u32;
         loop {
-            let url = format!(
-                "{base}/repos/{owner}/{repo}/pulls?state=all&per_page={PAGE_SIZE}&page={page}"
-            );
-            debug!(url = %url, "GET");
-            let resp = self.retry_request(&url).await?;
-
-            // Respect rate-limit hints.
-            if let Some(rem) = resp
-                .headers()
-                .get("x-ratelimit-remaining")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                if rem < 5 {
-                    warn!(remaining = rem, "GitHub rate limit nearly exhausted");
+            let n = match self.fetch_pull_request_page(owner, repo, page).await {
+                Ok(mut prs) => {
+                    let n = prs.len();
+                    out.append(&mut prs);
+                    n
                 }
-            }
-
-            let resp = resp.error_for_status()?;
-            let pulls: Vec<ApiPull> = resp.json().await?;
-            if pulls.is_empty() {
-                break;
-            }
-            let n = pulls.len();
-            for p in pulls {
-                let state = if p.merged_at.is_some() {
-                    PrState::Merged
-                } else if p.state == "closed" {
-                    PrState::Closed
-                } else {
-                    PrState::Open
-                };
-                let commit_shas = commit_shas_for_pull(&p)?;
-                // #5734: GitHub always sends `head.ref`, so `Some("")` here is
-                // an anomaly the collector reports rather than harvests as
-                // nothing. `None` means the payload carried no head block at
-                // all — the same "no claim made" value other providers use.
-                let head_ref = p.head.map(|h| h.ref_name);
-                let body_ticket_id = p.body.as_deref().and_then(pr_body_ticket_key);
-                out.push(PullRequest {
-                    id: 0,
-                    pr_number: p.number,
-                    repository: format!("{owner}/{repo}"),
-                    title: p.title,
-                    author: p.user.map(|u| u.login).unwrap_or_default(),
-                    state,
-                    created_at: p.created_at,
-                    merged_at: p.merged_at,
-                    commit_shas,
-                    fetched_at: Utc::now().to_rfc3339(),
-                    head_ref,
-                    body_ticket_id,
-                });
-            }
-            if (n as u32) < PAGE_SIZE {
+                Err(e) => return (out, Some((page, e))),
+            };
+            if n == 0 || (n as u32) < PAGE_SIZE {
                 break;
             }
             page += 1;
             if self.page_cap_reached("pulls", &format!("{owner}/{repo}"), page) {
                 break;
             }
+        }
+        (out, None)
+    }
+
+    /// Fetch and map one page of a repository's pull-request list.
+    async fn fetch_pull_request_page(
+        &self,
+        owner: &str,
+        repo: &str,
+        page: u32,
+    ) -> Result<Vec<PullRequest>> {
+        let base = self.api_base();
+        let mut out: Vec<PullRequest> = Vec::new();
+        let url =
+            format!("{base}/repos/{owner}/{repo}/pulls?state=all&per_page={PAGE_SIZE}&page={page}");
+        debug!(url = %url, "GET");
+        let resp = self.retry_request(&url).await?;
+
+        // Respect rate-limit hints.
+        if let Some(rem) = resp
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            if rem < 5 {
+                warn!(remaining = rem, "GitHub rate limit nearly exhausted");
+            }
+        }
+
+        let resp = resp.error_for_status()?;
+        let pulls: Vec<ApiPull> = resp.json().await?;
+        for p in pulls {
+            let state = if p.merged_at.is_some() {
+                PrState::Merged
+            } else if p.state == "closed" {
+                PrState::Closed
+            } else {
+                PrState::Open
+            };
+            let commit_shas = commit_shas_for_pull(&p)?;
+            // #5734: GitHub always sends `head.ref`, so `Some("")` here is
+            // an anomaly the collector reports rather than harvests as
+            // nothing. `None` means the payload carried no head block at
+            // all — the same "no claim made" value other providers use.
+            let head_ref = p.head.map(|h| h.ref_name);
+            let body_ticket_id = p.body.as_deref().and_then(pr_body_ticket_key);
+            out.push(PullRequest {
+                id: 0,
+                pr_number: p.number,
+                repository: format!("{owner}/{repo}"),
+                title: p.title,
+                author: p.user.map(|u| u.login).unwrap_or_default(),
+                state,
+                created_at: p.created_at,
+                merged_at: p.merged_at,
+                commit_shas,
+                fetched_at: Utc::now().to_rfc3339(),
+                head_ref,
+                body_ticket_id,
+            });
         }
         Ok(out)
     }
@@ -697,7 +756,22 @@ impl PrProvider for GitHubClient {
     fn fetch_notices(&self) -> Vec<String> {
         GitHubClient::fetch_notices(self)
     }
+
+    fn fetch_faults(&self) -> Vec<CollectionFault> {
+        self.pr_list_faults
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
+
+/// Fault wording for the PR-list fetch (#146).
+const PR_LIST_WORDING: FaultWording<'static> = FaultWording {
+    label: "github",
+    noun: "repositor(y/ies)",
+    fetch: "PR-list fetch",
+    lost: "were not fully collected",
+};
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
