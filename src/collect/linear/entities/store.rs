@@ -111,7 +111,8 @@ pub fn upsert_entities_in(conn: &Connection, kind: EntityKind, nodes: &[Json]) -
             updates.join(", ")
         );
         let values: Vec<Value> = cols.into_iter().map(|(_, v)| v).collect();
-        conn.execute(&sql, rusqlite::params_from_iter(values))?;
+        conn.prepare_cached(&sql)?
+            .execute(rusqlite::params_from_iter(values))?;
     }
     Ok(nodes.len())
 }
