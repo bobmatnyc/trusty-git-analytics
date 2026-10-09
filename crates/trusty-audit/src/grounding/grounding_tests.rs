@@ -12,7 +12,6 @@
 //! binary is a shell script. Nothing reads or writes the process environment
 //! either, which is what lets these run in parallel with the rest of the suite.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -113,12 +112,9 @@ fn approving_search(at: &Path) -> PathBuf {
 
 #[cfg(unix)]
 fn stub_binary(at: &Path, name: &str, script: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
     let path = at.join(name);
-    let mut file = std::fs::File::create(&path).expect("create stub");
-    file.write_all(script.as_bytes()).expect("write stub");
-    drop(file);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // #152: the shared writer leaves no write fd a sibling fork can leak.
+    crate::stub_executable::write_stub_executable(&path, script);
     path
 }
 

@@ -20,9 +20,12 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// #152: the crate's one stub-executable writer, shared with the unit tests.
+#[path = "../src/stub_executable.rs"]
+mod stub_executable;
 
 const TAUDIT: &str = env!("CARGO_BIN_EXE_taudit");
 
@@ -68,8 +71,8 @@ impl Engagement {
     }
 
     fn write_script(path: &Path, body: &str) {
-        std::fs::write(path, body).expect("write script");
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        stub_executable::write_stub_executable(path, body);
     }
 
     /// A `gh` that clones from nowhere: it builds the tree `gh repo clone` would

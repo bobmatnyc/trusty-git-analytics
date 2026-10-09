@@ -307,12 +307,8 @@ mod override_tests {
 
     /// An executable stub at `path`, so `validated` has something to accept.
     fn executable(path: &Path) {
-        std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("write stub");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        }
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(path, "#!/bin/sh\nexit 0\n");
     }
 
     /// The ordinary case: nothing exported, so every tool runs from its pin.
