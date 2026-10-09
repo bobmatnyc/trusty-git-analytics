@@ -22,50 +22,59 @@
 //!
 //! ## Scope
 //!
-//! `--team` overrides; otherwise the sync requires exactly one configured
-//! `linear.team_keys` entry (multiple configured teams need an explicit
-//! `--team` per run, mirroring JIRA's single `project_key`).
+//! `--team` overrides; `--all-teams` syncs every team the API key can see,
+//! each under its own cursor (#190); otherwise the sync requires exactly one
+//! configured `linear.team_keys` entry.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::Args;
-use std::collections::HashMap;
 
 use tga::collect::errors::CollectError;
-use tga::collect::linear::sync::{next_cursor, resolve_scope, validate_team_key};
+use tga::collect::linear::sync::validate_team_key;
 use tga::collect::linear::LinearClient;
-use tga::collect::linear_pipeline::persist_work_items;
 use tga::core::config::Config;
-use tga::core::db::{get_linear_cursor, list_linear_cursor_teams, set_linear_cursor, Database};
+use tga::core::db::{get_linear_cursor, list_linear_cursor_teams, Database};
 
-/// Safety valve for a first-time backfill against a large team, mirroring
-/// JIRA's `DEFAULT_MAX_TICKETS`.
-const DEFAULT_MAX_ISSUES: usize = 10_000;
+mod team_sync;
+use team_sync::{sync_team, TeamOutcome};
 
 /// Arguments for `tga linear sync`.
 #[derive(Args, Debug, Default)]
 #[command(
-    about = "Bulk-sync a Linear team's full issue set into linear_issues / work_items.",
-    long_about = "Fetch every issue for the configured (or --team-overridden) Linear team\n\
-and persist it into `linear_issues` (with lifecycle timestamps) and the\n\
-source-agnostic `work_items` corpus.\n\n\
-Incremental by default: resumes from the stored `linear_sync_cursor` for the\n\
+    about = "Bulk-sync Linear issues (one team or every team) into linear_issues / work_items.",
+    long_about = "Fetch every issue for the configured (or --team-overridden) Linear team,\n\
+or for every team the API key can see (--all-teams), and persist it into\n\
+`linear_issues` (keyed by Linear's issue id, with every issue field and the\n\
+raw GraphQL node) and the source-agnostic `work_items` corpus.\n\n\
+Archived issues are included unless --exclude-archived is given.\n\n\
+Incremental by default: resumes from the stored `linear_sync_cursor` for each\n\
 team. Pass --backfill for a full historical pull (first-ever sync of a team\n\
-is always a full pull automatically, even without --backfill).\n\n\
+is always a full pull automatically, even without --backfill). An issue whose\n\
+`updatedAt` is already stored is not rewritten.\n\n\
 Requires `linear.api_key` (or a shared-credential fallback) configured, and\n\
-either --team or exactly one entry in `linear.team_keys`.",
+--team, --all-teams, or exactly one entry in `linear.team_keys`.",
     after_help = "EXAMPLES:\n\
   # Incremental sync using the stored cursor (or full history on first run)\n\
   tga linear sync --team ENG\n\n\
+  # Every team the API key can see, archived issues included\n\
+  tga linear sync --all-teams\n\n\
   # Full historical backfill, ignoring any stored cursor\n\
   tga linear sync --team ENG --backfill\n\n\
   # Preview without writing to the database\n\
-  tga linear sync --team ENG --dry-run"
+  tga linear sync --all-teams --dry-run"
 )]
 pub struct LinearSyncArgs {
     /// Restrict sync to a single Linear team key. Overrides
     /// `linear.team_keys` in config.yaml.
-    #[arg(long, value_name = "KEY")]
+    #[arg(long, value_name = "KEY", conflicts_with = "all_teams")]
     pub team: Option<String>,
+    /// Sync every team the API key can see, each under its own cursor.
+    /// Archived issues are always included in this mode.
+    #[arg(long, default_value_t = false)]
+    pub all_teams: bool,
+    /// Leave archived issues out (single-team mode only).
+    #[arg(long, default_value_t = false, conflicts_with = "all_teams")]
+    pub exclude_archived: bool,
     /// Only sync issues updated on/after this date (ISO8601 YYYY-MM-DD).
     #[arg(long, value_name = "DATE")]
     pub since: Option<String>,
@@ -73,12 +82,12 @@ pub struct LinearSyncArgs {
     /// --since is also given) sync the entire team history.
     #[arg(long, default_value_t = false)]
     pub backfill: bool,
-    /// Cap the number of issues processed in this run (safety valve for a
-    /// first-time backfill against a large team). [default: 10000]
+    /// Fail when a team holds more than N issues in the sync window. Nothing
+    /// is written for that team. Default: no cap.
     #[arg(long, value_name = "N")]
     pub max_issues: Option<usize>,
-    /// Fetch from Linear and report counts without writing to the database
-    /// or advancing the cursor.
+    /// Fetch from Linear and report what would change without writing to
+    /// the database or advancing the cursor. Opens the database read-only.
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
 }
@@ -144,12 +153,12 @@ fn resolve_team_key(config: &Config, cli_team: Option<&str>) -> anyhow::Result<S
             match configured.as_slice() {
                 [one] => one.clone(),
                 [] => anyhow::bail!(
-                    "no Linear team scope: pass --team <KEY> or set exactly one entry in \
-                     linear.team_keys in config.yaml"
+                    "no Linear team scope: pass --team <KEY> or --all-teams, or set exactly one \
+                     entry in linear.team_keys in config.yaml"
                 ),
                 many => anyhow::bail!(
                     "ambiguous Linear team scope: linear.team_keys has {} entries ({}); \
-                     pass --team <KEY> to pick one",
+                     pass --team <KEY> to pick one, or --all-teams",
                     many.len(),
                     many.join(", ")
                 ),
@@ -181,71 +190,86 @@ pub async fn run_sync(
     db: &mut Database,
     args: LinearSyncArgs,
 ) -> anyhow::Result<()> {
-    let team_key = resolve_team_key(&config, args.team.as_deref())?;
-    let client = build_client(&config)?;
-
-    let explicit_since = args.since.as_deref().map(parse_cli_date).transpose()?;
-    let stored_cursor = get_linear_cursor(db.connection(), &team_key)?
-        .and_then(|c| DateTime::parse_from_rfc3339(&c.last_synced_at).ok())
-        .map(|d| d.with_timezone(&Utc));
-
-    let scope = resolve_scope(&team_key, explicit_since, args.backfill, stored_cursor);
-    let max_issues = args.max_issues.unwrap_or(DEFAULT_MAX_ISSUES);
-
-    tracing::info!(
-        team = %team_key,
-        since = ?scope.since,
-        backfill = args.backfill,
-        dry_run = args.dry_run,
-        "starting tga linear sync"
-    );
-
-    let (issues, truncated) = client
-        .fetch_team_issues(&team_key, scope.since, max_issues)
-        .await?;
-    let issues_synced = issues.len();
-
-    if !args.dry_run {
-        client.store_issues(db, &issues)?;
-        // #7139: the same issues land in the source-agnostic `work_items`
-        // corpus, extending the existing commit-reference linkage
-        // (`linear_pipeline::persist_work_items`) to cover backfilled
-        // issues too. No commit correlation is attempted here — a bulk sync
-        // has no message context — so `commit_refs` is empty; the per-commit
-        // path still owns that linkage.
-        persist_work_items(db, &issues, &HashMap::new())?;
-
-        if let Some(next) = next_cursor(
-            &issues
-                .iter()
-                .filter_map(|i| i.updated_at)
-                .collect::<Vec<_>>(),
-        ) {
-            let advance = stored_cursor.map_or(next, |s| s.max(next));
-            set_linear_cursor(
-                db.connection(),
-                &team_key,
-                &advance.to_rfc3339(),
-                issues_synced as i64,
-            )?;
-        }
+    // Resolve a single-team scope before the client, so a scope error is
+    // reported even when no API key is configured.
+    if !args.all_teams {
+        resolve_team_key(&config, args.team.as_deref())?;
     }
+    let client = build_client(&config)?;
+    run_sync_with(&client, &config, db, &args).await?;
+    Ok(())
+}
 
-    println!(
-        "Linear sync ({team_key}): {issues_synced} issue(s) synced{}.",
-        if args.dry_run {
-            " [dry-run: no writes]"
-        } else {
-            ""
+/// [`run_sync`] with the client supplied, returning one outcome per team.
+///
+/// Why: #190 — the all-teams mode, the cap failure and the dry-run report
+/// all sit above the HTTP layer, and a test needs to drive them against a
+/// mock server.
+/// What: resolves the team list (`--all-teams` lists every team through the
+/// API; otherwise one key), then syncs each team in order with
+/// [`team_sync::sync_team`], printing one line per team. Archived issues are
+/// included unless `--exclude-archived`. The first team that fails stops the
+/// run with an error naming it; teams already synced keep their rows and
+/// cursors.
+/// Test: `sync_tests::all_teams_syncs_each_team_under_its_own_cursor`,
+/// `sync_tests::cap_exceeded_fails_and_writes_nothing`,
+/// `sync_tests::dry_run_reports_and_writes_nothing`,
+/// `sync_tests::second_sync_with_no_remote_change_writes_nothing`,
+/// `sync_tests::moved_issue_keeps_one_row_across_runs`,
+/// `sync_tests::raw_json_estimate_reaches_the_effort_extractor`.
+///
+/// # Errors
+///
+/// Team resolution, Linear HTTP/auth, cap and database failures.
+pub(crate) async fn run_sync_with(
+    client: &LinearClient,
+    config: &Config,
+    db: &mut Database,
+    args: &LinearSyncArgs,
+) -> anyhow::Result<Vec<TeamOutcome>> {
+    let explicit_since = args.since.as_deref().map(parse_cli_date).transpose()?;
+    // #190: archived issues are part of the data set unless asked otherwise;
+    // the all-teams mode always includes them.
+    let include_archived = args.all_teams || !args.exclude_archived;
+    let team_keys = if args.all_teams {
+        let teams = client.fetch_teams(include_archived).await?;
+        let mut keys = Vec::with_capacity(teams.len());
+        for team in teams {
+            validate_team_key(&team.key).map_err(|e| anyhow::anyhow!(e))?;
+            keys.push(team.key);
         }
-    );
-    if truncated {
+        keys
+    } else {
+        vec![resolve_team_key(config, args.team.as_deref())?]
+    };
+
+    let mut outcomes = Vec::with_capacity(team_keys.len());
+    for team_key in &team_keys {
+        let outcome = sync_team(client, db, team_key, args, explicit_since, include_archived)
+            .await
+            .map_err(|e| {
+                e.context(format!(
+                    "tga linear sync failed for team {team_key}; {} earlier team(s) in this \
+                     run kept their rows and cursors",
+                    outcomes.len()
+                ))
+            })?;
+        println!("{}", outcome.summary_line(args.dry_run));
+        outcomes.push(outcome);
+    }
+    if args.all_teams {
+        let fetched: usize = outcomes.iter().map(|o| o.fetched).sum();
         println!(
-            "  note: stopped at the --max-issues limit ({max_issues}); more issues match this \
-             window. Re-run to continue from the recorded cursor."
+            "Linear sync: {} team(s), {fetched} issue(s) fetched{}.",
+            outcomes.len(),
+            if args.dry_run {
+                " [dry-run: no writes]"
+            } else {
+                ""
+            }
         );
     }
-    Ok(())
+    Ok(outcomes)
 }
 
 /// Dispatch entry point for `tga linear freshness`.
@@ -338,3 +362,6 @@ pub fn run_freshness(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod sync_tests;

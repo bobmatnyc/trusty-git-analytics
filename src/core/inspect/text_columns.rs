@@ -67,11 +67,13 @@ pub const FREE_TEXT: &[&str] = &[
 
 /// Serialized upstream payloads.
 ///
-/// `work_items.raw_json` is the whole list. Its only writer today serializes a
-/// struct with no description field, so it is clean in practice — but that is a
-/// property of the writer, not of the column, which is why the attestation
-/// reads the column instead of citing `0005_work_items.sql`.
-pub const EMBEDDED_PAYLOAD: &[&str] = &["work_items.raw_json"];
+/// `work_items.raw_json` and, since #190, `linear_issues.raw_json`. For Linear
+/// both hold the GraphQL issue node, whose selection
+/// (`collect::linear::issue::ISSUE_FIELDS`) has no description field, so they
+/// are clean in practice — but that is a property of the writer, not of the
+/// column, which is why the attestation reads the column instead of citing
+/// the migration.
+pub const EMBEDDED_PAYLOAD: &[&str] = &["linear_issues.raw_json", "work_items.raw_json"];
 
 /// Every remaining `TEXT` column: identifiers, enumerated values, timestamps,
 /// and JSON arrays of identifiers.
@@ -185,6 +187,22 @@ pub const CONSTRAINED: &[&str] = &[
     "linear_issues.started_at",
     "linear_issues.completed_at",
     "linear_issues.canceled_at",
+    // #190: issue fields from the Linear API (migration v33). Ids and
+    // timestamps come from Linear, not from tga, so they are scanned too.
+    "linear_issues.linear_id",
+    "linear_issues.state_type",
+    "linear_issues.team_id",
+    "linear_issues.project_id",
+    "linear_issues.cycle_id",
+    "linear_issues.parent_id",
+    "linear_issues.label_ids",
+    "linear_issues.label_names",
+    "linear_issues.due_date",
+    "linear_issues.assignee_id",
+    "linear_issues.assignee_name",
+    "linear_issues.assignee_email",
+    "linear_issues.creator_id",
+    "linear_issues.archived_at",
     "linear_sync_cursor.team_key",
     "linear_sync_cursor.last_synced_at",
     "linear_sync_cursor.last_run_at",

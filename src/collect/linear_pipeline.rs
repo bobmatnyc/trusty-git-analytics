@@ -191,8 +191,8 @@ fn build_commit_refs(commits: &[(String, String)]) -> HashMap<String, Vec<String
 /// table's foreign key would reject it. Returns the number of `work_items`
 /// rows written.
 ///
-/// `project` is left `None`: the GraphQL query this crate issues has no project
-/// field, and DOC-70 §6 routes project resolution through trusty-common's
+/// `project` is left `None`: the issue query carries only the project id since
+/// #190, and DOC-70 §6 routes project resolution through trusty-common's
 /// client instead. Writing the team name there would fill the column DOC-70
 /// filters on with a value that is not a project.
 ///
@@ -232,7 +232,10 @@ pub fn persist_work_items(
             tags: None,
             project: None,
             url: Some(issue.url.clone()),
-            raw_json: serde_json::to_string(issue).ok(),
+            // #190: the GraphQL node as Linear returned it, so the
+            // Linear-aware effort and work extractors find `estimate`,
+            // `parent` and `creator` under Linear's own names.
+            raw_json: issue.raw_json(),
         };
         upsert_work_item(&tx, &row)?;
         written += 1;
@@ -263,11 +266,7 @@ mod tests {
             assignee: Some("Alice".to_string()),
             priority: 2,
             url: format!("https://linear.app/x/issue/{identifier}"),
-            created_at: None,
-            updated_at: None,
-            started_at: None,
-            completed_at: None,
-            canceled_at: None,
+            ..Default::default()
         }
     }
 

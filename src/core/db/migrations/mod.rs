@@ -212,6 +212,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "llm_usage_text_mode",
         sql: include_str!("../sql/0032_llm_usage_text_mode.sql"),
     },
+    // #190: full Linear issue fields, archived state, and `linear_id` (the
+    // issue UUID) as the stable key; additive, see the SQL file header.
+    Migration {
+        version: 33,
+        name: "linear_issue_fields",
+        sql: include_str!("../sql/0033_linear_issue_fields.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

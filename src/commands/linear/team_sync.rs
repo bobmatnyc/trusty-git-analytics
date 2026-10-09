@@ -1,0 +1,131 @@
+//! One team's pass of `tga linear sync` (#190).
+//!
+//! Why: the all-teams mode runs the same fetch, store and cursor steps once
+//! per team, and `mod.rs` would pass the line cap holding them inline.
+//! What: [`sync_team`] and the [`TeamOutcome`] it reports.
+//! Test: `super::sync_tests`.
+
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+
+use super::LinearSyncArgs;
+use tga::collect::linear::sync::{next_cursor, resolve_scope};
+use tga::collect::linear::{
+    plan_linear_issues, upsert_linear_issues, ChangeCounts, IssueChange, IssueQuery, LinearClient,
+    LinearIssue,
+};
+use tga::collect::linear_pipeline::persist_work_items;
+use tga::core::db::{get_linear_cursor, set_linear_cursor, Database};
+
+/// What one team's sync fetched and did (or, under `--dry-run`, would do).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TeamOutcome {
+    /// Team key.
+    pub team_key: String,
+    /// Issues Linear returned for the window.
+    pub fetched: usize,
+    /// How many of them are archived.
+    pub archived: usize,
+    /// New / changed / moved / unchanged tallies against the stored rows.
+    pub counts: ChangeCounts,
+}
+
+impl TeamOutcome {
+    /// The one report line `tga linear sync` prints for this team.
+    pub(crate) fn summary_line(&self, dry_run: bool) -> String {
+        let c = &self.counts;
+        format!(
+            "Linear sync ({}): {} issue(s) fetched, {} archived; {} {} \
+             ({} new, {} changed, {} moved, {} unchanged){}.",
+            self.team_key,
+            self.fetched,
+            self.archived,
+            if dry_run { "would write" } else { "wrote" },
+            c.written(),
+            c.new,
+            c.changed,
+            c.moved,
+            c.unchanged,
+            if dry_run { " [dry-run: no writes]" } else { "" }
+        )
+    }
+}
+
+/// Fetch, store and advance the cursor for one team.
+///
+/// Why: #190 — one per-team unit, so `--all-teams` keeps a cursor per team
+/// and a re-sync with no remote change writes no issue row.
+/// What: resolves the `updatedAt` bound from `--since` / `--backfill` / the
+/// team's stored cursor, walks the team's issues (archived included when
+/// `include_archived`), then either classifies them read-only (`--dry-run`,
+/// which opens the database read-only per #189) or upserts them by
+/// `linear_id`, projects the new and changed ones into `work_items`, and
+/// advances the team's cursor to the newest `updatedAt` seen. The cursor
+/// never moves backward.
+/// Test: `super::sync_tests` (every test there runs through this).
+///
+/// # Errors
+///
+/// Linear HTTP/auth and cap errors from the walk; database errors.
+pub(super) async fn sync_team(
+    client: &LinearClient,
+    db: &mut Database,
+    team_key: &str,
+    args: &LinearSyncArgs,
+    explicit_since: Option<DateTime<Utc>>,
+    include_archived: bool,
+) -> anyhow::Result<TeamOutcome> {
+    let stored_cursor = get_linear_cursor(db.connection(), team_key)?
+        .and_then(|c| DateTime::parse_from_rfc3339(&c.last_synced_at).ok())
+        .map(|d| d.with_timezone(&Utc));
+    let scope = resolve_scope(team_key, explicit_since, args.backfill, stored_cursor);
+    tracing::info!(
+        team = %team_key,
+        since = ?scope.since,
+        include_archived,
+        backfill = args.backfill,
+        dry_run = args.dry_run,
+        "starting tga linear sync"
+    );
+
+    let query = IssueQuery::new(team_key, scope.since, include_archived);
+    // #190: no default cap; a configured cap that is reached is an error.
+    let issues = client.fetch_team_issues(&query, args.max_issues).await?;
+    let archived = issues.iter().filter(|i| i.is_archived()).count();
+
+    let changes = if args.dry_run {
+        // #189: the handle is read-only here; classify, never write.
+        plan_linear_issues(db.connection(), &issues)?
+    } else {
+        let changes = upsert_linear_issues(db, &issues)?;
+        // #7139: the same issues land in `work_items`; no commit correlation
+        // here, so `commit_refs` is empty. #190: only new or changed issues,
+        // so a re-sync with no remote change writes nothing.
+        let written: Vec<LinearIssue> = issues
+            .iter()
+            .zip(&changes)
+            .filter(|(_, c)| **c != IssueChange::Unchanged)
+            .map(|(i, _)| i.clone())
+            .collect();
+        persist_work_items(db, &written, &HashMap::new())?;
+
+        let observed: Vec<DateTime<Utc>> = issues.iter().filter_map(|i| i.updated_at).collect();
+        if let Some(next) = next_cursor(&observed) {
+            let advance = stored_cursor.map_or(next, |s| s.max(next));
+            set_linear_cursor(
+                db.connection(),
+                team_key,
+                &advance.to_rfc3339(),
+                issues.len() as i64,
+            )?;
+        }
+        changes
+    };
+
+    Ok(TeamOutcome {
+        team_key: team_key.to_string(),
+        fetched: issues.len(),
+        archived,
+        counts: ChangeCounts::of(&changes),
+    })
+}

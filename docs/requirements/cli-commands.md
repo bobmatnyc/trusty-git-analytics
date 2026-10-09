@@ -174,6 +174,45 @@ Weekly PR metrics aggregation into `weekly_pr_metrics`.
 | `--weeks <N>` | 4 | |
 | `--rebuild` | false | Drop existing rows for range before inserting |
 
+### `tga linear sync`
+
+Bulk-sync Linear issues into `linear_issues` and `work_items` (#7139, #190).
+One team per run (`--team`, or the single `linear.team_keys` entry), or every
+team the API key can see (`--all-teams`). Each team keeps its own
+`updatedAt` cursor in `linear_sync_cursor`; the first sync of a team is a full
+pull.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--team <KEY>` | from `linear.team_keys` | Sync one team. Conflicts with `--all-teams` |
+| `--all-teams` | false | List every team through the API and sync each in turn. Archived issues are always included |
+| `--exclude-archived` | false | Leave archived issues out (single-team mode only) |
+| `--since <YYYY-MM-DD>` | stored cursor | Only issues updated on or after this date |
+| `--backfill` | false | Ignore the stored cursor; with no `--since`, sync the whole history |
+| `--max-issues <N>` | no cap | Fail when a team holds more than N issues in the window. The error names the team and the cap, and nothing is written for that team |
+| `--dry-run` | false | Open the database read-only, fetch, and print what would be written. No row and no cursor is written |
+
+Rows are keyed by Linear's issue `id` (UUID); `identifier` (ENG-123) is a
+separate indexed column. An issue that moves team gets a new identifier and
+keeps its one row. Each row stores the state name and type, priority,
+estimate, project, cycle and parent ids, label ids and names, due date,
+assignee id/name/email, creator id, the created/updated/started/completed/
+canceled/archived timestamps, an `archived` flag, url, team id and key, and
+`raw_json` — the GraphQL node as Linear returned it. An issue whose
+`updatedAt` is already stored is not rewritten.
+
+Output is one line per team, for example:
+
+```text
+Linear sync (ENG): 3 issue(s) fetched, 1 archived; wrote 2 (1 new, 1 changed, 0 moved, 1 unchanged).
+```
+
+The first team that fails stops the run with a non-zero exit naming that
+team; teams synced earlier in the run keep their rows and cursors.
+
+`tga linear freshness` reads the same cursor table and fails when a team has
+never synced or is older than `--max-age-days` (default 2).
+
 ### `tga override`
 
 Manage manual classification overrides (Tier 0).

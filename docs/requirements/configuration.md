@@ -959,9 +959,14 @@ is the only way an engagement states its own window.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `api_key` | string | env `LINEAR_API_KEY` | Linear API key |
-| `team_id` | string | None | Limit to a specific Linear team |
+| `api_key` | string | env `LINEAR_API_KEY` | Linear API key. Supports `${LINEAR_API_KEY}`; when unset, the shared credential resolver is asked for the `linear` key. |
+| `team_keys` | list[string] | [] | Team keys (e.g. `["ENG"]`). The per-commit lookup fetches only issues whose identifier prefix is listed (empty = every team). `tga linear sync` with no `--team` and no `--all-teams` needs exactly one entry. |
+| `fetch_on_reference` | bool | true | During `collect`, fetch the Linear issues that commit messages name. |
 | `ticket_regex` | string | None | Override regex for detecting Linear ticket refs (e.g. `([A-Z]+-\d+)`) in commit messages. Added in v1.0.6 (#75). |
+
+There is no `team_id` key; the team scope is `team_keys`. The bulk sync
+(`tga linear sync`, see [cli-commands.md](cli-commands.md#tga-linear-sync))
+takes its scope from `--team`, `--all-teams` or `team_keys`.
 
 ### `pm.azure_devops` — AzureDevOpsConfig
 
