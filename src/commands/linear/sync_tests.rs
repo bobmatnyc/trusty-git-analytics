@@ -307,3 +307,56 @@ async fn raw_json_estimate_reaches_the_effort_extractor() {
     assert_eq!(fields.story_points, Some(3.0));
     assert_eq!(fields.parent_key.as_deref(), Some("ENG-1"));
 }
+
+/// #190 (Fail-Open): a `work_items` write that fails after the issue rows are
+/// staged must not leave issues that the next sync classifies `Unchanged` and
+/// never projects. With two transactions the issue rows committed first, so
+/// the re-sync reported "2 unchanged" and `work_items` stayed empty.
+#[tokio::test]
+async fn failed_work_items_write_is_repaired_by_the_next_sync() {
+    let server = MockServer::start().await;
+    mount_issues(
+        &server,
+        "ENG",
+        vec![
+            node("ENG-1", "2026-01-01T00:01:00.000Z", None),
+            node("ENG-2", "2026-01-01T00:02:00.000Z", None),
+        ],
+    )
+    .await;
+    let client = mock_client(&server.uri());
+    let mut db = Database::open_in_memory().expect("db");
+    db.connection()
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_work_items BEFORE INSERT ON work_items \
+             BEGIN SELECT RAISE(ABORT, 'injected work_items failure'); END;",
+        )
+        .expect("install failing trigger");
+
+    let err = run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+        .await
+        .expect_err("a failed work_items write must fail the sync");
+    assert!(format!("{err:#}").contains("injected"), "{err:#}");
+    let issues_after_failure = count(&db, "SELECT COUNT(*) FROM linear_issues");
+
+    db.connection()
+        .execute_batch("DROP TRIGGER fail_work_items;")
+        .expect("drop trigger");
+    let second = run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+        .await
+        .expect("re-sync");
+
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM work_items WHERE source = 'linear'"
+        ),
+        2,
+        "the re-sync must write the work_items rows the failed sync lost"
+    );
+    assert_eq!(second[0].counts.new, 2, "{:?}", second[0].counts);
+    assert_eq!(
+        issues_after_failure, 0,
+        "the failed sync must roll its linear_issues rows back"
+    );
+}
