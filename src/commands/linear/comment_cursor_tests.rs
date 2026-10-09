@@ -412,3 +412,199 @@ async fn dry_run_sends_no_comments_request() {
         "{line}"
     );
 }
+
+/// Marks the due-issue walk: the workspace `comments` query filtered by the
+/// ids of issues that moved into the team.
+const BY_ISSUE_ID: &str = "\"issue\":{\"id\":{\"in\":[";
+
+/// The `updatedAt` the moved and new issues carry in the run that sees them.
+const MOVED_UPDATED: &str = "2026-01-03T00:00:00.000Z";
+
+/// Written on ENG-5 while it sat in OPS; older than ENG's cursor minus the
+/// overlap, so the team walk never returns it.
+const C5: C = C {
+    id: "c5",
+    issue: "ENG-5",
+    created: "2026-01-01T06:00:00.000Z",
+    updated: "2026-01-01T06:00:00.000Z",
+    body: "moved",
+};
+
+/// Written on ENG-6, an issue new to ENG but created before ENG's window.
+const C6: C = C {
+    id: "c6",
+    issue: "ENG-6",
+    created: "2026-01-01T07:00:00.000Z",
+    updated: "2026-01-01T07:00:00.000Z",
+    body: "old",
+};
+
+/// Store issue `uuid-ENG-5` as OPS-3 through an OPS issue sync (no comments).
+async fn store_in_ops(server: &MockServer, db: &mut Database) {
+    let mut n = node("ENG-5", "2026-01-01T05:00:00.000Z", None);
+    n["identifier"] = json!("OPS-3");
+    n["team"]["key"] = json!("OPS");
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"eq\":\"OPS\""))
+        .and(body_string_contains("issues(first: $first"))
+        .respond_with(page_response(vec![n], false, None))
+        .mount(server)
+        .await;
+    let ops = LinearSyncArgs {
+        team: Some("OPS".into()),
+        ..Default::default()
+    };
+    run_sync_with(&mock_client(&server.uri()), &Config::default(), db, &ops)
+        .await
+        .expect("OPS issue sync");
+}
+
+/// Answer ENG's issue walk with ENG-1 and ENG-2 (unchanged), ENG-5 (moved
+/// in from OPS), ENG-6 (new, created before ENG's comment window) and ENG-7
+/// (new, created inside it). The team comments walk returns what Linear
+/// would for the window — C1 only. `due` answers the walk by issue id.
+async fn mount_moved(server: &MockServer, due: ResponseTemplate) {
+    let mut issues: Vec<Json> = ["ENG-1", "ENG-2"]
+        .iter()
+        .map(|i| node(i, ISSUE_UPDATED, None))
+        .collect();
+    issues.push(node("ENG-5", MOVED_UPDATED, None));
+    issues.push(node("ENG-6", MOVED_UPDATED, None));
+    let mut fresh = node("ENG-7", MOVED_UPDATED, None);
+    fresh["createdAt"] = json!("2026-01-02T12:00:00.000Z");
+    issues.push(fresh);
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"eq\":\"ENG\""))
+        .and(body_string_contains("issues(first: $first"))
+        .respond_with(page_response(issues, false, None))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(WORKSPACE_COMMENTS))
+        .respond_with(workspace_page(&[C1], false, None))
+        .mount(server)
+        .await;
+    // Priority 1 beats the team walk's default 5.
+    Mock::given(method("POST"))
+        .and(body_string_contains(BY_ISSUE_ID))
+        .respond_with(due)
+        .with_priority(1)
+        .mount(server)
+        .await;
+}
+
+/// Bodies of the due-issue walk requests the server received.
+async fn due_requests(server: &MockServer) -> Vec<String> {
+    workspace_requests(server)
+        .await
+        .into_iter()
+        .filter(|b| b.contains(BY_ISSUE_ID))
+        .collect()
+}
+
+/// ENG holds a comment cursor (C1) and OPS holds `uuid-ENG-5` as OPS-3.
+async fn moved_setup(server: &MockServer, db: &mut Database) {
+    mount(server, &[C1]).await;
+    sync(server, db, false).await.expect("first ENG run");
+    store_in_ops(server, db).await;
+    server.reset().await;
+}
+
+/// #190: an issue that moves into the team, and an issue new to the team but
+/// created before its comment window, have every comment read — including
+/// one whose `updatedAt` is older than the cursor minus the overlap, which
+/// the team walk never returns. An issue created inside the window needs no
+/// extra read. A later run reads none of them again.
+#[tokio::test]
+async fn a_moved_issues_old_comments_are_read_in_full() {
+    let server = MockServer::start().await;
+    let mut db = Database::open_in_memory().expect("db");
+    moved_setup(&server, &mut db).await;
+
+    mount_moved(&server, workspace_page(&[C5, C6], false, None)).await;
+    sync(&server, &mut db, false).await.expect("second ENG run");
+    assert_eq!(
+        stored(&db, "c5"),
+        Some((C5.updated.to_string(), 5)),
+        "the moved issue's old comment must be stored"
+    );
+    assert_eq!(stored(&db, "c6"), Some((C6.updated.to_string(), 3)));
+    let due = due_requests(&server).await;
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert!(
+        due[0].contains("uuid-ENG-5")
+            && due[0].contains("uuid-ENG-6")
+            && !due[0].contains("uuid-ENG-7")
+            && !due[0].contains("\"updatedAt\":{"),
+        "{}",
+        due[0]
+    );
+
+    sync(&server, &mut db, false).await.expect("third ENG run");
+    assert_eq!(due_requests(&server).await.len(), 1, "read once, not again");
+}
+
+/// #190: a move seen by an issue-only run (no `--comments`) is still read by
+/// the next `--comments` run, whose issue pass sees the issue unchanged.
+#[tokio::test]
+async fn a_move_seen_by_an_issue_only_run_is_read_by_the_next_comments_run() {
+    let server = MockServer::start().await;
+    let mut db = Database::open_in_memory().expect("db");
+    moved_setup(&server, &mut db).await;
+
+    mount_moved(&server, workspace_page(&[C5], false, None)).await;
+    let issues_only = LinearSyncArgs {
+        comments: false,
+        ..args(false)
+    };
+    run_sync_with(
+        &mock_client(&server.uri()),
+        &Config::default(),
+        &mut db,
+        &issues_only,
+    )
+    .await
+    .expect("issue-only ENG run");
+    assert_eq!(stored(&db, "c5"), None);
+
+    sync(&server, &mut db, false).await.expect("comments run");
+    assert_eq!(
+        stored(&db, "c5"),
+        Some((C5.updated.to_string(), 5)),
+        "the move recorded by the issue-only run must reach the comments pass"
+    );
+}
+
+/// #190 (Fail-Open check): a failed due-issue page fails the run, writes no
+/// comment, keeps the cursor, and leaves the moved issue due for the next run.
+#[tokio::test]
+async fn a_failed_moved_issue_walk_fails_the_run_and_stays_due() {
+    let server = MockServer::start().await;
+    let mut db = Database::open_in_memory().expect("db");
+    moved_setup(&server, &mut db).await;
+
+    mount_moved(
+        &server,
+        ResponseTemplate::new(500).set_body_string("upstream down"),
+    )
+    .await;
+    let err = sync(&server, &mut db, false)
+        .await
+        .expect_err("a failed due-issue page must fail the run");
+    assert!(format!("{err:#}").contains("500"), "{err:#}");
+    assert_eq!(stored(&db, "c5"), None);
+    let cursor: String = db
+        .connection()
+        .query_row(
+            "SELECT cursor_updated_at FROM linear_comment_cursor WHERE team_key = 'ENG'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("cursor row");
+    assert_eq!(cursor, C1.updated, "the cursor must not move");
+
+    server.reset().await;
+    mount_moved(&server, workspace_page(&[C5], false, None)).await;
+    sync(&server, &mut db, false).await.expect("retry run");
+    assert_eq!(stored(&db, "c5"), Some((C5.updated.to_string(), 5)));
+}
