@@ -310,3 +310,25 @@ async fn fetch_teams_pages_every_team() {
     let keys: Vec<&str> = teams.iter().map(|t| t.key.as_str()).collect();
     assert_eq!(keys, vec!["ENG", "OPS"]);
 }
+
+/// #190 finding 4: `hasNextPage: true` with a null `endCursor` is an error
+/// for the issue walk too (the shared `PageGuard`), never the last page.
+#[tokio::test]
+async fn fetch_team_issues_errors_on_more_pages_without_a_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(page_response(
+            vec![node("ENG-1", "2026-01-01T00:00:00.000Z", None)],
+            true,
+            None,
+        ))
+        .mount(&server)
+        .await;
+    let err = mock_client(&server.uri())
+        .fetch_team_issues(&eng(true), None)
+        .await
+        .expect_err("more pages with no cursor must not read as the end");
+    let text = err.to_string();
+    assert!(text.contains("endCursor"), "{text}");
+    assert!(text.contains("ENG"), "{text}");
+}

@@ -243,3 +243,88 @@ async fn dry_run_then_real_run_through_the_sync_command() {
     assert_eq!(count(&db, "SELECT COUNT(*) FROM linear_projects"), 2);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM linear_cycles"), 4);
 }
+
+/// Ids in `kind`'s table marked removed.
+fn removed_ids(db: &Database, kind: EntityKind) -> Vec<String> {
+    let sql = format!(
+        "SELECT id FROM {} WHERE removed_at IS NOT NULL ORDER BY id",
+        kind.table()
+    );
+    let mut stmt = db.connection().prepare(&sql).expect("prepare");
+    stmt.query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows")
+}
+
+/// A server answering the fixture workspace, except `projects`, which
+/// answers one page of `nodes` with `has_next` and a null cursor.
+async fn workspace_with_projects(nodes: &[serde_json::Value], has_next: bool) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(root_call(EntityKind::Projects)))
+        .respond_with(entity_page(EntityKind::Projects, nodes, has_next, None))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mount_workspace(&server).await;
+    server
+}
+
+/// #190 Fail-Open fix: a full projects walk that no longer returns the
+/// active `proj-alpha` marks its row removed and keeps it, so old issues
+/// still resolve its name; no other row is marked. When `proj-alpha`
+/// returns, the mark clears.
+#[tokio::test]
+async fn a_row_linear_stops_returning_is_marked_removed() {
+    let mut db = synced_db().await;
+    let server = workspace_with_projects(&[project("proj-old", &["team-ops"], true)], false).await;
+    sync_entities(&mock_client(&server.uri()), &mut db, false)
+        .await
+        .expect("second sync");
+
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM linear_projects WHERE id = 'proj-alpha'"
+        ),
+        1,
+        "the row is kept for name lookups"
+    );
+    for kind in EntityKind::ALL {
+        let expected: Vec<String> = if kind == EntityKind::Projects {
+            vec!["proj-alpha".into()]
+        } else {
+            vec![]
+        };
+        assert_eq!(removed_ids(&db, kind), expected, "{}", kind.table());
+    }
+
+    let server = MockServer::start().await;
+    mount_workspace(&server).await;
+    sync_entities(&mock_client(&server.uri()), &mut db, false)
+        .await
+        .expect("third sync");
+    assert!(
+        removed_ids(&db, EntityKind::Projects).is_empty(),
+        "a row Linear returns again is no longer removed"
+    );
+}
+
+/// #190 finding 4 error arm: a projects page with `hasNextPage: true` and a
+/// null `endCursor` fails the set. Read as the last page, it would mark
+/// `proj-alpha` removed.
+#[tokio::test]
+async fn more_pages_without_a_cursor_fail_the_set_and_mark_nothing() {
+    let mut db = synced_db().await;
+    let server = workspace_with_projects(&[project("proj-old", &["team-ops"], true)], true).await;
+    let err = sync_entities(&mock_client(&server.uri()), &mut db, false)
+        .await
+        .expect_err("more pages with no cursor must fail the set");
+    let text = format!("{err:#}");
+    assert!(text.contains("syncing Linear projects"), "{text}");
+    assert!(text.contains("endCursor"), "{text}");
+    for kind in EntityKind::ALL {
+        assert!(removed_ids(&db, kind).is_empty(), "{}", kind.table());
+    }
+}

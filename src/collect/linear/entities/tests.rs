@@ -317,3 +317,39 @@ async fn a_response_without_nodes_is_an_error() {
         "{err:?}"
     );
 }
+
+/// #190 finding 4: a page with no `pageInfo`, or one with no boolean
+/// `hasNextPage`, fails the walk. Read as the last page, it would hand the
+/// store a cut set, and the store would mark every unseen row removed.
+#[tokio::test]
+async fn a_page_without_page_info_fails_the_walk() {
+    let cases = [
+        ("no pageInfo", None),
+        ("empty pageInfo", Some(json!({}))),
+        (
+            "null hasNextPage",
+            Some(json!({"hasNextPage": null, "endCursor": "c1"})),
+        ),
+    ];
+    for (case, page_info) in cases {
+        let server = MockServer::start().await;
+        let mut connection = json!({
+            "nodes": [cycle("cyc-1", "team-eng", 1.0, &[1.0], &[0.0], false)],
+        });
+        if let Some(info) = page_info {
+            connection["pageInfo"] = info;
+        }
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"cycles": connection}})),
+            )
+            .mount(&server)
+            .await;
+        let err = mock_client(&server.uri())
+            .fetch_entity_nodes(EntityKind::Cycles)
+            .await
+            .expect_err(case);
+        let text = err.to_string();
+        assert!(text.contains("hasNextPage"), "{case}: {text}");
+    }
+}
