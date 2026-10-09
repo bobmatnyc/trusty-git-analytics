@@ -11,10 +11,10 @@ use std::collections::HashMap;
 use super::LinearSyncArgs;
 use tga::collect::linear::sync::{next_cursor, resolve_scope};
 use tga::collect::linear::{
-    plan_linear_issues, upsert_linear_issues, ChangeCounts, IssueChange, IssueQuery, LinearClient,
-    LinearIssue,
+    plan_linear_issues, upsert_linear_issues_in, ChangeCounts, IssueChange, IssueQuery,
+    LinearClient, LinearIssue,
 };
-use tga::collect::linear_pipeline::persist_work_items;
+use tga::collect::linear_pipeline::persist_work_items_in;
 use tga::core::db::{get_linear_cursor, set_linear_cursor, Database};
 
 /// What one team's sync fetched and did (or, under `--dry-run`, would do).
@@ -58,10 +58,11 @@ impl TeamOutcome {
 /// What: resolves the `updatedAt` bound from `--since` / `--backfill` / the
 /// team's stored cursor, walks the team's issues (archived included when
 /// `include_archived`), then either classifies them read-only (`--dry-run`,
-/// which opens the database read-only per #189) or upserts them by
-/// `linear_id`, projects the new and changed ones into `work_items`, and
-/// advances the team's cursor to the newest `updatedAt` seen. The cursor
-/// never moves backward.
+/// which opens the database read-only per #189) or, in one transaction,
+/// upserts them by `linear_id`, projects the new and changed ones into
+/// `work_items`, and advances the team's cursor to the newest `updatedAt`
+/// seen. A failure commits none of the three. The cursor never moves
+/// backward.
 /// Test: `super::sync_tests` (every test there runs through this).
 ///
 /// # Errors
@@ -97,7 +98,12 @@ pub(super) async fn sync_team(
         // #189: the handle is read-only here; classify, never write.
         plan_linear_issues(db.connection(), &issues)?
     } else {
-        let changes = upsert_linear_issues(db, &issues)?;
+        // #190: one transaction for the issue rows, their `work_items`
+        // projection and the cursor. `Unchanged` skips the projection, so an
+        // issue row committed without it would never be projected by a later
+        // sync. Dropping `tx` on any `?` below rolls all three back.
+        let tx = db.connection_mut().transaction()?;
+        let changes = upsert_linear_issues_in(&tx, &issues)?;
         // #7139: the same issues land in `work_items`; no commit correlation
         // here, so `commit_refs` is empty. #190: only new or changed issues,
         // so a re-sync with no remote change writes nothing.
@@ -107,18 +113,14 @@ pub(super) async fn sync_team(
             .filter(|(_, c)| **c != IssueChange::Unchanged)
             .map(|(i, _)| i.clone())
             .collect();
-        persist_work_items(db, &written, &HashMap::new())?;
+        persist_work_items_in(&tx, &written, &HashMap::new())?;
 
         let observed: Vec<DateTime<Utc>> = issues.iter().filter_map(|i| i.updated_at).collect();
         if let Some(next) = next_cursor(&observed) {
             let advance = stored_cursor.map_or(next, |s| s.max(next));
-            set_linear_cursor(
-                db.connection(),
-                team_key,
-                &advance.to_rfc3339(),
-                issues.len() as i64,
-            )?;
+            set_linear_cursor(&tx, team_key, &advance.to_rfc3339(), issues.len() as i64)?;
         }
+        tx.commit()?;
         changes
     };
 

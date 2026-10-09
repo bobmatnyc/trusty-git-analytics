@@ -13,4 +13,6 @@ pub mod sync;
 
 pub use bulk::{IssueQuery, LinearTeam};
 pub use client::{store_linear_issues, LinearClient, LinearIssue, LinearIssuesPage};
-pub use store::{plan_linear_issues, upsert_linear_issues, ChangeCounts, IssueChange};
+pub use store::{
+    plan_linear_issues, upsert_linear_issues, upsert_linear_issues_in, ChangeCounts, IssueChange,
+};

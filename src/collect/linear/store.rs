@@ -216,19 +216,41 @@ pub fn upsert_linear_issues(db: &Database, issues: &[LinearIssue]) -> Result<Vec
     // single-process and nothing else holds the connection, which is the
     // precondition `unchecked_transaction` documents.
     let tx = db.connection().unchecked_transaction()?;
+    let out = upsert_linear_issues_in(&tx, issues)?;
+    tx.commit()?;
+    Ok(out)
+}
+
+/// [`upsert_linear_issues`] without its own transaction: the caller owns it.
+///
+/// Why: #190 — `tga linear sync` skips the `work_items` projection for an
+/// [`IssueChange::Unchanged`] issue, so the issue rows and their projection
+/// must commit together. Two commits let a crash between them leave issues
+/// that every later sync reports unchanged and never projects.
+/// What: the same per-issue plan, evict and write as [`upsert_linear_issues`],
+/// run on `conn`, which should be an open transaction; nothing commits here.
+/// Test: `commands::linear::sync_tests::failed_work_items_write_is_repaired_by_the_next_sync`.
+///
+/// # Errors
+///
+/// As [`upsert_linear_issues`]. The caller's transaction is left open; drop
+/// it to roll back.
+pub fn upsert_linear_issues_in(
+    conn: &Connection,
+    issues: &[LinearIssue],
+) -> Result<Vec<IssueChange>> {
     let fetched_at = chrono::Utc::now().to_rfc3339();
     let mut out = Vec::with_capacity(issues.len());
     for issue in issues {
-        let action = plan_one(&tx, issue)?;
+        let action = plan_one(conn, issue)?;
         if let Some(evict) = action.evict {
-            tx.execute("DELETE FROM linear_issues WHERE id = ?1", params![evict])?;
+            conn.execute("DELETE FROM linear_issues WHERE id = ?1", params![evict])?;
         }
         if action.change != IssueChange::Unchanged {
-            write_row(&tx, issue, &fetched_at, action.row_id)?;
+            write_row(conn, issue, &fetched_at, action.row_id)?;
         }
         out.push(action.change);
     }
-    tx.commit()?;
     Ok(out)
 }
 

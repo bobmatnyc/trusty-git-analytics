@@ -213,14 +213,35 @@ pub fn persist_work_items(
     issues: &[LinearIssue],
     commit_refs: &HashMap<String, Vec<String>>,
 ) -> crate::core::Result<usize> {
-    use crate::core::db::work_items::{link_commit_work_item, upsert_work_item};
-    use std::collections::HashSet;
-
     if issues.is_empty() {
         return Ok(0);
     }
-
     let tx = db.connection_mut().transaction()?;
+    let written = persist_work_items_in(&tx, issues, commit_refs)?;
+    tx.commit()?;
+    Ok(written)
+}
+
+/// [`persist_work_items`] without its own transaction: the caller owns it.
+///
+/// Why: #190 — `tga linear sync` commits its `linear_issues` rows and their
+/// `work_items` projection in one transaction, so neither can land alone.
+/// What: the same upserts and links as [`persist_work_items`], run on `conn`,
+/// which should be an open transaction; nothing commits here.
+/// Test: `commands::linear::sync_tests::failed_work_items_write_is_repaired_by_the_next_sync`.
+///
+/// # Errors
+///
+/// As [`persist_work_items`]. The caller's transaction is left open; drop it
+/// to roll back.
+pub fn persist_work_items_in(
+    conn: &rusqlite::Connection,
+    issues: &[LinearIssue],
+    commit_refs: &HashMap<String, Vec<String>>,
+) -> crate::core::Result<usize> {
+    use crate::core::db::work_items::{link_commit_work_item, upsert_work_item};
+    use std::collections::HashSet;
+
     let mut written = 0usize;
     for issue in issues {
         let row = WorkItemRow {
@@ -237,7 +258,7 @@ pub fn persist_work_items(
             // `parent` and `creator` under Linear's own names.
             raw_json: issue.raw_json(),
         };
-        upsert_work_item(&tx, &row)?;
+        upsert_work_item(conn, &row)?;
         written += 1;
     }
 
@@ -245,11 +266,10 @@ pub fn persist_work_items(
     for (sha, ids) in commit_refs {
         for id in ids {
             if fetched.contains(id.as_str()) {
-                link_commit_work_item(&tx, sha, id, LINEAR_SOURCE)?;
+                link_commit_work_item(conn, sha, id, LINEAR_SOURCE)?;
             }
         }
     }
-    tx.commit()?;
     Ok(written)
 }
 

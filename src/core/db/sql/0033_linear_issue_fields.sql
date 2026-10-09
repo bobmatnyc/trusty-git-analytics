@@ -16,7 +16,13 @@
 --   * The next sync that returns such an issue fills the row in place: the
 --     writer (`collect::linear::store`) looks a row up by `linear_id` first,
 --     then by `identifier` among rows whose `linear_id` is still NULL, and
---     updates that row. The row is never deleted and re-inserted.
+--     updates that row in place; it is never deleted and re-inserted.
+--   * One case deletes a row: when an issue already keyed by `linear_id`
+--     moves team and a pre-v33 row (NULL `linear_id`) holds the identifier
+--     it moved to, the writer deletes that pre-v33 row so the UNIQUE
+--     `identifier` index admits the move. Linear never gives one identifier
+--     to two issues, so that row is a stale copy of the same issue. A holder
+--     with a different `linear_id` is never deleted; the write fails instead.
 --   * A legacy row whose issue moved team BEFORE its first sync under v33
 --     cannot be matched (its stored identifier is the old one, and the row
 --     holds no UUID). It stays as written, identifiable by
