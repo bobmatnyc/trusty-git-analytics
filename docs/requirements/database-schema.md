@@ -615,6 +615,78 @@ One row per JIRA comment. Stores the comment's LENGTH, never its text. Migration
 
 ---
 
+### `fact_linear_transitions`
+
+One row per Linear issue history entry that changed the workflow state,
+written by `tga linear sync --history` (#190 step 6). The Linear counterpart
+of `fact_ticket_transitions`. Migration `0036_linear_issue_activity.sql`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `history_id` | TEXT PK | no | Linear `IssueHistory.id` |
+| `issue_id` | TEXT | no | `linear_issues.linear_id` |
+| `identifier` | TEXT | no | Issue identifier when last read |
+| `team_key` | TEXT | no | Issue team key when last read |
+| `from_state` / `from_state_type` | TEXT | yes | NULL for the entry that set the first state |
+| `to_state` | TEXT | no | |
+| `to_state_type` | TEXT | yes | Linear state type (`started`, `completed`, ...) |
+| `actor_id` / `actor_name` | TEXT | yes | NULL for a change made by an integration |
+| `transitioned_at` | TEXT | no | RFC3339 — the entry's `createdAt` |
+| `synced_at` | INTEGER | no | Unix seconds when tga wrote the row |
+
+**Indexes**: INDEX(`issue_id`), INDEX(`team_key`).
+
+---
+
+### `fact_linear_comment_detail`
+
+One row per Linear issue comment, written by `tga linear sync --comments`
+(#190 step 6). Stores the comment's length, never its text. Migration
+`0036_linear_issue_activity.sql`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `comment_id` | TEXT PK | no | Linear `Comment.id` |
+| `issue_id` | TEXT | no | `linear_issues.linear_id` |
+| `identifier` / `team_key` | TEXT | no | Issue values when last read |
+| `parent_id` | TEXT | yes | The comment this one replies to |
+| `author_id` / `author_name` | TEXT | yes | NULL for a comment posted by an integration |
+| `created_at` | TEXT | no | RFC3339 |
+| `updated_at` | TEXT | yes | RFC3339 |
+| `body_len` | INTEGER | no | Body length in characters |
+| `synced_at` | INTEGER | no | Unix seconds when tga wrote the row |
+
+**Indexes**: INDEX(`issue_id`), INDEX(`team_key`).
+
+Both tables hold an issue's complete set: a re-read deletes the issue's rows
+and inserts what Linear returned, in the same transaction that writes the
+issue's `linear_issue_activity_state` marker.
+
+---
+
+### `linear_issue_activity_state`
+
+Per-issue marker for `--history` / `--comments` (#190 step 6). Migration
+`0036_linear_issue_activity.sql`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `issue_id` | TEXT PK | no | `linear_issues.linear_id` |
+| `history_for` | TEXT | yes | Issue `updated_at` the history was last read at |
+| `history_synced_at` | TEXT | yes | RFC3339 wall clock of that read |
+| `comments_for` | TEXT | yes | Issue `updated_at` the comments were last read at |
+| `comments_synced_at` | TEXT | yes | RFC3339 wall clock of that read |
+| `missing_for` | TEXT | yes | Issue `updated_at` at which Linear answered "not found" (tombstone) |
+| `missing_at` | TEXT | yes | RFC3339 wall clock of that answer; NULL = not tombstoned |
+
+An issue whose `linear_issues.updated_at` differs from its marker (or has
+none) is read again by the next run with the flag, unless it is tombstoned:
+`missing_at` set and `missing_for` equal to its current `updated_at`. A
+tombstone is skipped by both flags, ignored by `--backfill`, and cleared by
+the next successful read. It deletes no history or comment row.
+
+---
+
 ### `jira_sync_cursor`
 
 Per-project incremental-sync cursor for `tga jira sync`. Migration
@@ -772,6 +844,7 @@ Migrations live in `src/core/db/sql/` and are registered in
 | 25 | `0025_repo_walk_state.sql` | `repo_walk_state` table |
 | 26 | `0026_fact_pm_work.sql` | `fact_pm_work` table |
 | 27 | `0027_fact_pm_effort.sql` | `fact_pm_effort` table |
+| 36 | `0036_linear_issue_activity.sql` | `fact_linear_transitions`, `fact_linear_comment_detail`, `linear_issue_activity_state` tables (#190 step 6) |
 
 Migrations 17 and 21 carry a `PRAGMA table_info` pre-flight guard, because a pre-release
 build may already have added their columns and SQLite has no
@@ -780,4 +853,4 @@ module — `v17.rs` and `v21.rs` — so their `.sql` files are read as reference
 executed. Migration 21's registry entry carries an empty `sql` string to make that
 explicit.
 
-Future migrations continue from `0028_*.sql`.
+Future migrations continue from `0037_*.sql`. Rows 28–35 are not yet listed here; each SQL file's header describes it.

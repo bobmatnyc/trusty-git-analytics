@@ -325,6 +325,47 @@ pub enum CollectError {
         /// What the page got wrong.
         problem: &'static str,
     },
+
+    /// Linear answered that the entity a query named does not exist (#190
+    /// step 6).
+    ///
+    /// Raised only when every GraphQL error in the response reads
+    /// `Entity not found: <entity>` for one entity type. The per-issue
+    /// activity walk reads it as a missing issue; every other caller fails on
+    /// it like any other API error.
+    #[error("Linear has no {entity} for {scope} (HTTP {status}, page {page})")]
+    LinearNotFound {
+        /// HTTP status returned by Linear (200, or 400).
+        status: u16,
+        /// What was queried: a team key or an issue identifier.
+        scope: String,
+        /// 1-based page number within the walk.
+        page: usize,
+        /// The entity type Linear named, e.g. `Issue`.
+        entity: String,
+    },
+
+    /// A per-issue Linear `history` or `comments` walk failed on one page
+    /// (#190 step 6).
+    ///
+    /// The activity counterpart of [`CollectError::LinearBulkApi`]: it names
+    /// the issue and the connection, so the failed issue can be found.
+    #[error(
+        "Linear API error (HTTP {status}) reading {connection} of {identifier} \
+         (page {page}): {message}"
+    )]
+    LinearActivityApi {
+        /// HTTP status returned by Linear.
+        status: u16,
+        /// Identifier of the issue walked, e.g. `ENG-123`.
+        identifier: String,
+        /// The `Issue` connection walked: `history` or `comments`.
+        connection: &'static str,
+        /// 1-based page number within the walk.
+        page: usize,
+        /// Linear's response body, scrubbed of the API key and truncated.
+        message: String,
+    },
 }
 
 /// Module-wide `Result` alias.

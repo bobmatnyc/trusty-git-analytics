@@ -481,3 +481,45 @@ async fn ratelimited_retry_waits_for_the_exhausted_window_reset() {
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+/// #190 step 6: only an all-"Entity not found" array for one entity type is
+/// a not-found answer; anything else stays an API error.
+#[test]
+fn not_found_entity_is_narrow() {
+    let msg = |m: &str| serde_json::json!({"message": m});
+    let cases = [
+        (
+            serde_json::json!([msg("Entity not found: Issue")]),
+            Some("Issue"),
+        ),
+        (
+            serde_json::json!([
+                msg("Entity not found: Issue"),
+                msg("Entity not found: Issue")
+            ]),
+            Some("Issue"),
+        ),
+        (serde_json::json!([]), None),
+        (serde_json::Value::Null, None),
+        (serde_json::json!([msg("Argument Validation Error")]), None),
+        (
+            serde_json::json!([msg("Entity not found: Issue"), msg("Internal error")]),
+            None,
+        ),
+        (
+            serde_json::json!([
+                msg("Entity not found: Issue"),
+                msg("Entity not found: Team")
+            ]),
+            None,
+        ),
+        (serde_json::json!([msg("Entity not found: ")]), None),
+        (
+            serde_json::json!([{"extensions": {"code": "INPUT_ERROR"}}]),
+            None,
+        ),
+    ];
+    for (errors, want) in cases {
+        assert_eq!(not_found_entity(&errors).as_deref(), want, "{errors}");
+    }
+}

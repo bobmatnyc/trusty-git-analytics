@@ -31,10 +31,12 @@ use clap::Args;
 
 use tga::collect::errors::CollectError;
 use tga::collect::linear::sync::validate_team_key;
-use tga::collect::linear::LinearClient;
+use tga::collect::linear::{ActivityKind, LinearClient};
 use tga::core::config::Config;
 use tga::core::db::{get_linear_cursor, list_linear_cursor_teams, Database};
 
+// #190 step 6: per-issue history and comments.
+mod activity_sync;
 // #190 step 5: the bulk sync `tga collect` runs under `linear.sync_on_collect`.
 pub mod collect_sync;
 mod entity_sync;
@@ -60,6 +62,9 @@ is always a full pull automatically, even without --backfill). An issue whose\n\
 --entities also stores the workspace's teams, users, labels, projects,\n\
 project milestones and cycles (archived included) in their own tables, one\n\
 transaction per entity set, after the issues.\n\n\
+--history stores each issue's workflow-state transitions and --comments its\n\
+comment metadata (author, times, body length; never the body), one request\n\
+walk per issue, for issues that changed since their last read.\n\n\
 Requires `linear.api_key` (or a shared-credential fallback) configured, and\n\
 --team, --all-teams, or exactly one entry in `linear.team_keys`.",
     after_help = "EXAMPLES:\n\
@@ -69,6 +74,8 @@ Requires `linear.api_key` (or a shared-credential fallback) configured, and\n\
   tga linear sync --all-teams\n\n\
   # Issues plus teams, users, labels, projects, milestones and cycles\n\
   tga linear sync --all-teams --entities\n\n\
+  # Issues plus each changed issue's state transitions and comment metadata\n\
+  tga linear sync --team ENG --history --comments\n\n\
   # Full historical backfill, ignoring any stored cursor\n\
   tga linear sync --team ENG --backfill\n\n\
   # Preview without writing to the database\n\
@@ -106,6 +113,32 @@ pub struct LinearSyncArgs {
     /// archived included. Each set is a full refresh.
     #[arg(long, default_value_t = false)]
     pub entities: bool,
+    /// After each team's issues, read the workflow-state history of every
+    /// issue that changed since its history was last read (all of the team's
+    /// issues with --backfill) into `fact_linear_transitions`. One request
+    /// walk per issue.
+    #[arg(long, default_value_t = false)]
+    pub history: bool,
+    /// After each team's issues, read the comment metadata of every issue
+    /// that changed since its comments were last read (all of the team's
+    /// issues with --backfill) into `fact_linear_comment_detail`. Comment
+    /// bodies are never stored. One request walk per issue.
+    #[arg(long, default_value_t = false)]
+    pub comments: bool,
+}
+
+impl LinearSyncArgs {
+    /// The per-issue connections this run reads, in order (#190 step 6).
+    fn activity_kinds(&self) -> Vec<ActivityKind> {
+        let mut kinds = Vec::new();
+        if self.history {
+            kinds.push(ActivityKind::History);
+        }
+        if self.comments {
+            kinds.push(ActivityKind::Comments);
+        }
+        kinds
+    }
 }
 
 /// Arguments for `tga linear freshness`.
@@ -226,8 +259,15 @@ pub async fn run_sync(
 /// [`team_sync::sync_team`], printing one line per team. Archived issues are
 /// included unless `--exclude-archived`. The first team that fails stops the
 /// run with an error naming it; teams already synced keep their rows and
-/// cursors. With `--entities`, [`entity_sync::sync_entities`] runs last.
+/// cursors. #190 step 6: with `--history` / `--comments`,
+/// [`activity_sync::sync_activity`] runs after each team's issue pass. An
+/// issue Linear no longer has is counted and tombstoned, not a failure
+/// (owner ruling D28); any other failure stops the run the same way, after
+/// the team's issue rows and cursor are committed. With `--entities`,
+/// [`entity_sync::sync_entities`] runs last.
 /// Test: `sync_tests::all_teams_syncs_each_team_under_its_own_cursor`,
+/// `activity_sync_tests::a_failed_history_read_fails_the_sync_and_stays_due`,
+/// `activity_sync_tests::a_missing_issue_is_tombstoned_and_the_run_goes_on`,
 /// `sync_tests::cap_exceeded_fails_and_writes_nothing`,
 /// `sync_tests::dry_run_reports_and_writes_nothing`,
 /// `sync_tests::second_sync_with_no_remote_change_writes_nothing`,
@@ -261,16 +301,46 @@ pub(crate) async fn run_sync_with(
 
     let mut outcomes = Vec::with_capacity(team_keys.len());
     for team_key in &team_keys {
-        let outcome = sync_team(client, db, team_key, args, explicit_since, include_archived)
+        let earlier = outcomes.len();
+        let (mut outcome, fetched) =
+            sync_team(client, db, team_key, args, explicit_since, include_archived)
+                .await
+                .map_err(|e| {
+                    e.context(format!(
+                        "tga linear sync failed for team {team_key}; {earlier} earlier team(s) \
+                         in this run kept their rows and cursors"
+                    ))
+                })?;
+        println!("{}", outcome.summary_line(args.dry_run));
+        // #190 step 6: a dry run stored nothing, so its fetched issues are
+        // the overlay the due count reads.
+        let overlay = if args.dry_run {
+            fetched.as_slice()
+        } else {
+            &[]
+        };
+        for kind in args.activity_kinds() {
+            let activity = activity_sync::sync_activity(
+                client,
+                db,
+                team_key,
+                kind,
+                args.backfill,
+                args.dry_run,
+                overlay,
+            )
             .await
             .map_err(|e| {
                 e.context(format!(
-                    "tga linear sync failed for team {team_key}; {} earlier team(s) in this \
-                     run kept their rows and cursors",
-                    outcomes.len()
+                    "tga linear sync failed reading Linear {} for team {team_key}; the team's \
+                     issue rows and cursor were kept, and every issue not yet read stays due \
+                     for the next run",
+                    kind.connection()
                 ))
             })?;
-        println!("{}", outcome.summary_line(args.dry_run));
+            println!("{}", activity.summary_line(args.dry_run));
+            outcome.activity.push(activity);
+        }
         outcomes.push(outcome);
     }
     if args.all_teams {
@@ -389,3 +459,6 @@ mod sync_tests;
 
 #[cfg(test)]
 mod entity_sync_tests;
+
+#[cfg(test)]
+mod activity_sync_tests;

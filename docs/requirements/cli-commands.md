@@ -214,6 +214,8 @@ pull.
 | `--max-issues <N>` | no cap | Fail when a team holds more than N issues in the window. The error names the team and the cap, and nothing is written for that team |
 | `--dry-run` | false | Open the database read-only, fetch, and print what would be written. No row and no cursor is written |
 | `--entities` | false | After the issues, also sync the workspace's teams, users, labels, projects, project milestones and cycles (see below) |
+| `--history` | false | After each team's issues, read the workflow-state history of each due issue into `fact_linear_transitions` (see below) |
+| `--comments` | false | After each team's issues, read the comment metadata of each due issue into `fact_linear_comment_detail`; bodies are never stored |
 
 Rows are keyed by Linear's issue `id` (UUID); `identifier` (ENG-123) is a
 separate indexed column. An issue that moves team gets a new identifier and
@@ -288,6 +290,53 @@ Linear entities: teams 3 (1 archived, 0 removed), users 3 (1 archived, 0 removed
 ```
 
 A `--dry-run` line omits the removed counts: it reads and writes nothing.
+
+With `--history` and/or `--comments` (#190 step 6), each team's issue pass
+is followed by a per-issue pass for each flag. Linear has no workspace-wide
+history list, so each issue's `history` or `comments` connection is walked
+in full (50 per page, `includeArchived: true`, retried on 429/503 and
+RATELIMITED). There is no cap; a page that fails, a page without a `nodes`
+array, or a page without a boolean `pageInfo.hasNextPage` fails the walk.
+
+An issue is due when its stored `updated_at` differs from the `updated_at`
+its activity was last read at (`linear_issue_activity_state`, one marker per
+flag). `--backfill` makes every issue of the team due. Each issue's rows are
+replaced as a set and its marker written in one transaction, so a comment
+deleted in Linear leaves no row. A history entry becomes a
+`fact_linear_transitions` row only when it changed the workflow state
+(from/to state name and type, actor id/name, time). A comment becomes a
+`fact_linear_comment_detail` row with author id/name, parent comment id,
+created/updated time and `body_len` (characters); the body is not stored.
+
+An issue Linear no longer has is a counted warning, not a failure. Only
+Linear's explicit answer counts: `issue: null`, or GraphQL errors that all
+read `Entity not found: Issue` (HTTP 200 or 400). The pass logs a warning,
+tombstones the issue (`linear_issue_activity_state.missing_for` /
+`missing_at`), and goes on to the next issue, the next team and
+`--entities`; the run exits 0 when nothing else failed. The tombstone
+deletes none of the issue's stored history or comment rows and moves
+neither marker. A tombstoned issue is not requested again while its stored
+`updated_at` is unchanged, by either flag. It is due again when its stored
+row changes, and `--backfill` requests it again; a successful read clears
+the tombstone, and another not-found answer renews it.
+
+Any other failure (5xx, timeout, spent rate-limit retries, auth error,
+another GraphQL error, a malformed page) stops the run with a non-zero exit
+naming the issue and the connection. The team's issue rows and cursor, and
+issues written before it, are kept; the failed issue and the rest stay due,
+so the next run reads them even though the issue cursor has moved past
+them. Each pass prints one line, with a warning appended when issues were
+missing:
+
+```text
+Linear history (ENG): read 2 of 2 due issue(s); wrote 4 state transition row(s).
+Linear comments (ENG): read 2 of 3 due issue(s); wrote 2 comment row(s). Warning: 1 issue(s) no longer in Linear, tombstoned and skipped until they change or --backfill: ENG-2.
+```
+
+The warning lists up to 10 identifiers, then how many more.
+
+Under `--dry-run` the line reports how many issues would be read; the pass
+sends no per-issue request.
 
 `tga linear freshness` reads the same cursor table and fails when a team has
 never synced or is older than `--max-age-days` (default 2).
