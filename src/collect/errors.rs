@@ -252,6 +252,23 @@ pub enum CollectError {
         /// Server-supplied `Retry-After`, when present and parseable.
         retry_after: Option<std::time::Duration>,
     },
+
+    /// A Linear team holds more issues in the sync window than the
+    /// configured `--max-issues` cap (#190).
+    ///
+    /// Why: the cap used to truncate the walk and report success, so a team
+    /// larger than the 10,000 default lost the rest with exit 0. Reaching a cap is now a failure that names the team and the
+    /// count, and nothing is written for that team.
+    #[error(
+        "Linear team {team_key} has more than {cap} issues in this sync window \
+         (--max-issues {cap}); nothing was written for this team. Raise or drop --max-issues"
+    )]
+    LinearIssueCapExceeded {
+        /// Team key whose walk reached the cap.
+        team_key: String,
+        /// The configured cap.
+        cap: usize,
+    },
 }
 
 /// Module-wide `Result` alias.

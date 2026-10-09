@@ -1,0 +1,3 @@
+Breaking
+- `tga::collect::linear::LinearIssue` is `#[non_exhaustive]` and has new fields (`linear_id`, `state_type`, `team_id`, `team_key`, `estimate`, label, assignee, creator, project, cycle, parent, due-date and `archived_at` fields, and `raw`). Build one with `..Default::default()` inside the crate or parse it with `collect::linear::issue::parse_issue_node` (#190).
+- `LinearClient::fetch_team_issues` takes `&IssueQuery` and `Option<usize>` and returns `Vec<LinearIssue>`; reaching the cap is `CollectError::LinearIssueCapExceeded` instead of a `(Vec, true)` truncation flag. `LinearClient::fetch_team_issues_page` takes `&IssueQuery` in place of `team_key` and `since` (#190).

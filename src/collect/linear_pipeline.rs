@@ -191,8 +191,8 @@ fn build_commit_refs(commits: &[(String, String)]) -> HashMap<String, Vec<String
 /// table's foreign key would reject it. Returns the number of `work_items`
 /// rows written.
 ///
-/// `project` is left `None`: the GraphQL query this crate issues has no project
-/// field, and DOC-70 §6 routes project resolution through trusty-common's
+/// `project` is left `None`: the issue query carries only the project id since
+/// #190, and DOC-70 §6 routes project resolution through trusty-common's
 /// client instead. Writing the team name there would fill the column DOC-70
 /// filters on with a value that is not a project.
 ///
@@ -213,14 +213,35 @@ pub fn persist_work_items(
     issues: &[LinearIssue],
     commit_refs: &HashMap<String, Vec<String>>,
 ) -> crate::core::Result<usize> {
-    use crate::core::db::work_items::{link_commit_work_item, upsert_work_item};
-    use std::collections::HashSet;
-
     if issues.is_empty() {
         return Ok(0);
     }
-
     let tx = db.connection_mut().transaction()?;
+    let written = persist_work_items_in(&tx, issues, commit_refs)?;
+    tx.commit()?;
+    Ok(written)
+}
+
+/// [`persist_work_items`] without its own transaction: the caller owns it.
+///
+/// Why: #190 — `tga linear sync` commits its `linear_issues` rows and their
+/// `work_items` projection in one transaction, so neither can land alone.
+/// What: the same upserts and links as [`persist_work_items`], run on `conn`,
+/// which should be an open transaction; nothing commits here.
+/// Test: `commands::linear::sync_tests::failed_work_items_write_is_repaired_by_the_next_sync`.
+///
+/// # Errors
+///
+/// As [`persist_work_items`]. The caller's transaction is left open; drop it
+/// to roll back.
+pub fn persist_work_items_in(
+    conn: &rusqlite::Connection,
+    issues: &[LinearIssue],
+    commit_refs: &HashMap<String, Vec<String>>,
+) -> crate::core::Result<usize> {
+    use crate::core::db::work_items::{link_commit_work_item, upsert_work_item};
+    use std::collections::HashSet;
+
     let mut written = 0usize;
     for issue in issues {
         let row = WorkItemRow {
@@ -232,9 +253,12 @@ pub fn persist_work_items(
             tags: None,
             project: None,
             url: Some(issue.url.clone()),
-            raw_json: serde_json::to_string(issue).ok(),
+            // #190: the GraphQL node as Linear returned it, so the
+            // Linear-aware effort and work extractors find `estimate`,
+            // `parent` and `creator` under Linear's own names.
+            raw_json: issue.raw_json(),
         };
-        upsert_work_item(&tx, &row)?;
+        upsert_work_item(conn, &row)?;
         written += 1;
     }
 
@@ -242,11 +266,10 @@ pub fn persist_work_items(
     for (sha, ids) in commit_refs {
         for id in ids {
             if fetched.contains(id.as_str()) {
-                link_commit_work_item(&tx, sha, id, LINEAR_SOURCE)?;
+                link_commit_work_item(conn, sha, id, LINEAR_SOURCE)?;
             }
         }
     }
-    tx.commit()?;
     Ok(written)
 }
 
@@ -263,11 +286,7 @@ mod tests {
             assignee: Some("Alice".to_string()),
             priority: 2,
             url: format!("https://linear.app/x/issue/{identifier}"),
-            created_at: None,
-            updated_at: None,
-            started_at: None,
-            completed_at: None,
-            canceled_at: None,
+            ..Default::default()
         }
     }
 
