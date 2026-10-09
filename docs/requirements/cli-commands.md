@@ -199,8 +199,23 @@ keeps its one row. Each row stores the state name and type, priority,
 estimate, project, cycle and parent ids, label ids and names, due date,
 assignee id/name/email, creator id, the created/updated/started/completed/
 canceled/archived timestamps, an `archived` flag, url, team id and key, and
-`raw_json` — the GraphQL node as Linear returned it. An issue whose
-`updatedAt` is already stored is not rewritten.
+`raw_json` — the GraphQL node as Linear returned it, including the
+description and `previousIdentifiers`. An issue whose stored node is
+identical is not rewritten.
+
+A row written before Linear's id was stored, under an identifier the issue
+has since left, is found through the issue's `previousIdentifiers` and
+updated in place (or deleted, when the issue already has a row). The
+`work_items` row follows the same rule: it is keyed by the issue id in
+`work_items.stable_id`, renamed when the issue moves, and its commit links
+and `fact_pm_work` / `fact_pm_effort` rows move with it. `work_items.tags`
+holds the label names.
+
+Each team's cursor records the issue field set it was last read in full
+under. When a new tga adds fields to the issue query, the next sync of each
+team ignores the cursor once and reads the whole history, so issues that did
+not change also get the new fields; later runs resume from the cursor. A
+`--since` or `--exclude-archived` run does not count as that full read.
 
 Output is one line per team, for example:
 

@@ -241,16 +241,28 @@ Unified ticket/work-item records from JIRA, GitHub, Linear, and Azure DevOps. Mi
 | `url` | TEXT | yes | Ticket URL |
 | `raw_json` | TEXT | yes | Full JSON payload as the collector serialized it |
 | `fetched_at` | TEXT | no | Default `datetime('now')` |
+| `stable_id` | TEXT | yes | The provider's id that survives a rename — Linear's issue UUID. Migration `0035_linear_work_item_key.sql`; NULL for other sources |
 
 **PK**: (`id`, `source`) — an ADO `42` and a JIRA `42` are distinct rows.
+**Index**: UNIQUE(`source`, `stable_id`) where `stable_id` is not NULL.
+
+For Linear, `id` is the issue identifier a commit names (`ENG-123`), and
+`stable_id` is the issue UUID (#190). An issue that moves team keeps one row:
+the writer finds it by `stable_id`, renames it to the new identifier, and
+moves its `commit_work_items`, `fact_pm_work` and `fact_pm_effort` rows with
+it. A Linear row written before v35 got its `stable_id` from `linear_issues`
+in the migration; one with no matching `linear_issues.linear_id` (written
+before v33, or a stale copy a move left behind) stays NULL until a sync
+returns its issue with that identifier in `previousIdentifiers`, which merges
+it into the issue's row. `tags` holds the issue's label names.
 
 The composite `(id, source)` key replaced the `(provider, external_id)` shape earlier
 drafts of this page described; `provider`, `external_id`, `work_item_type`, and `state`
 have never existed in the shipped schema.
 
 `raw_json` is the one column whose contract does not constrain what a future writer puts
-in it — today's writer serializes a struct with no description field. `tga inspect attest`
-therefore reads the column rather than citing this table.
+in it — JIRA payloads and, since #190 step 3, Linear issue nodes carry the ticket
+description. `tga inspect attest` therefore reads the column rather than citing this table.
 
 ---
 
