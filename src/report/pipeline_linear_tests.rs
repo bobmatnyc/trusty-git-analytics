@@ -21,6 +21,8 @@ use crate::report::linear_stats::{compute_linear_stats, render_markdown, StatsOp
 use crate::report::ReportPipeline;
 
 const SECTION_HEADING: &str = "## Linear delivery";
+const AUTHOR_NOTE: &str = "The Linear delivery section is left out under an author filter \
+    because it covers the whole workspace.";
 
 /// A `linear:` block parsed from YAML, as `config.yaml` would give it.
 fn linear(yaml: &str) -> LinearConfig {
@@ -222,6 +224,9 @@ fn report_md_omits_the_linear_section_under_an_author_filter() {
     let cfg = config(dir.path(), enabled());
     let md = pipeline_md(&db, &cfg, Some("ann@example.com"));
     assert!(!md.contains(SECTION_HEADING), "{md}");
+    // The reader is told why, in one plain line at the end of the report.
+    assert!(md.ends_with(&format!("\n\n{AUTHOR_NOTE}\n")), "{md}");
+    assert_eq!(md.matches(AUTHOR_NOTE).count(), 1, "{md}");
 }
 
 #[test]

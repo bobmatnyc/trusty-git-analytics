@@ -35,6 +35,8 @@ use tga::collect::linear::LinearClient;
 use tga::core::config::Config;
 use tga::core::db::{get_linear_cursor, list_linear_cursor_teams, Database};
 
+// #190 step 5: the bulk sync `tga collect` runs under `linear.sync_on_collect`.
+pub mod collect_sync;
 mod entity_sync;
 // #190 step 4: the read-only metrics command.
 mod stats;
