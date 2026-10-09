@@ -332,3 +332,152 @@ async fn fetch_team_issues_errors_on_more_pages_without_a_cursor() {
     assert!(text.contains("endCursor"), "{text}");
     assert!(text.contains("ENG"), "{text}");
 }
+
+/// A Linear GraphQL error response: HTTP 400 with `extensions.code`.
+pub(crate) fn graphql_400(code: &str) -> ResponseTemplate {
+    ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        "errors": [{"message": "error from Linear", "extensions": {"code": code}}]
+    }))
+}
+
+/// Answers the first `failures` requests with `failure`, then one valid page.
+pub(crate) struct FailThenPage {
+    pub(crate) calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) failures: usize,
+    pub(crate) failure: ResponseTemplate,
+}
+
+impl wiremock::Respond for FailThenPage {
+    fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.failures {
+            self.failure.clone()
+        } else {
+            page_response(
+                vec![node("ENG-1", "2026-01-01T00:01:00.000Z", None)],
+                false,
+                None,
+            )
+        }
+    }
+}
+
+/// A retry policy fast enough for tests: 3 attempts, 1 ms apart.
+pub(crate) fn fast_retry() -> RetryPolicy {
+    RetryPolicy {
+        max_attempts: 3,
+        base_delay: std::time::Duration::from_millis(1),
+        max_delay: std::time::Duration::from_millis(1),
+        max_total_delay: std::time::Duration::from_millis(100),
+    }
+}
+
+/// Mount `responder` for every POST and return its call counter.
+async fn mount_failing(
+    server: &MockServer,
+    failures: usize,
+    failure: ResponseTemplate,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .respond_with(FailThenPage {
+            calls: std::sync::Arc::clone(&calls),
+            failures,
+            failure,
+        })
+        .mount(server)
+        .await;
+    calls
+}
+
+/// #190 step 3: Linear signals a rate limit as HTTP 400 with
+/// `extensions.code = RATELIMITED`. It is retried like a 429, under the same
+/// policy and budget, and the walk resumes.
+#[tokio::test]
+async fn ratelimited_400_is_retried_like_a_429() {
+    let server = MockServer::start().await;
+    let calls = mount_failing(&server, 1, graphql_400("RATELIMITED")).await;
+    let page = mock_client(&server.uri())
+        .with_retry_policy(fast_retry())
+        .fetch_team_issues_page(&eng(true), None, ISSUES_PAGE_SIZE, 1)
+        .await
+        .expect("RATELIMITED is retried, not surfaced");
+    assert_eq!(page.issues.len(), 1);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// #190 step 3 (Fail-Open): RATELIMITED past the retry policy is still an
+/// error — the throttle error after every attempt is spent — never a page.
+#[tokio::test]
+async fn ratelimited_past_the_retry_policy_fails() {
+    let server = MockServer::start().await;
+    let calls = mount_failing(&server, usize::MAX, graphql_400("RATELIMITED")).await;
+    let err = mock_client(&server.uri())
+        .with_retry_policy(fast_retry())
+        .fetch_team_issues(&eng(true), None)
+        .await
+        .expect_err("an endless rate limit must fail the walk");
+    assert!(
+        matches!(err, CollectError::Throttled { status: 400, .. }),
+        "{err:?}"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+/// Any other HTTP 400 is a request error, not a throttle: one attempt, and
+/// the error names the status.
+#[tokio::test]
+async fn other_400_is_not_retried() {
+    let server = MockServer::start().await;
+    let calls = mount_failing(&server, usize::MAX, graphql_400("INVALID_INPUT")).await;
+    let err = mock_client(&server.uri())
+        .with_retry_policy(fast_retry())
+        .fetch_team_issues_page(&eng(true), None, ISSUES_PAGE_SIZE, 1)
+        .await
+        .expect_err("a bad request fails");
+    assert!(
+        matches!(err, CollectError::LinearBulkApi { status: 400, .. }),
+        "{err:?}"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// #190 step 3: the wait before the retry honours Linear's documented
+/// `X-RateLimit-*-Reset` header (UTC epoch milliseconds) for the window
+/// whose `Remaining` is 0, not the 1 ms policy backoff. A window with points
+/// left does not set the wait.
+#[tokio::test]
+async fn ratelimited_retry_waits_for_the_exhausted_window_reset() {
+    let server = MockServer::start().await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let throttled = graphql_400("RATELIMITED")
+        .insert_header("X-RateLimit-Requests-Remaining", "0")
+        .insert_header("X-RateLimit-Requests-Reset", (now_ms + 400).to_string())
+        .insert_header("X-RateLimit-Complexity-Remaining", "900")
+        .insert_header(
+            "X-RateLimit-Complexity-Reset",
+            (now_ms + 60_000).to_string(),
+        );
+    let calls = mount_failing(&server, 1, throttled).await;
+    let policy = RetryPolicy {
+        max_attempts: 2,
+        max_total_delay: std::time::Duration::from_secs(5),
+        ..fast_retry()
+    };
+    let started = std::time::Instant::now();
+    mock_client(&server.uri())
+        .with_retry_policy(policy)
+        .fetch_team_issues_page(&eng(true), None, ISSUES_PAGE_SIZE, 1)
+        .await
+        .expect("retried after the reset");
+    let waited = started.elapsed();
+    assert!(
+        waited >= std::time::Duration::from_millis(300),
+        "waited {waited:?}"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(5),
+        "waited {waited:?}"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}

@@ -603,3 +603,38 @@ async fn full_read_over_the_cap_fails_and_writes_nothing() {
         Some(0)
     );
 }
+
+/// #190 step 3 (Fail-Open): a sync whose walk stays rate-limited past the
+/// retry policy fails with the throttle error and writes nothing — no issue
+/// row, no cursor, no field-set version — so the next run starts again.
+#[tokio::test]
+async fn ratelimited_past_the_budget_fails_the_sync_and_writes_nothing() {
+    use tga::collect::linear::bulk::tests::{fast_retry, graphql_400, FailThenPage};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(FailThenPage {
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            failures: usize::MAX,
+            failure: graphql_400("RATELIMITED"),
+        })
+        .mount(&server)
+        .await;
+    let mut db = Database::open_in_memory().expect("db");
+    let client = mock_client(&server.uri()).with_retry_policy(fast_retry());
+
+    let err = run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+        .await
+        .expect_err("an endless rate limit must fail the sync");
+    assert!(
+        matches!(
+            err.downcast_ref::<CollectError>(),
+            Some(CollectError::Throttled { status: 400, .. })
+        ),
+        "{err:#}"
+    );
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM linear_issues"), 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM work_items"), 0);
+    assert!(get_linear_cursor(db.connection(), "ENG")
+        .expect("read")
+        .is_none());
+}
