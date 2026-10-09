@@ -59,6 +59,11 @@ pub const FREE_TEXT: &[&str] = &[
     // Full commit subject + body.
     "commits.message",
     "linear_issues.title",
+    // #190: names a human typed for a cycle, label, milestone or project.
+    "linear_cycles.name",
+    "linear_labels.name",
+    "linear_milestones.name",
+    "linear_projects.name",
     "pull_requests.title",
     // Comma-separated labels, typed upstream.
     "work_items.tags",
@@ -67,13 +72,23 @@ pub const FREE_TEXT: &[&str] = &[
 
 /// Serialized upstream payloads.
 ///
-/// `work_items.raw_json` and, since #190, `linear_issues.raw_json`. For Linear
-/// both hold the GraphQL issue node, whose selection
-/// (`collect::linear::issue::ISSUE_FIELDS`) has no description field, so they
+/// `work_items.raw_json` and, since #190, `linear_issues.raw_json` and the
+/// six reference-entity `raw_json` columns. For Linear each holds a GraphQL
+/// node whose selection (`collect::linear::issue::ISSUE_FIELDS`,
+/// `collect::linear::entities::queries`) has no description field, so they
 /// are clean in practice — but that is a property of the writer, not of the
 /// column, which is why the attestation reads the column instead of citing
 /// the migration.
-pub const EMBEDDED_PAYLOAD: &[&str] = &["linear_issues.raw_json", "work_items.raw_json"];
+pub const EMBEDDED_PAYLOAD: &[&str] = &[
+    "linear_cycles.raw_json",
+    "linear_issues.raw_json",
+    "linear_labels.raw_json",
+    "linear_milestones.raw_json",
+    "linear_projects.raw_json",
+    "linear_teams.raw_json",
+    "linear_users.raw_json",
+    "work_items.raw_json",
+];
 
 /// Every remaining `TEXT` column: identifiers, enumerated values, timestamps,
 /// and JSON arrays of identifiers.
@@ -203,6 +218,69 @@ pub const CONSTRAINED: &[&str] = &[
     "linear_issues.assignee_email",
     "linear_issues.creator_id",
     "linear_issues.archived_at",
+    // #190: reference-entity ids, enumerated values and timestamps from the
+    // Linear API (migration v34); team and user names as for linear_issues.
+    "linear_teams.id",
+    "linear_teams.key",
+    "linear_teams.name",
+    "linear_teams.timezone",
+    "linear_teams.issue_estimation_type",
+    "linear_teams.created_at",
+    "linear_teams.updated_at",
+    "linear_teams.archived_at",
+    "linear_teams.fetched_at",
+    "linear_users.id",
+    "linear_users.name",
+    "linear_users.display_name",
+    "linear_users.email",
+    "linear_users.created_at",
+    "linear_users.updated_at",
+    "linear_users.archived_at",
+    "linear_users.fetched_at",
+    "linear_labels.id",
+    "linear_labels.color",
+    "linear_labels.parent_id",
+    "linear_labels.team_id",
+    "linear_labels.created_at",
+    "linear_labels.updated_at",
+    "linear_labels.archived_at",
+    "linear_labels.fetched_at",
+    "linear_projects.id",
+    "linear_projects.slug_id",
+    "linear_projects.url",
+    "linear_projects.state",
+    "linear_projects.status_name",
+    "linear_projects.status_type",
+    "linear_projects.start_date",
+    "linear_projects.target_date",
+    "linear_projects.started_at",
+    "linear_projects.completed_at",
+    "linear_projects.canceled_at",
+    "linear_projects.lead_id",
+    "linear_projects.team_ids",
+    "linear_projects.created_at",
+    "linear_projects.updated_at",
+    "linear_projects.archived_at",
+    "linear_projects.fetched_at",
+    "linear_milestones.id",
+    "linear_milestones.project_id",
+    "linear_milestones.target_date",
+    "linear_milestones.created_at",
+    "linear_milestones.updated_at",
+    "linear_milestones.archived_at",
+    "linear_milestones.fetched_at",
+    "linear_cycles.id",
+    "linear_cycles.team_id",
+    "linear_cycles.starts_at",
+    "linear_cycles.ends_at",
+    "linear_cycles.completed_at",
+    "linear_cycles.created_at",
+    "linear_cycles.updated_at",
+    "linear_cycles.archived_at",
+    "linear_cycles.fetched_at",
+    "linear_entity_sync_state.entity",
+    "linear_entity_sync_state.max_updated_at",
+    "linear_entity_sync_state.last_run_at",
     "linear_sync_cursor.team_key",
     "linear_sync_cursor.last_synced_at",
     "linear_sync_cursor.last_run_at",

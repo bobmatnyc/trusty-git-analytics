@@ -269,6 +269,43 @@ pub enum CollectError {
         /// The configured cap.
         cap: usize,
     },
+
+    /// A Linear reference-entity walk (`projects`, `cycles`, ...) failed on
+    /// one page (#190).
+    ///
+    /// The entity counterpart of [`CollectError::LinearBulkApi`], which names
+    /// a team key; these walks are workspace-wide and name the entity.
+    #[error("Linear API error (HTTP {status}) syncing {entity} (page {page}): {message}")]
+    LinearEntityApi {
+        /// HTTP status returned by Linear.
+        status: u16,
+        /// The GraphQL root field walked, e.g. `projects`.
+        entity: &'static str,
+        /// 1-based page number within the walk.
+        page: usize,
+        /// Linear's response body, scrubbed of the API key and truncated.
+        message: String,
+    },
+
+    /// A nested connection inside an entity node reported more rows than the
+    /// one page the query asked for (#190).
+    ///
+    /// Why: storing the first page as if it were the whole list would be a
+    /// silent truncation, so the walk fails instead.
+    #[error(
+        "Linear {entity} {id}: nested connection `{connection}` has more than {limit} rows; \
+         nothing was written for {entity}"
+    )]
+    LinearNestedConnectionTruncated {
+        /// The GraphQL root field walked, e.g. `projects`.
+        entity: &'static str,
+        /// Id of the node whose nested list was cut.
+        id: String,
+        /// The nested connection, e.g. `teams`.
+        connection: &'static str,
+        /// The `first:` the query sent for it.
+        limit: usize,
+    },
 }
 
 /// Module-wide `Result` alias.

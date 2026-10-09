@@ -77,22 +77,32 @@ pub struct LinearTeam {
     pub name: String,
 }
 
-/// Paging state shared by both walks: stops a server that keeps answering
+/// Paging state shared by every walk: stops a server that keeps answering
 /// `hasNextPage: true` without advancing (#7139 security finding).
-struct PageGuard {
+pub(super) struct PageGuard {
     endpoint: &'static str,
     key: String,
     last_cursor: Option<String>,
 }
 
 impl PageGuard {
+    /// A guard for a fresh walk of `endpoint`, naming `key` in its error.
+    // #190: the reference-entity walks (`entities.rs`) share this guard.
+    pub(super) fn new(endpoint: &'static str, key: &str) -> Self {
+        Self {
+            endpoint,
+            key: key.to_string(),
+            last_cursor: None,
+        }
+    }
+
     /// Return the next `after` cursor, or `None` when the walk is done.
     ///
     /// # Errors
     ///
     /// [`CollectError::PagingBudgetExceeded`] when a page says more follow
     /// but returned no rows, or repeats the previous cursor.
-    fn advance(
+    pub(super) fn advance(
         &mut self,
         has_next: bool,
         end_cursor: Option<String>,
@@ -122,7 +132,7 @@ impl LinearClient {
     /// [`CollectError::LinearBulkApi`], with the body scrubbed of the key.
     /// What: one un-retried attempt; callers wrap it in `with_retry`, because
     /// a `reqwest::RequestBuilder` is single-use.
-    async fn post_bulk(
+    pub(super) async fn post_bulk(
         &self,
         body: &serde_json::Value,
         scope: &str,
@@ -259,11 +269,7 @@ impl LinearClient {
         query: &IssueQuery,
         max_issues: Option<usize>,
     ) -> Result<Vec<LinearIssue>> {
-        let mut guard = PageGuard {
-            endpoint: "linear/issues",
-            key: query.team_key.clone(),
-            last_cursor: None,
-        };
+        let mut guard = PageGuard::new("linear/issues", &query.team_key);
         let mut issues = Vec::new();
         let mut after: Option<String> = None;
         for page_number in 1usize.. {
@@ -305,11 +311,7 @@ impl LinearClient {
         const QUERY: &str = "query($first: Int!, $after: String, $includeArchived: Boolean) { \
              teams(first: $first, after: $after, includeArchived: $includeArchived) { \
              nodes { id key name } pageInfo { hasNextPage endCursor } } }";
-        let mut guard = PageGuard {
-            endpoint: "linear/teams",
-            key: "*".to_string(),
-            last_cursor: None,
-        };
+        let mut guard = PageGuard::new("linear/teams", "*");
         let mut teams = Vec::new();
         let mut after: Option<String> = None;
         for page_number in 1usize.. {
