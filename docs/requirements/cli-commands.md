@@ -218,7 +218,10 @@ is projected into `work_items`, the next sync of each team ignores the cursor
 once, reads the whole history and rewrites every issue's `work_items` row, so
 issues that did not change also get the new fields; later runs resume from
 the cursor. The full read is the same paged walk as any sync: the same
-`--max-issues` cap, and the same retry with backoff on HTTP 429/503. A
+`--max-issues` cap, and the same retry with backoff on HTTP 429/503 and on
+Linear's rate-limit error (HTTP 400 with `RATELIMITED`), which waits for the
+exhausted window's `X-RateLimit-*-Reset` time when Linear sends one. A rate
+limit that outlasts the retry budget fails the team and writes nothing. A
 `--since` or `--exclude-archived` run does not count as that full read.
 
 Output is one line per team, for example:

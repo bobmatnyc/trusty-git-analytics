@@ -1,0 +1,2 @@
+Fixed
+- `tga linear sync` (issues and `--entities`) retries Linear's rate-limit error — HTTP 400 with `extensions.code = RATELIMITED` — like a 429, under the same retry policy and run-wide budget, waiting for the exhausted window's `X-RateLimit-*-Reset` time when Linear sends it. It used to fail the team on the first rate limit, so a large one-time full read could restart every run. A rate limit that outlasts the budget still fails the team and writes nothing; other HTTP 400s are not retried (#190).
