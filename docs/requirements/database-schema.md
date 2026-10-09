@@ -211,6 +211,17 @@ Linear ticket data fetched on reference detection. Migration `0002_linear_issues
 
 ---
 
+### Linear reference entities
+
+`linear_teams`, `linear_users`, `linear_labels`, `linear_projects`,
+`linear_milestones`, `linear_cycles` and `linear_entity_sync_state`, written by
+`tga linear sync --entities` (#190). Migration `0034_linear_reference_entities.sql`;
+its header and column comments are the column reference. Each entity table is
+keyed by Linear's `id` (TEXT PK) and carries `archived`, `archived_at`,
+`raw_json` and `fetched_at`.
+
+---
+
 ### `work_items`
 
 Unified ticket/work-item records from JIRA, GitHub, Linear, and Azure DevOps. Migration
