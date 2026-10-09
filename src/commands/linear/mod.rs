@@ -462,3 +462,6 @@ mod entity_sync_tests;
 
 #[cfg(test)]
 mod activity_sync_tests;
+
+#[cfg(test)]
+mod comment_cursor_tests;
