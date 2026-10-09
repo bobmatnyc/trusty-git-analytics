@@ -9,13 +9,17 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use super::LinearSyncArgs;
+use tga::collect::linear::issue::ISSUE_FIELDS_VERSION;
 use tga::collect::linear::sync::{next_cursor, resolve_scope};
 use tga::collect::linear::{
     plan_linear_issues, upsert_linear_issues_in, ChangeCounts, IssueChange, IssueQuery,
     LinearClient, LinearIssue,
 };
 use tga::collect::linear_pipeline::persist_work_items_in;
-use tga::core::db::{get_linear_cursor, set_linear_cursor, Database};
+use tga::core::db::{
+    get_linear_cursor, get_linear_fields_version, set_linear_cursor, set_linear_fields_version,
+    Database,
+};
 
 /// What one team's sync fetched and did (or, under `--dry-run`, would do).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +67,16 @@ impl TeamOutcome {
 /// `work_items`, and advances the team's cursor to the newest `updatedAt`
 /// seen. A failure commits none of the three. The cursor never moves
 /// backward.
-/// Test: `super::sync_tests` (every test there runs through this).
+///
+/// #190 step 3: a team whose cursor records an older field set than
+/// [`ISSUE_FIELDS_VERSION`] ignores the cursor and reads its whole history,
+/// so unchanged issues get the new fields too. A run that read the whole
+/// history with archived issues included records the current version in the
+/// same transaction; a `--since` or `--exclude-archived` run does not.
+/// Test: `super::sync_tests` (every test there runs through this);
+/// `older_field_set_refetches_full_history_once`,
+/// `since_bounded_run_does_not_mark_the_field_set_current`,
+/// `failed_field_set_write_rolls_the_team_back`.
 ///
 /// # Errors
 ///
@@ -79,13 +92,21 @@ pub(super) async fn sync_team(
     let stored_cursor = get_linear_cursor(db.connection(), team_key)?
         .and_then(|c| DateTime::parse_from_rfc3339(&c.last_synced_at).ok())
         .map(|d| d.with_timezone(&Utc));
-    let scope = resolve_scope(team_key, explicit_since, args.backfill, stored_cursor);
+    // #190 step 3: a cursor stored under an older field set is not a valid
+    // lower bound — issues it skips would never get the new fields.
+    let stored_version = get_linear_fields_version(db.connection(), team_key)?.unwrap_or(0);
+    let refresh = stored_version < ISSUE_FIELDS_VERSION;
+    let cursor_bound = if refresh { None } else { stored_cursor };
+    let scope = resolve_scope(team_key, explicit_since, args.backfill, cursor_bound);
+    let reads_everything = scope.since.is_none() && include_archived;
     tracing::info!(
         team = %team_key,
         since = ?scope.since,
         include_archived,
         backfill = args.backfill,
         dry_run = args.dry_run,
+        fields_version = stored_version,
+        refresh,
         "starting tga linear sync"
     );
 
@@ -119,6 +140,11 @@ pub(super) async fn sync_team(
         if let Some(next) = next_cursor(&observed) {
             let advance = stored_cursor.map_or(next, |s| s.max(next));
             set_linear_cursor(&tx, team_key, &advance.to_rfc3339(), issues.len() as i64)?;
+        }
+        // #190 step 3: only a read of the whole history may record the field
+        // set as current; its failure rolls the team back like any other.
+        if reads_everything && refresh {
+            set_linear_fields_version(&tx, team_key, ISSUE_FIELDS_VERSION)?;
         }
         tx.commit()?;
         changes

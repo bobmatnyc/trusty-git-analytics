@@ -182,14 +182,18 @@ fn build_commit_refs(commits: &[(String, String)]) -> HashMap<String, Vec<String
 /// board axis, which defines its corpus as the rows with `source = 'linear'` —
 /// saw nothing for Linear no matter how much `linear_issues` held.
 /// What: upserts one `work_items` row per issue under `source = 'linear'`,
-/// keyed on [`LinearIssue::identifier`] so it matches what
-/// [`LinearClient::extract_issue_ids`] yields, then inserts a
-/// `commit_work_items` row for every `(sha, identifier)` pair whose identifier
-/// was actually fetched. Both halves run in one transaction, so a failure
-/// leaves neither table half-written and no dangling join row. An identifier a
-/// commit mentions but Linear did not return is skipped, because the join
-/// table's foreign key would reject it. Returns the number of `work_items`
-/// rows written.
+/// with `id` = [`LinearIssue::identifier`] so it matches what
+/// [`LinearClient::extract_issue_ids`] yields and `stable_id` = Linear's issue
+/// id. Since #190 step 3 the row is found by that id, so a moved issue's row
+/// is renamed rather than duplicated, and its links follow it
+/// ([`crate::collect::linear::projection::write_work_item`]). `tags` carries
+/// the label names. Then inserts a `commit_work_items` row for every
+/// `(sha, identifier)` pair whose identifier — current or one the issue held
+/// before a move — was actually fetched. Both halves run in one transaction,
+/// so a failure leaves neither table half-written and no dangling join row.
+/// An identifier a commit mentions but Linear did not return is skipped,
+/// because the join table's foreign key would reject it. Returns the number
+/// of `work_items` rows written.
 ///
 /// `project` is left `None`: the issue query carries only the project id since
 /// #190, and DOC-70 §6 routes project resolution through trusty-common's
@@ -207,7 +211,10 @@ fn build_commit_refs(commits: &[(String, String)]) -> HashMap<String, Vec<String
 /// `persist_work_items_links_commits`, `persist_work_items_is_idempotent`,
 /// `persist_work_items_skips_unfetched_refs`,
 /// `persist_work_items_reports_write_failure`,
-/// `persist_work_items_rolls_back_a_partial_write`.
+/// `persist_work_items_rolls_back_a_partial_write`,
+/// `moved_issue_keeps_one_work_items_row_and_its_links`,
+/// `commit_naming_a_previous_identifier_links_the_moved_issue`,
+/// `work_item_tags_carry_the_labels`.
 pub fn persist_work_items(
     db: &mut Database,
     issues: &[LinearIssue],
@@ -239,8 +246,8 @@ pub fn persist_work_items_in(
     issues: &[LinearIssue],
     commit_refs: &HashMap<String, Vec<String>>,
 ) -> crate::core::Result<usize> {
-    use crate::core::db::work_items::{link_commit_work_item, upsert_work_item};
-    use std::collections::HashSet;
+    use crate::collect::linear::projection::{identifier_aliases, write_work_item};
+    use crate::core::db::work_items::link_commit_work_item;
 
     let mut written = 0usize;
     for issue in issues {
@@ -250,23 +257,27 @@ pub fn persist_work_items_in(
             title: issue.title.clone(),
             status: issue.state.clone(),
             item_type: LINEAR_ITEM_TYPE.to_string(),
-            tags: None,
+            // #190 step 3: label names, comma-separated like every provider's.
+            tags: (!issue.label_names.is_empty()).then(|| issue.label_names.join(",")),
             project: None,
             url: Some(issue.url.clone()),
             // #190: the GraphQL node as Linear returned it, so the
             // Linear-aware effort and work extractors find `estimate`,
-            // `parent` and `creator` under Linear's own names.
+            // `parent`, `creator` and `description` under Linear's own names.
             raw_json: issue.raw_json(),
         };
-        upsert_work_item(conn, &row)?;
+        // #190 step 3: keyed by the Linear id, so a moved issue keeps one row.
+        write_work_item(conn, &row, issue)?;
         written += 1;
     }
 
-    let fetched: HashSet<&str> = issues.iter().map(|i| i.identifier.as_str()).collect();
+    // #190 step 3: a commit naming an identifier the issue held before a
+    // move links to the issue under its current identifier.
+    let aliases = identifier_aliases(issues);
     for (sha, ids) in commit_refs {
         for id in ids {
-            if fetched.contains(id.as_str()) {
-                link_commit_work_item(conn, sha, id, LINEAR_SOURCE)?;
+            if let Some(current) = aliases.get(id.as_str()) {
+                link_commit_work_item(conn, sha, current, LINEAR_SOURCE)?;
             }
         }
     }

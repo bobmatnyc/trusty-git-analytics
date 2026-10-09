@@ -74,11 +74,13 @@ pub const FREE_TEXT: &[&str] = &[
 ///
 /// `work_items.raw_json` and, since #190, `linear_issues.raw_json` and the
 /// six reference-entity `raw_json` columns. For Linear each holds a GraphQL
-/// node whose selection (`collect::linear::issue::ISSUE_FIELDS`,
-/// `collect::linear::entities::queries`) has no description field, so they
-/// are clean in practice — but that is a property of the writer, not of the
-/// column, which is why the attestation reads the column instead of citing
-/// the migration.
+/// node. Since #190 step 3 the issue selection
+/// (`collect::linear::issue::ISSUE_FIELDS`) includes the ticket
+/// `description`, so a Linear issue node carries ticket prose the way a JIRA
+/// payload always has; the reference-entity selections
+/// (`collect::linear::entities::queries`) still have no description field.
+/// What a column holds is a property of the writer, not of the column, which
+/// is why the attestation reads the column instead of citing the migration.
 pub const EMBEDDED_PAYLOAD: &[&str] = &[
     "linear_cycles.raw_json",
     "linear_issues.raw_json",
@@ -329,6 +331,8 @@ pub const CONSTRAINED: &[&str] = &[
     "work_items.project",
     "work_items.url",
     "work_items.fetched_at",
+    // #190 step 3: the provider's stable item id (a Linear issue UUID).
+    "work_items.stable_id",
 ];
 
 /// Resolve one `table.column` against the three inventories.

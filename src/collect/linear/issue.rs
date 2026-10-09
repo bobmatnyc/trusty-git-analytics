@@ -17,15 +17,34 @@ use serde::{Deserialize, Serialize};
 /// The `Issue` selection set every Linear issue query sends (#190).
 ///
 /// `labelIds` is the complete id list and costs no query complexity; the
-/// `labels` connection supplies names for the first 50. `description` is left
-/// out on purpose: `work_items.raw_json` is scanned by `tga inspect attest`,
-/// and adding ticket bodies to it is step 3 of #190, not this step.
-pub const ISSUE_FIELDS: &str = "id identifier title url priority estimate dueDate \
-     createdAt updatedAt startedAt completedAt canceledAt archivedAt \
+/// `labels` connection supplies names for the first 50. `description` is the
+/// ticket body the work and effort extractors read (#190 step 3), so
+/// `work_items.raw_json` carries ticket prose the way a JIRA payload does.
+/// `previousIdentifiers` lists the identifiers an issue held before a team
+/// move; the stores use it to find rows written under one.
+///
+/// Changing this set changes what a stored row holds: bump
+/// [`ISSUE_FIELDS_VERSION`] with it, so `tga linear sync` reads each team's
+/// history once more and every row gets the new fields.
+pub const ISSUE_FIELDS: &str = "id identifier title description url priority estimate dueDate \
+     createdAt updatedAt startedAt completedAt canceledAt archivedAt previousIdentifiers \
      state { name type } team { id name key } \
      assignee { id name displayName email } creator { id name } \
      project { id } cycle { id } parent { id identifier } \
      labelIds labels(first: 50) { nodes { id name } }";
+
+/// The version of [`ISSUE_FIELDS`] and of the `work_items` projection built
+/// from it (#190 step 3).
+///
+/// Why: an incremental sync only asks for issues updated since the cursor,
+/// so a field added to the query never reaches an issue that did not change.
+/// What: `tga linear sync` stores the version a team was last read in full
+/// under (`linear_sync_cursor.fields_version`); a team stored under an older
+/// one is read in full once. Version 0 is every cursor written before this
+/// constant existed.
+/// Test: `issue_fields_version_tracks_the_field_set`,
+/// `commands::linear::sync_tests::older_field_set_refetches_full_history_once`.
+pub const ISSUE_FIELDS_VERSION: i64 = 1;
 
 /// A Linear issue fetched from the API.
 ///
@@ -91,6 +110,10 @@ pub struct LinearIssue {
     /// Every label id on the issue.
     #[serde(default)]
     pub label_ids: Vec<String>,
+    /// Identifiers the issue held before it moved team, oldest first. Empty
+    /// for an issue that never moved.
+    #[serde(default)]
+    pub previous_identifiers: Vec<String>,
     /// Label names, for the first 50 labels.
     #[serde(default)]
     pub label_names: Vec<String>,
@@ -205,6 +228,7 @@ pub fn parse_issue_node(identifier_fallback: &str, node: &serde_json::Value) -> 
         cycle_id: text(&node["cycle"]["id"]),
         parent_id: text(&node["parent"]["id"]),
         label_ids: strings(&node["labelIds"]),
+        previous_identifiers: strings(&node["previousIdentifiers"]),
         label_names,
         due_date: text(&node["dueDate"]),
         url: node["url"].as_str().unwrap_or("").to_string(),
@@ -245,6 +269,7 @@ pub(crate) mod tests {
             "project": {"id": "project-1"},
             "cycle": {"id": "cycle-1"},
             "parent": {"id": "parent-uuid", "identifier": format!("{team_key}-1")},
+            "previousIdentifiers": [],
             "labelIds": ["label-1", "label-2"],
             "labels": {"nodes": [{"id": "label-1", "name": "bug"}, {"id": "label-2", "name": "api"}]}
         })
@@ -252,7 +277,8 @@ pub(crate) mod tests {
 
     #[test]
     fn parse_issue_node_reads_every_field() {
-        let node = full_node("uuid-7", "ENG-7", "ENG");
+        let mut node = full_node("uuid-7", "ENG-7", "ENG");
+        node["previousIdentifiers"] = serde_json::json!(["ENG-0"]);
         let issue = parse_issue_node("", &node);
         assert_eq!(issue.linear_id.as_deref(), Some("uuid-7"));
         assert_eq!(issue.identifier, "ENG-7");
@@ -271,6 +297,7 @@ pub(crate) mod tests {
         assert_eq!(issue.label_ids, vec!["label-1", "label-2"]);
         assert_eq!(issue.label_names, vec!["bug", "api"]);
         assert_eq!(issue.due_date.as_deref(), Some("2026-03-01"));
+        assert_eq!(issue.previous_identifiers, vec!["ENG-0"]);
         assert!(issue.completed_at.is_some());
         assert!(!issue.is_archived());
         assert_eq!(issue.raw.as_ref(), Some(&node));
@@ -284,6 +311,22 @@ pub(crate) mod tests {
         assert!(
             ISSUE_FIELDS.contains("previousIdentifiers"),
             "{ISSUE_FIELDS}"
+        );
+    }
+
+    /// Changing the field set without bumping the version would leave every
+    /// stored row without the new fields. The pinned text makes the edit
+    /// fail here until the version moves with it.
+    #[test]
+    fn issue_fields_version_tracks_the_field_set() {
+        let pinned = blake3::hash(ISSUE_FIELDS.as_bytes()).to_hex().to_string();
+        assert_eq!(
+            (ISSUE_FIELDS_VERSION, pinned.as_str()),
+            (
+                1,
+                "6acd4ce5170e20f26fb35d082114b4a8f79331bc92b5b4fff44079106cf21e45"
+            ),
+            "ISSUE_FIELDS changed: bump ISSUE_FIELDS_VERSION and re-pin the hash"
         );
     }
 

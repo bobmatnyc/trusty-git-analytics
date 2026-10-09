@@ -61,7 +61,8 @@ pub use jira_facts::{
 };
 // #7139: Linear bulk-sync cursor bookkeeping.
 pub use linear_facts::{
-    get_linear_cursor, list_linear_cursor_teams, set_linear_cursor, LinearSyncCursor,
+    get_linear_cursor, get_linear_fields_version, list_linear_cursor_teams, set_linear_cursor,
+    set_linear_fields_version, LinearSyncCursor,
 };
 // #3915: PM effort tier.
 pub use pm_effort::{
