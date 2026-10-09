@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use super::activity_sync::ActivityOutcome;
 use super::comment_sync::CommentsOutcome;
 use super::LinearSyncArgs;
+use tga::collect::linear::activity::due::queue_comment_reads;
 use tga::collect::linear::issue::ISSUE_FIELDS_VERSION;
 use tga::collect::linear::sync::{next_cursor, resolve_scope};
 use tga::collect::linear::{
@@ -75,7 +76,9 @@ impl TeamOutcome {
 /// upserts them by `linear_id`, projects the new and changed ones into
 /// `work_items`, and advances the team's cursor to the newest `updatedAt`
 /// seen. A failure commits none of the three. The cursor never moves
-/// backward.
+/// backward. #190: the same transaction queues, for the next incremental
+/// comments pass, the issues that moved into the team (and new ones created
+/// before its comment window) — `queue_comment_reads`.
 ///
 /// #190 step 3: a team whose cursor records an older field set than
 /// [`ISSUE_FIELDS_VERSION`] ignores the cursor and reads its whole history,
@@ -150,6 +153,10 @@ pub(super) async fn sync_team(
             .map(|(i, _)| i.clone())
             .collect();
         persist_work_items_in(&tx, &written, &HashMap::new())?;
+        // #190: a moved issue's older comments are outside the incremental
+        // comments window; record it with the issue rows, so a later
+        // `--comments` run reads it in full even when this run has none.
+        queue_comment_reads(&tx, team_key, &issues, &changes)?;
 
         let observed: Vec<DateTime<Utc>> = issues.iter().filter_map(|i| i.updated_at).collect();
         if let Some(next) = next_cursor(&observed) {

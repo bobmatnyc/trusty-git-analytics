@@ -710,6 +710,25 @@ rows and never moves backward; a failed walk leaves it unchanged. No row: the
 next walk reads every comment of the team. A walk that stores no comment
 leaves the row as it is.
 
+### `linear_comment_due`
+
+Issues whose every comment the next incremental `--comments` walk reads, with
+no `updatedAt` bound (#190). Migration `0038_linear_comment_due.sql`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `issue_id` | TEXT PK | no | Linear issue id (UUID) |
+| `team_key` | TEXT | no | The team the issue moved into; indexed |
+| `reason` | TEXT | no | `moved` (identifier changed) or `new` (no row, created at or before the team's comment cursor minus 10 minutes) |
+| `queued_at` | TEXT | no | RFC3339 wall clock of the issue sync that queued it |
+
+The issue sync writes a row in the same transaction as the issue rows, only
+when the team has a comment cursor, whether or not the run passes
+`--comments`. The team's next incremental comments pass reads each listed
+issue's comments and deletes the rows in the same transaction as its comment
+rows and cursor; a failed walk keeps them. A `--backfill` per-issue comments
+write deletes the issue's row.
+
 ---
 
 ### `jira_sync_cursor`
@@ -871,6 +890,7 @@ Migrations live in `src/core/db/sql/` and are registered in
 | 27 | `0027_fact_pm_effort.sql` | `fact_pm_effort` table |
 | 36 | `0036_linear_issue_activity.sql` | `fact_linear_transitions`, `fact_linear_comment_detail`, `linear_issue_activity_state` tables (#190 step 6) |
 | 37 | `0037_linear_comment_cursor.sql` | `linear_comment_cursor` table (#190) |
+| 38 | `0038_linear_comment_due.sql` | `linear_comment_due` table (#190) |
 
 Migrations 17 and 21 carry a `PRAGMA table_info` pre-flight guard, because a pre-release
 build may already have added their columns and SQLite has no
@@ -879,4 +899,4 @@ module — `v17.rs` and `v21.rs` — so their `.sql` files are read as reference
 executed. Migration 21's registry entry carries an empty `sql` string to make that
 explicit.
 
-Future migrations continue from `0038_*.sql`. Rows 28–35 are not yet listed here; each SQL file's header describes it.
+Future migrations continue from `0039_*.sql`. Rows 28–35 are not yet listed here; each SQL file's header describes it.

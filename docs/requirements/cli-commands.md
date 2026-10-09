@@ -215,7 +215,7 @@ pull.
 | `--dry-run` | false | Open the database read-only, fetch, and print what would be written. No row and no cursor is written |
 | `--entities` | false | After the issues, also sync the workspace's teams, users, labels, projects, project milestones and cycles (see below) |
 | `--history` | false | After each team's issues, read the workflow-state history of each due issue into `fact_linear_transitions` (see below) |
-| `--comments` | false | After each team's issues, read the team's comments updated since its comment cursor (every comment on the first run) into `fact_linear_comment_detail`; with `--backfill`, walk each issue's comments instead. Bodies are never stored (see below) |
+| `--comments` | false | After each team's issues, read the team's comments updated since its comment cursor (every comment on the first run), and every comment of issues that moved into the team, into `fact_linear_comment_detail`; with `--backfill`, walk each issue's comments instead. Bodies are never stored (see below) |
 
 Rows are keyed by Linear's issue `id` (UUID); `identifier` (ENG-123) is a
 separate indexed column. An issue that moves team gets a new identifier and
@@ -377,14 +377,38 @@ than their issue. So the pass reads each team's comments by the comment's own
   issue's Linear id, and counted in the summary line. A comment with no issue
   (Linear also has comments on project updates and documents) is not stored
   and is counted.
+- **Issues moved into the team** (#190): moving an issue does not change its
+  comments' `updatedAt`, so a comment written while the issue sat in another
+  team, older than the cursor minus 10 minutes, matches no bounded walk. The
+  issue pass therefore queues, in `linear_comment_due` and in the same
+  transaction as the issue rows, each issue it classifies as moved into the
+  team, and each issue new to the team whose `createdAt` is at or before the
+  team's comment cursor minus 10 minutes. It queues them whether or not the
+  run passes `--comments`, so a later `--comments` run, whose issue pass sees
+  the issue unchanged, still reads them. A team with no comment cursor queues
+  nothing: its next walk reads every comment. The next incremental comments
+  pass reads every comment of the queued issues, with no `updatedAt` bound,
+  through the same `comments` query filtered by `issue.id in [...]` (100 ids
+  per request, 250 comments per page), and deletes the queue rows in the same
+  transaction as the team's comment rows and cursor. These comments do not
+  move the cursor. A failed page fails the run as above and keeps the queue.
+  An issue created after that bound needs no extra read. A `--backfill`
+  per-issue comments write also removes the issue from the queue.
 - `--backfill --comments` keeps the per-issue walk above and leaves the
   comment cursor as it is.
+- **Clocks**: the cursor is a Linear server time capped at the local clock's
+  walk start. The 10-minute overlap also absorbs skew between the two clocks;
+  a local clock more than 10 minutes behind Linear's can skip a comment edited
+  during the previous walk until `--backfill`.
 
 Requests: one per 250 comments updated since the cursor minus 10 minutes,
 at least one per team. A team with up to 250 changed comments costs one
 request per run; `--all-teams` costs at least one per team. The first run
 costs one request per 250 comments of the team (about 241 for a 60,000-comment
-workspace across all teams).
+workspace across all teams). Issues moved into the team add one request per
+100 queued issues (plus one per further 250 of their comments), only on the
+run after the move; a typical incremental run stays at a few requests per
+team.
 
 ```text
 Linear comments (ENG): read 12 comments updated after 2026-10-09T08:50:00.000Z; wrote 12 comment row(s), 1 on issue(s) not yet in linear_issues; cursor 2026-10-09T18:59:12.000Z.

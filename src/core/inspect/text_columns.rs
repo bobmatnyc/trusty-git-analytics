@@ -325,6 +325,11 @@ pub const CONSTRAINED: &[&str] = &[
     "linear_comment_cursor.team_key",
     "linear_comment_cursor.cursor_updated_at",
     "linear_comment_cursor.last_run_at",
+    // #190: issues the next comments walk reads in full (migration v38).
+    "linear_comment_due.issue_id",
+    "linear_comment_due.team_key",
+    "linear_comment_due.reason",
+    "linear_comment_due.queued_at",
     // #111: LLM-tier token accounting; every value is written by tga.
     "llm_usage.commit_sha",
     "llm_usage.provider",

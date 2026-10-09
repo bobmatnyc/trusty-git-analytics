@@ -247,6 +247,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "linear_comment_cursor",
         sql: include_str!("../sql/0037_linear_comment_cursor.sql"),
     },
+    // #190: issues whose whole comment set the next incremental walk reads
+    // (moved into the team); additive, see the SQL file header.
+    Migration {
+        version: 38,
+        name: "linear_comment_due",
+        sql: include_str!("../sql/0038_linear_comment_due.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

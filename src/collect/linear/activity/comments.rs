@@ -6,8 +6,10 @@
 //! comments only when the issue changed, missed them.
 //! What: [`comments_filter`] and [`LinearClient::fetch_team_comments`] read
 //! Linear's top-level `comments` connection for one team, filtered by the
-//! comment's own `updatedAt`. The store side is
-//! [`super::store::commit_team_comments`].
+//! comment's own `updatedAt`. #190: [`LinearClient::fetch_issue_comments`]
+//! reads, with no bound, every comment of the issues that moved into the team
+//! ([`super::due`]). The store side is
+//! [`super::store::commit_team_comments_with_due`].
 //! Test: `activity::comment_walk_tests`; `commands::linear::comment_cursor_tests`.
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
@@ -21,7 +23,17 @@ use crate::collect::jira::retry::with_retry;
 pub const COMMENTS_PAGE_SIZE: usize = 250;
 
 /// How far behind the stored cursor an incremental walk starts.
+///
+/// #190: the cursor is a Linear server time (a comment `updatedAt`) capped at
+/// the local clock's walk start. The overlap also absorbs skew between the
+/// two clocks: a local clock up to 10 minutes behind Linear's still re-reads
+/// every comment updated during the previous walk. More skew than that can
+/// skip such comments until `--backfill`.
 pub const COMMENT_OVERLAP: TimeDelta = TimeDelta::minutes(10);
+
+/// Issue ids per request of [`LinearClient::fetch_issue_comments`]. Each
+/// batch is one paged walk at [`COMMENTS_PAGE_SIZE`] comments per page.
+pub const DUE_ISSUES_PER_REQUEST: usize = 100;
 
 /// The paginated workspace `comments` query: each comment with its issue.
 /// `body` is read only to measure its length; it is never stored or logged.
@@ -49,6 +61,13 @@ pub fn comments_filter(team_key: &str, updated_after: Option<DateTime<Utc>>) -> 
             serde_json::json!({ "gt": after.to_rfc3339_opts(SecondsFormat::Millis, true) });
     }
     filter
+}
+
+/// The `filter` variable of [`LinearClient::fetch_issue_comments`]: every
+/// comment on the issues with these ids, with no `updatedAt` bound.
+#[must_use]
+pub fn issue_ids_filter(issue_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({ "issue": { "id": { "in": issue_ids } } })
 }
 
 impl LinearClient {
@@ -80,8 +99,50 @@ impl LinearClient {
         team_key: &str,
         updated_after: Option<DateTime<Utc>>,
     ) -> Result<Vec<serde_json::Value>> {
+        self.walk_comments(team_key, &comments_filter(team_key, updated_after))
+            .await
+    }
+
+    /// Walk every page of every comment on the issues `issue_ids`, with no
+    /// `updatedAt` bound; `team_key` labels errors.
+    ///
+    /// Why: #190 — a comment on an issue that moved into the team can be
+    /// older than the team walk's bound; the comments pass reads these issues
+    /// in full.
+    /// What: one [`TEAM_COMMENTS_QUERY`] walk per batch of
+    /// [`DUE_ISSUES_PER_REQUEST`] ids, filtered by [`issue_ids_filter`], same
+    /// paging, ordering, archived handling and retries as
+    /// [`LinearClient::fetch_team_comments`]. Cost: one request per batch
+    /// plus one per further 250 comments. No ids sends no request.
+    /// Test: `commands::linear::comment_cursor_tests::a_moved_issues_old_comments_are_read_in_full`,
+    /// `commands::linear::comment_cursor_tests::a_failed_moved_issue_walk_fails_the_run_and_stays_due`.
+    ///
+    /// # Errors
+    ///
+    /// As [`LinearClient::fetch_team_comments`]; any failed batch fails the
+    /// whole read.
+    pub async fn fetch_issue_comments(
+        &self,
+        team_key: &str,
+        issue_ids: &[String],
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut nodes = Vec::new();
+        for batch in issue_ids.chunks(DUE_ISSUES_PER_REQUEST) {
+            nodes.extend(
+                self.walk_comments(team_key, &issue_ids_filter(batch))
+                    .await?,
+            );
+        }
+        Ok(nodes)
+    }
+
+    /// Walk every page of the workspace `comments` query under `filter`.
+    async fn walk_comments(
+        &self,
+        team_key: &str,
+        filter: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>> {
         const ENDPOINT: &str = "linear/comments";
-        let filter = comments_filter(team_key, updated_after);
         let mut guard = PageGuard::new(ENDPOINT, team_key);
         let mut nodes = Vec::new();
         let mut after: Option<String> = None;

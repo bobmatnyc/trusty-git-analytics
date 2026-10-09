@@ -194,6 +194,26 @@ fn a_malformed_node_writes_nothing() {
     assert_eq!(comment_cursor(db.connection(), "ENG").expect("read"), None);
 }
 
+/// #190: a node with no `issue` key is malformed, not a comment on a
+/// document: the write fails and stores nothing. `issue: null` stays a
+/// counted skip (`the_write_counts_unlinked_and_issueless_comments`).
+#[test]
+fn a_node_without_an_issue_key_writes_nothing() {
+    let mut db = with_eng1();
+    let mut bad = comment("c2", "2026-01-03T00:00:00.000Z", Some("ENG-1"));
+    bad.as_object_mut().map(|o| o.remove("issue"));
+    let nodes = [
+        comment("c1", "2026-01-02T00:00:00.000Z", Some("ENG-1")),
+        bad,
+    ];
+    let err = commit_team_comments(&mut db, "ENG", &nodes, Utc::now()).expect_err("no issue key");
+    assert!(err.to_string().contains("`issue`"), "{err}");
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM fact_linear_comment_detail"),
+        0
+    );
+}
+
 /// #190: a moved issue's comment rows take its current identifier and team.
 #[test]
 fn a_moved_issue_s_comment_rows_follow_it() {

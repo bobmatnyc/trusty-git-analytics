@@ -69,8 +69,10 @@ issue, for issues that changed since their last read. --comments stores\n\
 comment metadata (author, times, body length; never the body): each team's\n\
 comments updated since its comment cursor (minus a 10-minute overlap), read\n\
 through Linear's workspace `comments` query, or every comment of the team on\n\
-the first run. With --backfill, --comments walks each issue instead and also\n\
-removes comments Linear deleted; the incremental walk cannot see deletions.\n\n\
+the first run, plus every comment of each issue that moved into the team\n\
+since the last comments run. With --backfill, --comments walks each issue\n\
+instead and also removes comments Linear deleted; the incremental walk cannot\n\
+see deletions.\n\n\
 Requires `linear.api_key` (or a shared-credential fallback) configured, and\n\
 --team, --all-teams, or exactly one entry in `linear.team_keys`.",
     after_help = "EXAMPLES:\n\
@@ -126,7 +128,8 @@ pub struct LinearSyncArgs {
     #[arg(long, default_value_t = false)]
     pub history: bool,
     /// After each team's issues, read the team's comments updated since its
-    /// comment cursor (every comment on the first run) into
+    /// comment cursor (every comment on the first run), and every comment of
+    /// issues that moved into the team, into
     /// `fact_linear_comment_detail`, 250 per request. With --backfill, walk
     /// each issue's comments instead, which also removes deleted comments.
     /// Comment bodies are never stored.

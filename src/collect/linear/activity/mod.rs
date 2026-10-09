@@ -17,6 +17,8 @@
 
 // #190: the incremental comments walk, keyed on the comment's own updatedAt.
 pub mod comments;
+// #190: issues moved into a team, whose comments the next walk reads in full.
+pub mod due;
 pub mod store;
 
 use super::bulk::PageGuard;
