@@ -676,9 +676,14 @@ Per-issue marker for `--history` / `--comments` (#190 step 6). Migration
 | `history_synced_at` | TEXT | yes | RFC3339 wall clock of that read |
 | `comments_for` | TEXT | yes | Issue `updated_at` the comments were last read at |
 | `comments_synced_at` | TEXT | yes | RFC3339 wall clock of that read |
+| `missing_for` | TEXT | yes | Issue `updated_at` at which Linear answered "not found" (tombstone) |
+| `missing_at` | TEXT | yes | RFC3339 wall clock of that answer; NULL = not tombstoned |
 
 An issue whose `linear_issues.updated_at` differs from its marker (or has
-none) is read again by the next run with the flag.
+none) is read again by the next run with the flag, unless it is tombstoned:
+`missing_at` set and `missing_for` equal to its current `updated_at`. A
+tombstone is skipped by both flags, ignored by `--backfill`, and cleared by
+the next successful read. It deletes no history or comment row.
 
 ---
 

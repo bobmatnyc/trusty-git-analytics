@@ -25,6 +25,11 @@
 --     again when its stored `updated_at` differs. The marker is written in
 --     the same transaction as the rows, so a failed read leaves the issue
 --     due no matter how far the team's issue cursor has moved.
+--   * `missing_for` / `missing_at` tombstone an issue Linear answered "not
+--     found" for (owner ruling D28: a counted warning, not a failure). The
+--     issue is skipped while its stored `updated_at` equals `missing_for`;
+--     `--backfill` requests it again, and a successful read clears both.
+--     A tombstone deletes no history or comment row.
 --
 -- Additive migration: three new tables. No existing table or row changes.
 
@@ -72,5 +77,7 @@ CREATE TABLE IF NOT EXISTS linear_issue_activity_state (
     history_for        TEXT,          -- issue updated_at the history was read at
     history_synced_at  TEXT,          -- RFC3339 wall clock of that read
     comments_for       TEXT,          -- issue updated_at the comments were read at
-    comments_synced_at TEXT           -- RFC3339 wall clock of that read
+    comments_synced_at TEXT,          -- RFC3339 wall clock of that read
+    missing_for        TEXT,          -- issue updated_at Linear said "not found" at
+    missing_at         TEXT           -- RFC3339 wall clock of that answer
 );

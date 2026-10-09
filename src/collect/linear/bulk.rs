@@ -185,6 +185,12 @@ impl LinearClient {
         // #190: Linear reports a rate limit as HTTP 400 with a RATELIMITED
         // GraphQL error; it is a throttle, so `with_retry` waits and retries.
         let reset_wait = ratelimit_reset_delay(resp.headers(), Utc::now().timestamp_millis());
+        let not_found = |entity: String| CollectError::LinearNotFound {
+            status: status.as_u16(),
+            scope: scope.to_string(),
+            page,
+            entity,
+        };
         let bulk_error = |message: String| CollectError::LinearBulkApi {
             status: status.as_u16(),
             team_key: scope.to_string(),
@@ -199,10 +205,24 @@ impl LinearClient {
                     retry_after: retry_after.or(reset_wait),
                 });
             }
+            // #190 step 6: Linear's not-found answer, should it arrive as a 400.
+            if status == reqwest::StatusCode::BAD_REQUEST {
+                let errors = serde_json::from_str::<serde_json::Value>(&text)
+                    .map(|mut v| v["errors"].take())
+                    .unwrap_or_default();
+                if let Some(entity) = not_found_entity(&errors) {
+                    return Err(not_found(entity));
+                }
+            }
             return Err(bulk_error(redacted_body_excerpt(&text, &self.api_key)));
         }
         let mut json: serde_json::Value = resp.json().await.map_err(CollectError::Http)?;
         if let Some(errors) = json.get("errors") {
+            // #190 step 6: "Entity not found" is Linear's answer, not a fault;
+            // the caller decides whether an absent entity is an error.
+            if let Some(entity) = not_found_entity(errors) {
+                return Err(not_found(entity));
+            }
             if errors.as_array().is_some_and(|a| !a.is_empty()) {
                 return Err(bulk_error(redacted_body_excerpt(
                     &errors.to_string(),
@@ -385,6 +405,29 @@ impl LinearClient {
         }
         Ok(teams)
     }
+}
+
+/// The entity type a GraphQL `errors` array says does not exist, when every
+/// error in it is Linear's `Entity not found: <type>` for that one type.
+///
+/// Why: #190 step 6 — a stored issue Linear no longer has must be told apart
+/// from a failed request. Narrow on purpose: an empty array, any other
+/// message, or two entity types is `None`, and the caller fails as before.
+/// What: `Some("Issue")` for `[{"message": "Entity not found: Issue"}]`.
+/// Test: `not_found_entity_is_narrow`.
+fn not_found_entity(errors: &serde_json::Value) -> Option<String> {
+    let mut entity: Option<&str> = None;
+    for error in errors.as_array()? {
+        let this = error["message"]
+            .as_str()?
+            .strip_prefix("Entity not found: ")?
+            .trim();
+        if this.is_empty() || entity.is_some_and(|e| e != this) {
+            return None;
+        }
+        entity = Some(this);
+    }
+    entity.map(String::from)
 }
 
 /// Whether a Linear error body carries a `RATELIMITED` GraphQL error code

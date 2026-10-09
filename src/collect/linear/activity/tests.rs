@@ -2,9 +2,9 @@
 //! the due-issue selection, the row writer and migration v36. Every server is
 //! a `wiremock::MockServer` answering hand-built GraphQL pages; no network.
 
-use super::store::{activity_candidates, commit_issue_activity};
+use super::store::{activity_candidates, commit_issue_activity, mark_issue_missing};
 use super::*;
-use crate::collect::linear::bulk::tests::{mock_client, node};
+use crate::collect::linear::bulk::tests::{fast_retry, mock_client, node};
 use crate::collect::linear::issue::parse_issue_node;
 use crate::collect::linear::upsert_linear_issues;
 use crate::core::db::Database;
@@ -43,6 +43,20 @@ pub(crate) fn activity_page(
             "nodes": nodes,
             "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
         }}}
+    }))
+}
+
+/// Linear's answer for an issue id it does not have (#190 step 6): HTTP 200,
+/// `data: null`, one "Entity not found" GraphQL error.
+pub(crate) fn not_found_page() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "errors": [{
+            "message": "Entity not found: Issue",
+            "path": ["issue"],
+            "extensions": {"type": "invalid input", "code": "INPUT_ERROR", "userError": true,
+                           "userPresentableMessage": "Could not find referenced Issue."},
+        }],
+        "data": null,
     }))
 }
 
@@ -110,7 +124,8 @@ async fn history_walk_follows_every_page() {
     let nodes = mock_client(&server.uri())
         .fetch_issue_activity(&target(1), ActivityKind::History)
         .await
-        .expect("walk");
+        .expect("walk")
+        .expect("issue exists");
     let ids: Vec<&str> = nodes.iter().filter_map(|n| n["id"].as_str()).collect();
     assert_eq!(ids, vec!["h1", "h2"]);
 }
@@ -147,7 +162,8 @@ async fn comments_walk_follows_every_page() {
     let nodes = mock_client(&server.uri())
         .fetch_issue_activity(&target(1), ActivityKind::Comments)
         .await
-        .expect("walk");
+        .expect("walk")
+        .expect("issue exists");
     assert_eq!(nodes.len(), 2);
 }
 
@@ -197,29 +213,64 @@ async fn a_page_error_fails_the_walk() {
     }
 }
 
-/// #190 step 6: `issue: null` (a deleted issue, or no access) is an error,
-/// never an empty history.
+/// #190 step 6 (D28): only Linear's explicit not-found answer — `issue:
+/// null`, or "Entity not found: Issue" at HTTP 200 or 400 — is a missing
+/// issue. A null connection, a missing `issue` key, another entity's
+/// not-found, another GraphQL error, a 5xx and an auth failure stay errors.
 #[tokio::test]
-async fn a_missing_issue_fails_the_walk() {
-    let server = MockServer::start().await;
-    activity_call(ActivityKind::Comments, "uuid-ENG-1")
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"issue": null}})))
-        .mount(&server)
-        .await;
-    let err = mock_client(&server.uri())
-        .fetch_issue_activity(&target(1), ActivityKind::Comments)
-        .await
-        .expect_err("no issue");
-    assert!(
-        matches!(
-            err,
-            CollectError::LinearActivityApi {
-                connection: "comments",
-                ..
-            }
+async fn only_linear_not_found_reads_as_a_missing_issue() {
+    let not_found_400 = || {
+        ResponseTemplate::new(400).set_body_json(json!({
+            "errors": [{"message": "Entity not found: Issue"}], "data": null}))
+    };
+    let other_entity = || {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "errors": [{"message": "Entity not found: Team"}], "data": null}))
+    };
+    let other_error = || {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "errors": [{"message": "Argument Validation Error"}], "data": null}))
+    };
+    let body = |v: Json| ResponseTemplate::new(200).set_body_json(v);
+    let cases: Vec<(&str, ResponseTemplate, bool)> = vec![
+        ("issue: null", body(json!({"data": {"issue": null}})), true),
+        ("entity not found, 200", not_found_page(), true),
+        ("entity not found, 400", not_found_400(), true),
+        (
+            "null connection",
+            body(json!({"data": {"issue": {"comments": null}}})),
+            false,
         ),
-        "{err:?}"
-    );
+        ("no issue key", body(json!({"data": {}})), false),
+        ("other entity", other_entity(), false),
+        ("other GraphQL error", other_error(), false),
+        (
+            "500",
+            ResponseTemplate::new(500).set_body_string("Entity not found: Issue"),
+            false,
+        ),
+        (
+            "401",
+            ResponseTemplate::new(401).set_body_string("unauthorized"),
+            false,
+        ),
+    ];
+    for (name, response, missing) in cases {
+        let server = MockServer::start().await;
+        activity_call(ActivityKind::Comments, "uuid-ENG-1")
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let got = mock_client(&server.uri())
+            .with_retry_policy(fast_retry())
+            .fetch_issue_activity(&target(1), ActivityKind::Comments)
+            .await;
+        if missing {
+            assert!(matches!(got, Ok(None)), "{name}: {got:?}");
+        } else {
+            assert!(got.is_err(), "{name}: {got:?}");
+        }
+    }
 }
 
 /// #190 step 6: a page with no boolean `hasNextPage` fails the walk rather
@@ -304,6 +355,62 @@ fn candidates_are_the_rows_whose_marker_lags() {
     let all = activity_candidates(db.connection(), "ENG", ActivityKind::History, true, &[])
         .expect("forced");
     assert_eq!(ids(&all), vec!["ENG-1", "ENG-2"]);
+}
+
+/// #190 step 6 (D28): a tombstoned issue is not due while its stored row is
+/// unchanged; it is due again when the row changes and under `force`
+/// (`--backfill`), and a successful write clears the tombstone. The
+/// tombstone moves neither marker and deletes no row.
+#[test]
+fn a_tombstone_holds_until_the_row_changes() {
+    let mut db = stored(2);
+    let due = activity_candidates(db.connection(), "ENG", ActivityKind::History, false, &[])
+        .expect("due");
+    let comments = [comment_node("c1", "2026-01-01T00:00:00.000Z", "a", None)];
+    commit_issue_activity(&mut db, &due[1], ActivityKind::Comments, &comments).expect("write");
+    let changed = "UPDATE linear_issues SET updated_at = '2026-02-01T00:00:00+00:00' \
+                   WHERE identifier = 'ENG-2'";
+    db.connection().execute(changed, []).expect("touch");
+    let due = activity_candidates(db.connection(), "ENG", ActivityKind::History, false, &[])
+        .expect("due");
+    mark_issue_missing(db.connection(), &due[1]).expect("tombstone");
+
+    for kind in [ActivityKind::History, ActivityKind::Comments] {
+        let due = activity_candidates(db.connection(), "ENG", kind, false, &[]).expect("due");
+        assert_eq!(ids(&due), vec!["ENG-1"], "{kind:?}");
+    }
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM fact_linear_comment_detail"),
+        1
+    );
+    let comments_for: Option<String> = db
+        .connection()
+        .query_row(
+            "SELECT comments_for FROM linear_issue_activity_state WHERE issue_id = 'uuid-ENG-2'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("marker");
+    assert_eq!(comments_for.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+
+    let forced = activity_candidates(db.connection(), "ENG", ActivityKind::History, true, &[])
+        .expect("forced");
+    assert_eq!(ids(&forced), vec!["ENG-1", "ENG-2"]);
+    let changed = "UPDATE linear_issues SET updated_at = '2026-03-01T00:00:00+00:00' \
+                   WHERE identifier = 'ENG-2'";
+    db.connection().execute(changed, []).expect("touch");
+    let due = activity_candidates(db.connection(), "ENG", ActivityKind::History, false, &[])
+        .expect("due");
+    assert_eq!(ids(&due), vec!["ENG-1", "ENG-2"]);
+
+    commit_issue_activity(&mut db, &due[1], ActivityKind::History, &[]).expect("found again");
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM linear_issue_activity_state WHERE missing_at IS NOT NULL"
+        ),
+        0
+    );
 }
 
 /// #190 step 6: the dry run's fetched issues count as due when no stored
@@ -468,6 +575,47 @@ fn a_node_without_an_id_writes_nothing() {
     let due = activity_candidates(db.connection(), "ENG", ActivityKind::Comments, false, &[])
         .expect("due");
     assert_eq!(ids(&due), vec!["ENG-1"]);
+}
+
+/// #190 step 6: a failed rewrite rolls back whole — the issue's earlier
+/// comment rows and its earlier marker are still there.
+#[test]
+fn a_failed_rewrite_keeps_the_earlier_rows_and_marker() {
+    let mut db = stored(1);
+    let two = [
+        comment_node("c1", "2026-01-01T00:00:00.000Z", "a", None),
+        comment_node("c2", "2026-01-02T00:00:00.000Z", "b", None),
+    ];
+    commit_issue_activity(&mut db, &target(1), ActivityKind::Comments, &two).expect("first");
+    let newer = ActivityTarget::new(
+        "uuid-ENG-1",
+        "ENG-1",
+        "ENG",
+        Some("2026-02-01T00:00:00+00:00".into()),
+    );
+    let bad = [
+        comment_node("c3", "2026-01-03T00:00:00.000Z", "c", None),
+        json!({"createdAt": "2026-01-04T00:00:00.000Z", "body": "no id"}),
+    ];
+    commit_issue_activity(&mut db, &newer, ActivityKind::Comments, &bad).expect_err("no id");
+    let kept: Vec<String> = db
+        .connection()
+        .prepare("SELECT comment_id FROM fact_linear_comment_detail ORDER BY comment_id")
+        .expect("prepare")
+        .query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<std::result::Result<_, _>>()
+        .expect("rows");
+    assert_eq!(kept, vec!["c1", "c2"]);
+    let marker: Option<String> = db
+        .connection()
+        .query_row(
+            "SELECT comments_for FROM linear_issue_activity_state WHERE issue_id = 'uuid-ENG-1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("marker");
+    assert_eq!(marker.as_deref(), Some("2026-01-01T00:00:00+00:00"));
 }
 
 /// #190 step 6: migration v36 is additive — a v35 database keeps its Linear

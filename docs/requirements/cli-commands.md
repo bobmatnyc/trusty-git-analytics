@@ -295,8 +295,8 @@ With `--history` and/or `--comments` (#190 step 6), each team's issue pass
 is followed by a per-issue pass for each flag. Linear has no workspace-wide
 history list, so each issue's `history` or `comments` connection is walked
 in full (50 per page, `includeArchived: true`, retried on 429/503 and
-RATELIMITED). There is no cap; a page that fails, an `issue: null` answer,
-or a page without a boolean `pageInfo.hasNextPage` fails the walk.
+RATELIMITED). There is no cap; a page that fails, a page without a `nodes`
+array, or a page without a boolean `pageInfo.hasNextPage` fails the walk.
 
 An issue is due when its stored `updated_at` differs from the `updated_at`
 its activity was last read at (`linear_issue_activity_state`, one marker per
@@ -308,16 +308,32 @@ deleted in Linear leaves no row. A history entry becomes a
 `fact_linear_comment_detail` row with author id/name, parent comment id,
 created/updated time and `body_len` (characters); the body is not stored.
 
-The first issue that fails stops the run with a non-zero exit naming the
-issue and the connection. The team's issue rows and cursor, and issues
-written before it, are kept; the failed issue and the rest stay due, so the
-next run reads them even though the issue cursor has moved past them. Each
-pass prints one line:
+An issue Linear no longer has is a counted warning, not a failure. Only
+Linear's explicit answer counts: `issue: null`, or GraphQL errors that all
+read `Entity not found: Issue` (HTTP 200 or 400). The pass logs a warning,
+tombstones the issue (`linear_issue_activity_state.missing_for` /
+`missing_at`), and goes on to the next issue, the next team and
+`--entities`; the run exits 0 when nothing else failed. The tombstone
+deletes none of the issue's stored history or comment rows and moves
+neither marker. A tombstoned issue is not requested again while its stored
+`updated_at` is unchanged, by either flag. It is due again when its stored
+row changes, and `--backfill` requests it again; a successful read clears
+the tombstone, and another not-found answer renews it.
+
+Any other failure (5xx, timeout, spent rate-limit retries, auth error,
+another GraphQL error, a malformed page) stops the run with a non-zero exit
+naming the issue and the connection. The team's issue rows and cursor, and
+issues written before it, are kept; the failed issue and the rest stay due,
+so the next run reads them even though the issue cursor has moved past
+them. Each pass prints one line, with a warning appended when issues were
+missing:
 
 ```text
 Linear history (ENG): read 2 of 2 due issue(s); wrote 4 state transition row(s).
-Linear comments (ENG): read 2 of 2 due issue(s); wrote 2 comment row(s).
+Linear comments (ENG): read 2 of 3 due issue(s); wrote 2 comment row(s). Warning: 1 issue(s) no longer in Linear, tombstoned and skipped until they change or --backfill: ENG-2.
 ```
+
+The warning lists up to 10 identifiers, then how many more.
 
 Under `--dry-run` the line reports how many issues would be read; the pass
 sends no per-issue request.

@@ -5,7 +5,7 @@
 
 use super::*;
 use tga::collect::linear::activity::tests::{
-    activity_call, activity_page, comment_node, history_node,
+    activity_call, activity_page, comment_node, history_node, not_found_page,
 };
 use tga::collect::linear::bulk::tests::{mock_client, node, page_response};
 use tga::core::db::get_linear_cursor;
@@ -22,7 +22,12 @@ fn count(db: &Database, sql: &str) -> i64 {
 
 /// Answer ENG's issue walk with ENG-1 and ENG-2.
 async fn mount_issues(server: &MockServer) {
-    let nodes = ISSUES
+    mount_issue_list(server, &ISSUES).await;
+}
+
+/// Answer ENG's issue walk with `identifiers`.
+async fn mount_issue_list(server: &MockServer, identifiers: &[&str]) {
+    let nodes = identifiers
         .iter()
         .map(|i| node(i, "2026-01-01T00:01:00.000Z", None))
         .collect();
@@ -209,6 +214,160 @@ async fn a_failed_history_read_fails_the_sync_and_stays_due() {
             "SELECT COUNT(*) FROM fact_linear_transitions WHERE identifier = 'ENG-2'"
         ),
         2
+    );
+}
+
+/// Requests that read the issue with id `issue_id`.
+async fn requests_for(server: &MockServer, issue_id: &str) -> usize {
+    let needle = format!("\"id\":\"{issue_id}\"");
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| String::from_utf8_lossy(&r.body).contains(&needle))
+        .count()
+}
+
+/// Answer ENG's issue walk with `listed`, ENG-1's and ENG-3's activity
+/// normally, and ENG-2's with Linear's "Entity not found" error on both
+/// connections.
+async fn mount_one_missing(server: &MockServer, listed: &[&str]) {
+    mount_issue_list(server, listed).await;
+    mount_activity(server, "ENG-1").await;
+    mount_activity(server, "ENG-3").await;
+    for kind in [ActivityKind::History, ActivityKind::Comments] {
+        activity_call(kind, "uuid-ENG-2")
+            .respond_with(not_found_page())
+            .mount(server)
+            .await;
+    }
+}
+
+/// #190 step 6 (owner ruling D28: 404 = counted warning): an issue Linear no
+/// longer has does not stop the run. The issues after it are read, the
+/// missing one is counted in the summary line and tombstoned, and the run
+/// succeeds. The comments pass skips the issue the history pass tombstoned.
+#[tokio::test]
+async fn a_missing_issue_is_tombstoned_and_the_run_goes_on() {
+    let server = MockServer::start().await;
+    mount_one_missing(&server, &["ENG-1", "ENG-2", "ENG-3"]).await;
+    let mut db = Database::open_in_memory().expect("db");
+    let outcomes = run_sync_with(
+        &mock_client(&server.uri()),
+        &Config::default(),
+        &mut db,
+        &args(true, true),
+    )
+    .await
+    .expect("a missing issue must not fail the sync");
+
+    let activity = &outcomes[0].activity;
+    assert_eq!(
+        (activity[0].due, activity[0].read, activity[0].rows),
+        (3, 2, 4)
+    );
+    assert_eq!(
+        (activity[1].due, activity[1].read, activity[1].rows),
+        (2, 2, 2)
+    );
+    let line = activity[0].summary_line(false);
+    assert!(
+        line.contains("1 issue(s) no longer in Linear") && line.contains("ENG-2"),
+        "{line}"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM fact_linear_transitions WHERE identifier = 'ENG-3'"
+        ),
+        2
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM linear_issue_activity_state \
+             WHERE issue_id = 'uuid-ENG-2' AND missing_at IS NOT NULL \
+             AND history_for IS NULL AND comments_for IS NULL"
+        ),
+        1,
+        "tombstoned, with neither marker advanced"
+    );
+}
+
+/// #190 step 6: a tombstoned issue is not requested again by an incremental
+/// run and keeps the rows stored before it went missing. `--backfill`
+/// requests it again; when Linear returns it, the read clears the tombstone.
+#[tokio::test]
+async fn a_tombstoned_issue_is_skipped_until_backfill() {
+    let server = MockServer::start().await;
+    mount_issue_list(&server, &["ENG-1", "ENG-2", "ENG-3"]).await;
+    for i in ["ENG-1", "ENG-2", "ENG-3"] {
+        mount_activity(&server, i).await;
+    }
+    let client = mock_client(&server.uri());
+    let mut db = Database::open_in_memory().expect("db");
+    run_sync_with(&client, &Config::default(), &mut db, &args(true, true))
+        .await
+        .expect("first");
+    // ENG-2 changed, then was deleted before its activity was read again:
+    // its stored row is newer than its markers, and the issue walk no
+    // longer lists it.
+    db.connection()
+        .execute(
+            "UPDATE linear_issues SET updated_at = '2026-03-01T00:00:00+00:00' \
+             WHERE identifier = 'ENG-2'",
+            [],
+        )
+        .expect("touch");
+    server.reset().await;
+    mount_one_missing(&server, &["ENG-1", "ENG-3"]).await;
+    let outcomes = run_sync_with(&client, &Config::default(), &mut db, &args(true, true))
+        .await
+        .expect("missing run");
+    assert_eq!(outcomes[0].activity[0].missing, vec!["ENG-2".to_string()]);
+    assert_eq!(requests_for(&server, "uuid-ENG-2").await, 1);
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM fact_linear_transitions WHERE identifier = 'ENG-2'"
+        ),
+        2,
+        "a tombstone keeps the rows stored before the issue went missing"
+    );
+
+    let outcomes = run_sync_with(&client, &Config::default(), &mut db, &args(true, true))
+        .await
+        .expect("incremental run");
+    assert_eq!(requests_for(&server, "uuid-ENG-2").await, 1);
+    assert!(outcomes[0]
+        .activity
+        .iter()
+        .all(|a| a.due == 0 && a.missing.is_empty()));
+
+    server.reset().await;
+    mount_issue_list(&server, &["ENG-1", "ENG-2", "ENG-3"]).await;
+    for i in ["ENG-1", "ENG-2", "ENG-3"] {
+        mount_activity(&server, i).await;
+    }
+    let backfill = LinearSyncArgs {
+        backfill: true,
+        ..args(true, false)
+    };
+    let outcomes = run_sync_with(&client, &Config::default(), &mut db, &backfill)
+        .await
+        .expect("backfill");
+    assert_eq!(
+        (outcomes[0].activity[0].due, outcomes[0].activity[0].read),
+        (3, 3)
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM linear_issue_activity_state WHERE missing_at IS NOT NULL"
+        ),
+        0,
+        "a successful read clears the tombstone"
     );
 }
 

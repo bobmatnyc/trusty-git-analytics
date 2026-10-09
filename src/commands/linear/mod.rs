@@ -260,12 +260,14 @@ pub async fn run_sync(
 /// included unless `--exclude-archived`. The first team that fails stops the
 /// run with an error naming it; teams already synced keep their rows and
 /// cursors. #190 step 6: with `--history` / `--comments`,
-/// [`activity_sync::sync_activity`] runs after each team's issue pass; its
-/// failure stops the run the same way, after the team's issue rows and
-/// cursor are committed. With `--entities`, [`entity_sync::sync_entities`]
-/// runs last.
+/// [`activity_sync::sync_activity`] runs after each team's issue pass. An
+/// issue Linear no longer has is counted and tombstoned, not a failure
+/// (owner ruling D28); any other failure stops the run the same way, after
+/// the team's issue rows and cursor are committed. With `--entities`,
+/// [`entity_sync::sync_entities`] runs last.
 /// Test: `sync_tests::all_teams_syncs_each_team_under_its_own_cursor`,
 /// `activity_sync_tests::a_failed_history_read_fails_the_sync_and_stays_due`,
+/// `activity_sync_tests::a_missing_issue_is_tombstoned_and_the_run_goes_on`,
 /// `sync_tests::cap_exceeded_fails_and_writes_nothing`,
 /// `sync_tests::dry_run_reports_and_writes_nothing`,
 /// `sync_tests::second_sync_with_no_remote_change_writes_nothing`,

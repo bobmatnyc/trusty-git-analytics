@@ -8,7 +8,9 @@
 //! `updated_at` differs from the one their activity was last read at
 //! (`linear_issue_activity_state`); [`commit_issue_activity`] replaces one
 //! issue's rows for one [`ActivityKind`] and records that `updated_at`, in
-//! one transaction. A history entry that changed the workflow state is one
+//! one transaction; [`mark_issue_missing`] tombstones an issue Linear no
+//! longer has, so it is not requested again until its stored row changes or
+//! `--backfill` asks. A history entry that changed the workflow state is one
 //! `fact_linear_transitions` row; a comment is one
 //! `fact_linear_comment_detail` row holding its body length, never its body.
 //! Test: `activity::tests`; `commands::linear::activity_sync_tests`.
@@ -49,12 +51,15 @@ fn synced_column(kind: ActivityKind) -> &'static str {
 /// What: every `linear_issues` row of `team_key` with a `linear_id` whose
 /// `updated_at` differs from the `kind` marker in
 /// `linear_issue_activity_state` (no marker counts as different), ordered by
-/// identifier. `force` returns every such row regardless of the marker.
+/// identifier. A row tombstoned at its current `updated_at` (see
+/// [`mark_issue_missing`]) is left out. `force` returns every such row
+/// regardless of the marker or a tombstone.
 /// `overlay` holds issues fetched but not stored (the dry run): each replaces
 /// the stored row with its `linear_id`, or adds one. Pre-v33 rows with no
 /// `linear_id` are skipped until a sync fills it.
 /// Test: `activity::tests::candidates_are_the_rows_whose_marker_lags`,
-/// `activity::tests::overlay_counts_fetched_but_unstored_issues`.
+/// `activity::tests::overlay_counts_fetched_but_unstored_issues`,
+/// `activity::tests::a_tombstone_holds_until_the_row_changes`.
 ///
 /// # Errors
 ///
@@ -67,13 +72,15 @@ pub fn activity_candidates(
     overlay: &[LinearIssue],
 ) -> Result<Vec<ActivityTarget>> {
     let marker = marker_column(kind);
-    // `IS NOT` treats a missing marker (NULL) as different.
+    // `IS NOT` treats a missing marker (NULL) as different. #190 step 6
+    // (D28): a tombstone set at the row's current `updated_at` skips it.
     let sql = format!(
         "SELECT li.linear_id, li.identifier, li.team_key, li.updated_at \
          FROM linear_issues li \
          LEFT JOIN linear_issue_activity_state s ON s.issue_id = li.linear_id \
          WHERE li.team_key = ?1 AND li.linear_id IS NOT NULL \
-           AND (?2 OR s.{marker} IS NOT li.updated_at)"
+           AND (?2 OR (s.{marker} IS NOT li.updated_at \
+                AND (s.missing_at IS NULL OR s.missing_for IS NOT li.updated_at)))"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![team_key, force], |r| {
@@ -105,14 +112,19 @@ pub fn activity_candidates(
         }
         due.retain(|_, t| t.issue_id != issue_id);
         let updated_at = issue.updated_at.map(|d| d.to_rfc3339());
-        let current: Option<Option<String>> = conn
+        let state: Option<(Option<String>, Option<String>, Option<String>)> = conn
             .query_row(
-                &format!("SELECT {marker} FROM linear_issue_activity_state WHERE issue_id = ?1"),
+                &format!(
+                    "SELECT {marker}, missing_for, missing_at \
+                     FROM linear_issue_activity_state WHERE issue_id = ?1"
+                ),
                 params![issue_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        if force || current.flatten() != updated_at {
+        let (current, missing_for, missing_at) = state.unwrap_or_default();
+        let tombstoned = missing_at.is_some() && missing_for == updated_at;
+        if force || (current != updated_at && !tombstoned) {
             let target = ActivityTarget::new(issue_id, &issue.identifier, &team, updated_at);
             due.insert(target.identifier.clone(), target);
         }
@@ -126,8 +138,8 @@ pub fn activity_candidates(
 /// failed write would mark an issue current with no rows behind it.
 /// What: in one transaction, deletes the issue's rows from `kind`'s table,
 /// inserts one row per node (history: only entries with a `toState`), and
-/// sets the issue's `kind` marker to `target.updated_at`. Returns the rows
-/// inserted. `nodes` must be the complete list: the walk fails rather than
+/// sets the issue's `kind` marker to `target.updated_at` and clears any
+/// tombstone (Linear returned the issue). Returns the rows inserted. `nodes` must be the complete list: the walk fails rather than
 /// return a cut one.
 /// Test: `activity::tests::history_rows_hold_state_transitions_only`,
 /// `activity::tests::comment_rows_hold_metadata_not_body`,
@@ -160,17 +172,43 @@ pub fn commit_issue_activity(
     }
     let (marker, synced) = (marker_column(kind), synced_column(kind));
     // #190 step 6: same transaction as the rows, so a failed write leaves the
-    // issue due.
+    // issue due. Linear returned the issue, so a tombstone no longer holds.
     tx.execute(
         &format!(
             "INSERT INTO linear_issue_activity_state (issue_id, {marker}, {synced}) \
              VALUES (?1, ?2, ?3) ON CONFLICT(issue_id) DO UPDATE SET \
-             {marker} = excluded.{marker}, {synced} = excluded.{synced}"
+             {marker} = excluded.{marker}, {synced} = excluded.{synced}, \
+             missing_for = NULL, missing_at = NULL"
         ),
         params![target.issue_id, target.updated_at, Utc::now().to_rfc3339()],
     )?;
     tx.commit()?;
     Ok(written)
+}
+
+/// Tombstone an issue Linear says it no longer has.
+///
+/// Why: #190 step 6 (owner ruling D28: not found = counted warning) — the
+/// `linear_issues` row is never removed, so without a record the issue would
+/// be requested, and reported missing, on every run.
+/// What: sets the issue's `missing_for` to `target.updated_at` and
+/// `missing_at` to now. Neither activity marker and no stored history or
+/// comment row changes. [`activity_candidates`] skips the issue while its
+/// stored `updated_at` equals `missing_for`; a successful
+/// [`commit_issue_activity`] clears both columns.
+/// Test: `activity::tests::a_tombstone_holds_until_the_row_changes`.
+///
+/// # Errors
+///
+/// [`crate::core::errors::TgaError::DbError`] on a failed write.
+pub fn mark_issue_missing(conn: &Connection, target: &ActivityTarget) -> Result<()> {
+    conn.execute(
+        "INSERT INTO linear_issue_activity_state (issue_id, missing_for, missing_at) \
+         VALUES (?1, ?2, ?3) ON CONFLICT(issue_id) DO UPDATE SET \
+         missing_for = excluded.missing_for, missing_at = excluded.missing_at",
+        params![target.issue_id, target.updated_at, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
 }
 
 /// A required string field of an activity node.

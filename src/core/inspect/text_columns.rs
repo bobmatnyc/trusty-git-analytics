@@ -316,6 +316,8 @@ pub const CONSTRAINED: &[&str] = &[
     "linear_issue_activity_state.history_synced_at",
     "linear_issue_activity_state.comments_for",
     "linear_issue_activity_state.comments_synced_at",
+    "linear_issue_activity_state.missing_for",
+    "linear_issue_activity_state.missing_at",
     "linear_sync_cursor.team_key",
     "linear_sync_cursor.last_synced_at",
     "linear_sync_cursor.last_run_at",

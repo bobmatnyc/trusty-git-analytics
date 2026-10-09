@@ -7,7 +7,9 @@
 //! What: [`sync_activity`] and the [`ActivityOutcome`] line it reports.
 //! Test: `super::activity_sync_tests`.
 
-use tga::collect::linear::activity::store::{activity_candidates, commit_issue_activity};
+use tga::collect::linear::activity::store::{
+    activity_candidates, commit_issue_activity, mark_issue_missing,
+};
 use tga::collect::linear::{ActivityKind, LinearClient, LinearIssue};
 use tga::core::db::Database;
 
@@ -25,7 +27,13 @@ pub(crate) struct ActivityOutcome {
     pub read: usize,
     /// Rows written across those issues.
     pub rows: usize,
+    /// #190 step 6 (D28): identifiers of the issues Linear answered "not
+    /// found" for, tombstoned and not read.
+    pub missing: Vec<String>,
 }
+
+/// Identifiers a summary line lists before it says how many more there are.
+const MISSING_LISTED: usize = 10;
 
 impl ActivityOutcome {
     /// The one report line for this pass.
@@ -42,14 +50,30 @@ impl ActivityOutcome {
                 self.due
             )
         } else {
-            format!(
+            let mut line = format!(
                 "Linear {} ({}): read {} of {} due issue(s); wrote {} {what} row(s).",
                 self.kind.connection(),
                 self.team_key,
                 self.read,
                 self.due,
                 self.rows
-            )
+            );
+            // #190 step 6 (D28): a missing issue is reported, never silent.
+            if !self.missing.is_empty() {
+                let mut listed = self.missing[..self.missing.len().min(MISSING_LISTED)].join(", ");
+                if self.missing.len() > MISSING_LISTED {
+                    listed.push_str(&format!(
+                        " and {} more",
+                        self.missing.len() - MISSING_LISTED
+                    ));
+                }
+                line.push_str(&format!(
+                    " Warning: {} issue(s) no longer in Linear, tombstoned and skipped until \
+                     they change or --backfill: {listed}.",
+                    self.missing.len()
+                ));
+            }
+            line
         }
     }
 }
@@ -63,11 +87,15 @@ impl ActivityOutcome {
 /// `--backfill`: every issue of the team; `overlay` = the issues a dry run
 /// fetched but did not store). A dry run stops there and reports the count.
 /// Otherwise each issue's connection is walked in full and written with its
-/// marker in one transaction, in identifier order. The first issue that fails
-/// stops the pass with an error naming it; issues written before it keep
-/// their rows and markers, it and the rest stay due.
+/// marker in one transaction, in identifier order. An issue Linear answers
+/// "not found" for is tombstoned with [`mark_issue_missing`], logged at warn
+/// and counted in `missing`; the pass goes on (owner ruling D28). Any other
+/// failure stops the pass with an error naming the issue; issues written
+/// before it keep their rows and markers, it and the rest stay due.
 /// Test: `super::activity_sync_tests::history_and_comments_land_for_every_issue`,
 /// `super::activity_sync_tests::a_failed_history_read_fails_the_sync_and_stays_due`,
+/// `super::activity_sync_tests::a_missing_issue_is_tombstoned_and_the_run_goes_on`,
+/// `super::activity_sync_tests::a_tombstoned_issue_is_skipped_until_backfill`,
 /// `super::activity_sync_tests::unchanged_issues_are_not_read_again`,
 /// `super::activity_sync_tests::dry_run_counts_due_issues_and_sends_no_activity_request`.
 ///
@@ -90,6 +118,7 @@ pub(super) async fn sync_activity(
         due: targets.len(),
         read: 0,
         rows: 0,
+        missing: Vec::new(),
     };
     tracing::info!(
         team = %team_key,
@@ -118,6 +147,20 @@ pub(super) async fn sync_activity(
                     outcome.due
                 ))
             })?;
+        // #190 step 6 (D28): Linear's explicit "not found" for this issue is
+        // a counted warning. The tombstone keeps it from being requested on
+        // every run; its stored rows and markers are left as they are.
+        let Some(nodes) = nodes else {
+            tracing::warn!(
+                team = %team_key,
+                issue = %target.identifier,
+                connection = kind.connection(),
+                "Linear no longer has this issue; tombstoned"
+            );
+            mark_issue_missing(db.connection(), target)?;
+            outcome.missing.push(target.identifier.clone());
+            continue;
+        };
         outcome.rows += commit_issue_activity(db, target, kind, &nodes)?;
         outcome.read += 1;
     }

@@ -147,25 +147,32 @@ fn activity_error(err: CollectError, kind: ActivityKind, identifier: &str) -> Co
 }
 
 impl LinearClient {
-    /// Walk every page of one issue's history or comments.
+    /// Walk every page of one issue's history or comments; `None` when
+    /// Linear says the issue does not exist.
     ///
     /// Why: #190 step 6 — the store replaces an issue's rows with what this
     /// returns, so a cut list would delete rows; the walk finishes or fails.
+    /// An issue Linear no longer has is an answer, not a failure (owner
+    /// ruling D28): the caller counts and tombstones it.
     /// What: sends [`query_for`] with `issue(id:)` = `target.issue_id`,
     /// follows `endCursor` until `hasNextPage` is false, and returns every
     /// node as Linear sent it. A 429/503 or RATELIMITED 400 is retried with
-    /// backoff. A page with no `nodes` array (including `issue: null`) or no
-    /// boolean `hasNextPage` is an error, never the last page. No cap.
+    /// backoff. Returns `Ok(None)` only for Linear's explicit not-found
+    /// answer on any page: `data.issue` present and null, or a GraphQL
+    /// `errors` array that is all `Entity not found: Issue`. Any other page
+    /// with no `nodes` array, or no boolean `hasNextPage`, is an error, never
+    /// the last page. No cap.
     /// Test: `activity::tests::history_walk_follows_every_page`,
     /// `activity::tests::comments_walk_follows_every_page`,
     /// `activity::tests::a_page_error_fails_the_walk`,
-    /// `activity::tests::a_missing_issue_fails_the_walk`,
+    /// `activity::tests::only_linear_not_found_reads_as_a_missing_issue`,
     /// `activity::tests::a_page_without_page_info_fails_the_walk`.
     ///
     /// # Errors
     ///
     /// - [`CollectError::LinearActivityApi`] on a non-2xx, a GraphQL
-    ///   `errors` array, or a response with no `nodes` array.
+    ///   `errors` array other than the not-found one, or a response with no
+    ///   `nodes` array.
     /// - [`CollectError::PagingBudgetExceeded`] when the cursor stops moving.
     /// - [`CollectError::LinearPageInfoInvalid`] when a page has no boolean
     ///   `hasNextPage`, or says more follow with a null `endCursor`.
@@ -175,7 +182,7 @@ impl LinearClient {
         &self,
         target: &ActivityTarget,
         kind: ActivityKind,
-    ) -> Result<Vec<serde_json::Value>> {
+    ) -> Result<Option<Vec<serde_json::Value>>> {
         let query = query_for(kind);
         let connection = kind.connection();
         let mut guard = PageGuard::new(kind.endpoint(), &target.identifier);
@@ -191,17 +198,28 @@ impl LinearClient {
                     "includeArchived": true,
                 },
             });
-            let mut data = with_retry(
+            let fetched = with_retry(
                 "linear issue activity page",
                 &self.retry,
                 &self.budget,
                 || self.post_bulk(&body, &target.identifier, page_number),
             )
-            .await
-            .map_err(|e| activity_error(e, kind, &target.identifier))?;
+            .await;
+            let mut data = match fetched {
+                // #190 step 6 (D28): Linear's not-found answer for this issue.
+                Err(CollectError::LinearNotFound { entity, .. }) if entity == "Issue" => {
+                    return Ok(None);
+                }
+                other => other.map_err(|e| activity_error(e, kind, &target.identifier))?,
+            };
+            // #190 step 6 (D28): `issue: null` is the same answer. A missing
+            // `issue` key, or an issue with no connection, is not.
+            if data.get("issue").is_some_and(serde_json::Value::is_null) {
+                return Ok(None);
+            }
             let page = data["issue"][connection].take();
-            // #190 step 6: `issue: null` or a missing `nodes` array is an
-            // error; read as empty, the store would delete the issue's rows.
+            // #190 step 6: a missing `nodes` array is an error; read as
+            // empty, the store would delete the issue's rows.
             let Some(rows) = page["nodes"].as_array() else {
                 return Err(CollectError::LinearActivityApi {
                     status: 200,
@@ -233,7 +251,7 @@ impl LinearClient {
                 None => break,
             }
         }
-        Ok(nodes)
+        Ok(Some(nodes))
     }
 }
 
