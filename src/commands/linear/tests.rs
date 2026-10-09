@@ -1,9 +1,10 @@
 //! Tests for `tga linear sync` / `tga linear freshness` (issue #7139).
 //!
-//! Bulk-page fetch, pagination, timestamp mapping and empty-team coverage
-//! live in `collect::linear::client::tests::bulk_sync` (mock HTTP, no real
-//! network) — this module covers what sits above the HTTP layer: team-key
-//! resolution and freshness reporting against an in-memory database.
+//! Bulk-page fetch, pagination, archived and cap coverage live in
+//! `collect::linear::bulk::tests`, and the end-to-end sync runs in
+//! `super::sync_tests` (#190; mock HTTP, no real network) — this module
+//! covers team-key resolution and freshness reporting against an in-memory
+//! database.
 
 use super::*;
 use tga::core::config::LinearConfig;
