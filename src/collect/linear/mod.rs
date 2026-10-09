@@ -10,6 +10,7 @@ pub mod bulk;
 pub mod client;
 pub mod entities;
 pub mod issue;
+pub(crate) mod projection;
 pub mod store;
 pub mod sync;
 

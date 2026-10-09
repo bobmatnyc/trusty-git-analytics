@@ -31,6 +31,9 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod linear_effort_tests;
+
 // Re-export the public CLI types so callers (`commands/mod.rs`) import from
 // one location instead of digging into submodules.
 pub use types::BackfillArgs;

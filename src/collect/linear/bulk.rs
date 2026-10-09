@@ -139,11 +139,19 @@ impl PageGuard {
 impl LinearClient {
     /// POST one bulk GraphQL request and return its `data` object.
     ///
-    /// Why: one place maps 429/503 to [`CollectError::Throttled`] (retried by
-    /// `with_retry`), any other non-2xx or a GraphQL `errors` array to
-    /// [`CollectError::LinearBulkApi`], with the body scrubbed of the key.
+    /// Why: one place maps 429/503 — and, since #190 step 3, Linear's rate
+    /// limit, an HTTP 400 whose `errors[].extensions.code` is `RATELIMITED` —
+    /// to [`CollectError::Throttled`] (retried by `with_retry` under the
+    /// client's policy and budget), any other non-2xx or a GraphQL `errors`
+    /// array to [`CollectError::LinearBulkApi`], with the body scrubbed of
+    /// the key.
     /// What: one un-retried attempt; callers wrap it in `with_retry`, because
-    /// a `reqwest::RequestBuilder` is single-use.
+    /// a `reqwest::RequestBuilder` is single-use. A RATELIMITED wait is the
+    /// `Retry-After` header when sent, else [`ratelimit_reset_delay`], else
+    /// the policy's own backoff.
+    /// Test: `ratelimited_400_is_retried_like_a_429`,
+    /// `ratelimited_past_the_retry_policy_fails`, `other_400_is_not_retried`,
+    /// `ratelimited_retry_waits_for_the_exhausted_window_reset`.
     pub(super) async fn post_bulk(
         &self,
         body: &serde_json::Value,
@@ -160,20 +168,23 @@ impl LinearClient {
             .await
             .map_err(CollectError::Http)?;
         let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS
             || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
         {
-            let retry_after = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
             return Err(CollectError::Throttled {
                 status: status.as_u16(),
                 retry_after,
             });
         }
+        // #190: Linear reports a rate limit as HTTP 400 with a RATELIMITED
+        // GraphQL error; it is a throttle, so `with_retry` waits and retries.
+        let reset_wait = ratelimit_reset_delay(resp.headers(), Utc::now().timestamp_millis());
         let bulk_error = |message: String| CollectError::LinearBulkApi {
             status: status.as_u16(),
             team_key: scope.to_string(),
@@ -182,6 +193,12 @@ impl LinearClient {
         };
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::BAD_REQUEST && is_ratelimited(&text) {
+                return Err(CollectError::Throttled {
+                    status: status.as_u16(),
+                    retry_after: retry_after.or(reset_wait),
+                });
+            }
             return Err(bulk_error(redacted_body_excerpt(&text, &self.api_key)));
         }
         let mut json: serde_json::Value = resp.json().await.map_err(CollectError::Http)?;
@@ -368,6 +385,50 @@ impl LinearClient {
         }
         Ok(teams)
     }
+}
+
+/// Whether a Linear error body carries a `RATELIMITED` GraphQL error code
+/// (#190 step 3). Linear's rate-limit documentation: HTTP 400 with
+/// `errors[].extensions.code = "RATELIMITED"`.
+fn is_ratelimited(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["errors"].as_array().cloned())
+        .is_some_and(|errors| {
+            errors
+                .iter()
+                .any(|e| e["extensions"]["code"].as_str() == Some("RATELIMITED"))
+        })
+}
+
+/// The wait until the exhausted Linear rate-limit window resets.
+///
+/// Why: #190 step 3 — retrying a RATELIMITED request before its window
+/// resets only spends the retry budget.
+/// What: for each window Linear documents (`X-RateLimit-Requests-*`,
+/// `X-RateLimit-Complexity-*`, `X-RateLimit-Endpoint-Requests-*`) whose
+/// `Remaining` header is 0 or less, the time from `now_ms` to its `Reset`
+/// header (UTC epoch milliseconds); the longest such wait, never negative.
+/// `None` when no window reports itself exhausted, so the policy's own
+/// backoff applies. The retry budget still caps the sleep.
+/// Test: `ratelimited_retry_waits_for_the_exhausted_window_reset`.
+fn ratelimit_reset_delay(
+    headers: &reqwest::header::HeaderMap,
+    now_ms: i64,
+) -> Option<std::time::Duration> {
+    let number = |name: String| -> Option<i64> {
+        headers
+            .get(name.as_str())
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<i64>().ok())
+    };
+    ["requests", "complexity", "endpoint-requests"]
+        .into_iter()
+        .filter(|w| number(format!("x-ratelimit-{w}-remaining")).is_some_and(|r| r <= 0))
+        .filter_map(|w| number(format!("x-ratelimit-{w}-reset")))
+        .map(|reset| u64::try_from(reset.saturating_sub(now_ms)).unwrap_or(0))
+        .max()
+        .map(std::time::Duration::from_millis)
 }
 
 #[cfg(test)]

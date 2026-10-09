@@ -226,6 +226,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "linear_reference_entities",
         sql: include_str!("../sql/0034_linear_reference_entities.sql"),
     },
+    // #190 step 3: `work_items.stable_id` (the Linear issue id) and
+    // `linear_sync_cursor.fields_version`; additive, see the SQL file header.
+    Migration {
+        version: 35,
+        name: "linear_work_item_key",
+        sql: include_str!("../sql/0035_linear_work_item_key.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

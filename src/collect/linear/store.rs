@@ -10,8 +10,12 @@
 //! same plan in one transaction; [`store_linear_issues`] is the count-only
 //! wrapper the per-commit path uses. The lookup order is: the row with this
 //! `linear_id`; else the row with this `identifier` whose `linear_id` is NULL
-//! (a pre-v33 row, filled in place). An unchanged issue — same `linear_id`,
-//! identifier and `updatedAt`, raw node already stored — is not written.
+//! (a pre-v33 row, filled in place); else (#190 step 3) a NULL-`linear_id`
+//! row under one of the issue's `previousIdentifiers` — an issue that moved
+//! team before its first post-v33 sync — adopted in place. Any other
+//! NULL-`linear_id` row under a previous identifier is a stale copy of the
+//! same issue and is deleted. An unchanged issue — same `linear_id`,
+//! identifier and stored node — is not written.
 //! Test: `tests` below.
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -77,35 +81,53 @@ struct Action {
     change: IssueChange,
     /// The row to update; `None` inserts.
     row_id: Option<i64>,
-    /// A pre-v33 row (NULL `linear_id`) holding the identifier a moved issue
-    /// now carries. Linear never gives one identifier to two issues, so it is
-    /// a stale copy of this same issue; it is deleted so the UNIQUE
-    /// `identifier` index admits the move.
-    evict: Option<i64>,
+    /// Pre-v33 rows (NULL `linear_id`) that are stale copies of this issue:
+    /// the one holding the identifier a moved issue now carries, and (#190
+    /// step 3) any under one of its `previousIdentifiers`. Linear never gives
+    /// one identifier to two issues, so each is deleted — the first so the
+    /// UNIQUE `identifier` index admits the move.
+    evict: Vec<i64>,
 }
 
 /// Resolve the action for `issue` against `conn`, reading only.
 fn plan_one(conn: &Connection, issue: &LinearIssue) -> Result<Action> {
-    let updated = issue.updated_at.map(|d| d.to_rfc3339());
+    let mut action = plan_row(conn, issue)?;
+    // #190 step 3: an issue moved before its first post-v33 sync left a
+    // pre-v33 row under the identifier it moved from.
+    for previous in &issue.previous_identifiers {
+        if let Some(id) = legacy_row_under(conn, previous)? {
+            if action.row_id != Some(id) && !action.evict.contains(&id) {
+                action.evict.push(id);
+            }
+        }
+    }
+    Ok(action)
+}
+
+/// The row `issue` writes to, and how it changes; [`plan_one`] adds the
+/// stale copies under previous identifiers.
+fn plan_row(conn: &Connection, issue: &LinearIssue) -> Result<Action> {
     if let Some(lid) = &issue.linear_id {
-        let found: Option<(i64, String, Option<String>, bool)> = conn
+        let found: Option<(i64, String, Option<String>)> = conn
             .query_row(
-                "SELECT id, identifier, updated_at, raw_json IS NOT NULL \
-                 FROM linear_issues WHERE linear_id = ?1",
+                "SELECT id, identifier, raw_json FROM linear_issues WHERE linear_id = ?1",
                 params![lid],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        if let Some((row_id, identifier, stored_updated, has_raw)) = found {
+        if let Some((row_id, identifier, stored_raw)) = found {
             if identifier != issue.identifier {
                 let evict = identifier_holder(conn, &issue.identifier, row_id, lid)?;
                 return Ok(Action {
                     change: IssueChange::Moved,
                     row_id: Some(row_id),
-                    evict,
+                    evict: evict.into_iter().collect(),
                 });
             }
-            let same = has_raw && updated.is_some() && stored_updated == updated;
+            // #190 step 3: compare the stored node, not `updatedAt` alone, so
+            // a field added to the query rewrites an issue that did not change.
+            let fresh = issue.raw.as_ref().map(serde_json::Value::to_string);
+            let same = fresh.is_some() && stored_raw == fresh;
             return Ok(Action {
                 change: if same {
                     IssueChange::Unchanged
@@ -113,7 +135,7 @@ fn plan_one(conn: &Connection, issue: &LinearIssue) -> Result<Action> {
                     IssueChange::Changed
                 },
                 row_id: Some(row_id),
-                evict: None,
+                evict: Vec::new(),
             });
         }
     }
@@ -125,21 +147,54 @@ fn plan_one(conn: &Connection, issue: &LinearIssue) -> Result<Action> {
         )
         .optional()?;
     match (by_identifier, &issue.linear_id) {
-        (None, _) => Ok(Action {
+        (None, Some(_)) => adopt_previous(conn, issue),
+        (None, None) => Ok(Action {
             change: IssueChange::New,
             row_id: None,
-            evict: None,
+            evict: Vec::new(),
         }),
         // A pre-v33 row, or an id-less payload: update the row in place.
         (Some((row_id, None)), _) | (Some((row_id, Some(_))), None) => Ok(Action {
             change: IssueChange::Changed,
             row_id: Some(row_id),
-            evict: None,
+            evict: Vec::new(),
         }),
         (Some((_, Some(other))), Some(lid)) => {
             Err(identifier_conflict(&issue.identifier, &other, lid))
         }
     }
+}
+
+/// An issue no row holds yet: adopt the first pre-v33 row under one of its
+/// `previousIdentifiers` (#190 step 3), else insert.
+fn adopt_previous(conn: &Connection, issue: &LinearIssue) -> Result<Action> {
+    for previous in &issue.previous_identifiers {
+        if let Some(row_id) = legacy_row_under(conn, previous)? {
+            return Ok(Action {
+                change: IssueChange::Moved,
+                row_id: Some(row_id),
+                evict: Vec::new(),
+            });
+        }
+    }
+    Ok(Action {
+        change: IssueChange::New,
+        row_id: None,
+        evict: Vec::new(),
+    })
+}
+
+/// The row holding `identifier` when its `linear_id` is NULL (a pre-v33
+/// row). A row with a `linear_id` belongs to the issue that id names and is
+/// never returned.
+fn legacy_row_under(conn: &Connection, identifier: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM linear_issues WHERE identifier = ?1 AND linear_id IS NULL",
+            params![identifier],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// The row other than `row_id` that holds `identifier`, when it is a pre-v33
@@ -201,11 +256,14 @@ pub fn plan_linear_issues(conn: &Connection, issues: &[LinearIssue]) -> Result<V
 /// Why: see the module docs — a moved issue must update one row, and a
 /// re-sync with no remote change must write nothing.
 /// What: resolves each issue with [`plan_one`] inside the transaction, so a
-/// batch sees its own earlier writes; inserts, updates in place, or skips.
-/// Returns one [`IssueChange`] per input, in order. A failure rolls the whole
-/// batch back.
+/// batch sees its own earlier writes; deletes the stale pre-v33 copies the
+/// plan names, then inserts, updates in place, or skips. Returns one
+/// [`IssueChange`] per input, in order. A failure rolls the whole batch back.
 /// Test: `moved_issue_updates_one_row`, `legacy_row_is_filled_in_place`,
-/// `unchanged_issue_is_not_rewritten`, `identifier_held_by_another_id_errors`.
+/// `unchanged_issue_is_not_rewritten`, `identifier_held_by_another_id_errors`,
+/// `orphan_under_a_previous_identifier_is_adopted`,
+/// `stale_copy_under_a_previous_identifier_is_evicted`,
+/// `widened_field_set_rewrites_an_issue_with_the_same_updated_at`.
 ///
 /// # Errors
 ///
@@ -243,7 +301,7 @@ pub fn upsert_linear_issues_in(
     let mut out = Vec::with_capacity(issues.len());
     for issue in issues {
         let action = plan_one(conn, issue)?;
-        if let Some(evict) = action.evict {
+        for evict in &action.evict {
             conn.execute("DELETE FROM linear_issues WHERE id = ?1", params![evict])?;
         }
         if action.change != IssueChange::Unchanged {
