@@ -126,8 +126,10 @@ fn as_of_moves_windows_and_overdue_projects() {
 
 #[test]
 fn config_bounds_reach_the_output() {
-    let mut linear = LinearConfig::default();
-    linear.stats = serde_yaml::from_str("field_use_created_since: 2026-01-01\n").expect("stats");
+    let linear = LinearConfig {
+        stats: serde_yaml::from_str("field_use_created_since: 2026-01-01\n").expect("stats"),
+        ..Default::default()
+    };
     let config = Config {
         linear: Some(linear),
         ..Default::default()
