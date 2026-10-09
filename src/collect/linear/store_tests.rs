@@ -436,3 +436,60 @@ fn store_linear_issues_handles_missing_assignee() {
         .expect("row");
     assert_eq!(assignee, None);
 }
+
+/// The `linear_comment_due` rows, in issue-id order.
+fn due_rows(db: &Database) -> Vec<(String, String, String)> {
+    let conn = db.connection();
+    let mut stmt = conn
+        .prepare("SELECT issue_id, team_key, reason FROM linear_comment_due ORDER BY issue_id")
+        .expect("prepare");
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query")
+        .collect::<std::result::Result<_, _>>()
+        .expect("rows")
+}
+
+/// #190: `tga collect` writes `linear_issues` through `store_linear_issues`.
+/// An issue it sees moved into a team, or new to a team but created before
+/// the team's comment window, must be queued for a full comment read, keyed
+/// on the issue's own team cursor. A team with no cursor queues nothing; a
+/// re-run of the same batch queues no second row.
+#[test]
+fn store_linear_issues_queues_comment_reads_for_moved_and_old_new_issues() {
+    let db = Database::open_in_memory().expect("db");
+    store_linear_issues(
+        &db,
+        &[
+            issue("uuid-5", "OPS-3", "OPS", "2026-01-01T00:00:00Z"),
+            issue("uuid-8", "ENG-8", "ENG", "2026-01-01T00:00:00Z"),
+        ],
+    )
+    .expect("first store");
+    // ENG has a comment cursor; DES has none.
+    db.connection()
+        .execute(
+            "INSERT INTO linear_comment_cursor \
+             (team_key, cursor_updated_at, last_run_at, comments_synced) \
+             VALUES ('ENG', '2026-01-10T00:00:00+00:00', '2026-01-10T00:00:00+00:00', 1)",
+            [],
+        )
+        .expect("ENG cursor");
+
+    let batch = [
+        // Moved OPS -> ENG: queued under ENG.
+        issue("uuid-5", "ENG-5", "ENG", "2026-01-11T00:00:00Z"),
+        // Moved ENG -> DES: DES has no cursor, so its next walk reads it all.
+        issue("uuid-8", "DES-1", "DES", "2026-01-11T00:00:00Z"),
+        // New to ENG, created 2026-01-01, before ENG's window: queued.
+        issue("uuid-9", "ENG-9", "ENG", "2026-01-11T00:00:00Z"),
+    ];
+    store_linear_issues(&db, &batch).expect("second store");
+    let expected = vec![
+        ("uuid-5".to_string(), "ENG".to_string(), "moved".to_string()),
+        ("uuid-9".to_string(), "ENG".to_string(), "new".to_string()),
+    ];
+    assert_eq!(due_rows(&db), expected);
+
+    store_linear_issues(&db, &batch).expect("re-run");
+    assert_eq!(due_rows(&db), expected, "a re-run queues no second row");
+}

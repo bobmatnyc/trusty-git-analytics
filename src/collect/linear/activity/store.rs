@@ -13,11 +13,16 @@
 //! `--backfill` asks. A history entry that changed the workflow state is one
 //! `fact_linear_transitions` row; a comment is one
 //! `fact_linear_comment_detail` row holding its body length, never its body.
-//! Test: `activity::tests`; `commands::linear::activity_sync_tests`.
+//! #190: [`commit_team_comments_with_due`] writes the incremental comments
+//! walk, the full read of issues moved into the team, the team's
+//! `linear_comment_cursor` (v37) and the emptied `linear_comment_due` (v38)
+//! in one transaction.
+//! Test: `activity::tests`; `activity::comment_walk_tests`;
+//! `commands::linear::activity_sync_tests`.
 
 use std::collections::BTreeMap;
 
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value as Json;
 
@@ -139,7 +144,8 @@ pub fn activity_candidates(
 /// What: in one transaction, deletes the issue's rows from `kind`'s table,
 /// inserts one row per node (history: only entries with a `toState`), and
 /// sets the issue's `kind` marker to `target.updated_at` and clears any
-/// tombstone (Linear returned the issue). Returns the rows inserted. `nodes` must be the complete list: the walk fails rather than
+/// tombstone (Linear returned the issue). A comments write also deletes the
+/// issue's `linear_comment_due` row (#190). Returns the rows inserted. `nodes` must be the complete list: the walk fails rather than
 /// return a cut one.
 /// Test: `activity::tests::history_rows_hold_state_transitions_only`,
 /// `activity::tests::comment_rows_hold_metadata_not_body`,
@@ -169,6 +175,14 @@ pub fn commit_issue_activity(
             ActivityKind::Comments => insert_comment(&tx, target, node, synced_at)?,
         };
         written += usize::from(inserted);
+    }
+    // #190: a per-issue comments walk is a full read; the issue is no longer
+    // due for the incremental pass.
+    if kind == ActivityKind::Comments {
+        tx.execute(
+            "DELETE FROM linear_comment_due WHERE issue_id = ?1",
+            params![target.issue_id],
+        )?;
     }
     let (marker, synced) = (marker_column(kind), synced_column(kind));
     // #190 step 6: same transaction as the rows, so a failed write leaves the
@@ -285,4 +299,201 @@ fn insert_comment(
         ],
     )?;
     Ok(true)
+}
+
+/// The stored cursor of `team_key`'s incremental comments walk: the newest
+/// comment `updatedAt` a completed walk stored, or `None` before the first.
+///
+/// Why: #190 — the incremental `--comments` pass reads comments updated
+/// after this, minus [`super::comments::COMMENT_OVERLAP`].
+/// What: reads `linear_comment_cursor.cursor_updated_at` (migration v37).
+/// Test: `commands::linear::comment_cursor_tests::an_overlap_re_read_writes_no_duplicate`.
+///
+/// # Errors
+///
+/// [`crate::core::errors::TgaError::DbError`] on a failed read;
+/// [`crate::core::errors::TgaError::ValidationError`] when the stored value
+/// is not RFC 3339.
+pub fn comment_cursor(conn: &Connection, team_key: &str) -> Result<Option<DateTime<Utc>>> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT cursor_updated_at FROM linear_comment_cursor WHERE team_key = ?1",
+            params![team_key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    stored.as_deref().map(parse_instant).transpose()
+}
+
+/// What [`commit_team_comments`] wrote.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TeamCommentsWrite {
+    /// Comment rows upserted.
+    pub written: usize,
+    /// Of those, comments whose issue has no `linear_issues` row yet (created
+    /// after the issue pass, or never synced). Stored all the same.
+    pub unlinked: usize,
+    /// Comments with no issue (Linear also has comments on project updates
+    /// and documents). Not stored: the table keys a comment by its issue.
+    pub no_issue: usize,
+    /// The team's cursor after the write; `None` when no comment has ever
+    /// been stored for the team.
+    pub cursor: Option<DateTime<Utc>>,
+}
+
+/// The full read of the issues queued in `linear_comment_due` for a team.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct DueComments {
+    /// The queued issue ids the pass read; their rows are deleted.
+    pub issue_ids: Vec<String>,
+    /// Every comment of those issues, as Linear returned them.
+    pub nodes: Vec<Json>,
+}
+
+impl DueComments {
+    /// Build the read.
+    #[must_use]
+    pub fn new(issue_ids: Vec<String>, nodes: Vec<Json>) -> Self {
+        Self { issue_ids, nodes }
+    }
+}
+
+/// [`commit_team_comments_with_due`] with nothing queued.
+///
+/// # Errors
+///
+/// As [`commit_team_comments_with_due`].
+pub fn commit_team_comments(
+    db: &mut Database,
+    team_key: &str,
+    nodes: &[Json],
+    walk_started: DateTime<Utc>,
+) -> Result<TeamCommentsWrite> {
+    commit_team_comments_with_due(db, team_key, nodes, &DueComments::default(), walk_started)
+}
+
+/// Upsert one team's comments walk and the full read of its due issues,
+/// advance its cursor and empty the read queue rows, in one transaction.
+///
+/// Why: #190 (Fail-Open check) — the cursor must move only when every
+/// comment the walk returned is stored, and never past a comment it did not
+/// store.
+/// What: upserts each node by comment id (an overlap re-read rewrites its
+/// row; an edit updates it), with the identifier and team key Linear gave its
+/// issue; counts the comments whose issue has no `linear_issues` row
+/// (`unlinked`) and skips, counting, those with no issue (`no_issue`). Then
+/// refreshes the identifier and team key of every stored comment of the
+/// team's issues from `linear_issues`, so a moved issue's rows follow it.
+/// The cursor becomes the newest `updatedAt` stored, capped at
+/// `walk_started` (a comment edited during a long walk is re-read next time),
+/// and never moves backward. No stored comment leaves it as it was.
+/// #190: `due.nodes` are upserted the same way but do not move the cursor
+/// (they lie outside the team walk's window); each of `due.issue_ids` loses
+/// its `linear_comment_due` row.
+/// Test: `activity::comment_walk_tests::the_write_counts_unlinked_and_issueless_comments`,
+/// `activity::comment_walk_tests::a_malformed_node_writes_nothing`,
+/// `activity::comment_walk_tests::a_node_without_an_issue_key_writes_nothing`,
+/// `commands::linear::comment_cursor_tests::an_edited_comment_is_read_without_an_issue_change`,
+/// `commands::linear::comment_cursor_tests::a_moved_issues_old_comments_are_read_in_full`.
+///
+/// # Errors
+///
+/// [`crate::core::errors::TgaError::DbError`] on SQL failure;
+/// [`crate::core::errors::TgaError::ValidationError`] on a node without an
+/// `issue` key, `id`, `createdAt` or RFC 3339 `updatedAt`, or an issue
+/// without an `id` or `identifier`. Nothing is written then.
+pub fn commit_team_comments_with_due(
+    db: &mut Database,
+    team_key: &str,
+    nodes: &[Json],
+    due: &DueComments,
+    walk_started: DateTime<Utc>,
+) -> Result<TeamCommentsWrite> {
+    let synced_at = Utc::now().timestamp();
+    let tx = db.connection_mut().transaction()?;
+    let mut write = TeamCommentsWrite::default();
+    let mut newest: Option<DateTime<Utc>> = None;
+    let walked = nodes.iter().map(|n| (n, true));
+    for (node, moves_cursor) in walked.chain(due.nodes.iter().map(|n| (n, false))) {
+        // #190: `issue: null` is a comment on a document or project update;
+        // a node with no `issue` key at all is malformed.
+        let Some(issue) = node.get("issue") else {
+            return Err(TgaError::ValidationError(
+                "Linear comments node has no `issue` key".to_string(),
+            ));
+        };
+        if issue.is_null() {
+            write.no_issue += 1;
+            continue;
+        }
+        let updated = parse_instant(required(node, "updatedAt", ActivityKind::Comments)?)?;
+        let issue_id = required(issue, "id", ActivityKind::Comments)?;
+        let target = ActivityTarget::new(
+            issue_id,
+            required(issue, "identifier", ActivityKind::Comments)?,
+            issue["team"]["key"].as_str().unwrap_or(team_key),
+            None,
+        );
+        insert_comment(&tx, &target, node, synced_at)?;
+        let known: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM linear_issues WHERE linear_id = ?1)",
+            params![issue_id],
+            |r| r.get(0),
+        )?;
+        write.unlinked += usize::from(!known);
+        write.written += 1;
+        if moves_cursor {
+            newest = newest.max(Some(updated));
+        }
+    }
+    // #190: same transaction as the rows, so a failed write leaves the
+    // issues due.
+    for issue_id in &due.issue_ids {
+        tx.execute(
+            "DELETE FROM linear_comment_due WHERE issue_id = ?1",
+            params![issue_id],
+        )?;
+    }
+    // #190: the rows' identifier and team key are the issue's when the
+    // comment was last read; a move does not touch the comment.
+    tx.execute(
+        "UPDATE fact_linear_comment_detail SET \
+           identifier = (SELECT identifier FROM linear_issues WHERE linear_id = issue_id), \
+           team_key = (SELECT team_key FROM linear_issues WHERE linear_id = issue_id) \
+         WHERE issue_id IN (SELECT linear_id FROM linear_issues WHERE team_key = ?1) \
+           AND (identifier IS NOT (SELECT identifier FROM linear_issues WHERE linear_id = issue_id) \
+             OR team_key IS NOT (SELECT team_key FROM linear_issues WHERE linear_id = issue_id))",
+        params![team_key],
+    )?;
+    let stored = comment_cursor(&tx, team_key)?;
+    write.cursor = stored;
+    if let Some(newest) = newest {
+        // #190: never past the walk's start, never backward.
+        let capped = newest.min(walk_started);
+        let next = stored.map_or(capped, |s| s.max(capped));
+        tx.execute(
+            "INSERT INTO linear_comment_cursor \
+             (team_key, cursor_updated_at, last_run_at, comments_synced) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(team_key) DO UPDATE SET cursor_updated_at = excluded.cursor_updated_at, \
+             last_run_at = excluded.last_run_at, comments_synced = excluded.comments_synced",
+            params![
+                team_key,
+                next.to_rfc3339_opts(SecondsFormat::Millis, true),
+                Utc::now().to_rfc3339(),
+                i64::try_from(write.written).unwrap_or(i64::MAX),
+            ],
+        )?;
+        write.cursor = Some(next);
+    }
+    tx.commit()?;
+    Ok(write)
+}
+
+/// Parse an RFC 3339 instant from Linear or the cursor table.
+fn parse_instant(s: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| TgaError::ValidationError(format!("not an RFC 3339 instant `{s}`: {e}")))
 }

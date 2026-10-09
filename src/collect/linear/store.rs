@@ -20,6 +20,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use super::activity::due::queue_comment_reads;
 use super::issue::LinearIssue;
 use crate::core::db::Database;
 use crate::core::errors::{Result, TgaError};
@@ -287,7 +288,11 @@ pub fn upsert_linear_issues(db: &Database, issues: &[LinearIssue]) -> Result<Vec
 /// that every later sync reports unchanged and never projects.
 /// What: the same per-issue plan, evict and write as [`upsert_linear_issues`],
 /// run on `conn`, which should be an open transaction; nothing commits here.
-/// Test: `commands::linear::sync_tests::failed_work_items_write_is_repaired_by_the_next_sync`.
+/// Then [`queue_comment_reads`] records, on the same connection, the moved
+/// and older-new issues whose comments their team's next incremental walk
+/// cannot see (#190).
+/// Test: `commands::linear::sync_tests::failed_work_items_write_is_repaired_by_the_next_sync`,
+/// `store_linear_issues_queues_comment_reads_for_moved_and_old_new_issues`.
 ///
 /// # Errors
 ///
@@ -309,6 +314,10 @@ pub fn upsert_linear_issues_in(
         }
         out.push(action.change);
     }
+    // #190: queue the comment re-read here, so every writer of
+    // `linear_issues` (`tga collect` and `tga linear sync`) records a moved or
+    // older-new issue in the same transaction as its row.
+    queue_comment_reads(conn, issues, &out)?;
     Ok(out)
 }
 
