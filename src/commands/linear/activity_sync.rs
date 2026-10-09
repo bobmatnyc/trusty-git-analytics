@@ -83,21 +83,43 @@ pub(super) async fn sync_activity(
     dry_run: bool,
     overlay: &[LinearIssue],
 ) -> anyhow::Result<ActivityOutcome> {
-    // Red skeleton (#190 step 6).
-    let _ = (
-        client,
-        db,
-        force,
-        dry_run,
-        overlay,
-        activity_candidates,
-        commit_issue_activity,
-    );
-    Ok(ActivityOutcome {
+    let targets = activity_candidates(db.connection(), team_key, kind, force, overlay)?;
+    let mut outcome = ActivityOutcome {
         team_key: team_key.to_string(),
         kind,
-        due: 0,
+        due: targets.len(),
         read: 0,
         rows: 0,
-    })
+    };
+    tracing::info!(
+        team = %team_key,
+        connection = kind.connection(),
+        due = targets.len(),
+        force,
+        dry_run,
+        "starting Linear issue activity pass"
+    );
+    // #190 step 6: a dry run reports the count; it sends no per-issue request.
+    if dry_run {
+        return Ok(outcome);
+    }
+    for target in &targets {
+        // #190 step 6 (Fail-Open check): an API error stops the pass. The
+        // issue's marker stays where it was, so the issue stays due.
+        let nodes = client
+            .fetch_issue_activity(target, kind)
+            .await
+            .map_err(|e| {
+                anyhow::Error::new(e).context(format!(
+                    "reading Linear {} of {} failed after {} of {} due issue(s) were written",
+                    kind.connection(),
+                    target.identifier,
+                    outcome.read,
+                    outcome.due
+                ))
+            })?;
+        outcome.rows += commit_issue_activity(db, target, kind, &nodes)?;
+        outcome.read += 1;
+    }
+    Ok(outcome)
 }

@@ -211,7 +211,13 @@ async fn a_missing_issue_fails_the_walk() {
         .await
         .expect_err("no issue");
     assert!(
-        matches!(err, CollectError::LinearActivityApi { ref connection, .. } if *connection == "comments"),
+        matches!(
+            err,
+            CollectError::LinearActivityApi {
+                connection: "comments",
+                ..
+            }
+        ),
         "{err:?}"
     );
 }

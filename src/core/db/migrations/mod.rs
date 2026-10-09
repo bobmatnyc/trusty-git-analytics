@@ -233,6 +233,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "linear_work_item_key",
         sql: include_str!("../sql/0035_linear_work_item_key.sql"),
     },
+    // #190 step 6: Linear issue state transitions, comment metadata, and the
+    // per-issue activity marker; additive, see the SQL file header.
+    Migration {
+        version: 36,
+        name: "linear_issue_activity",
+        sql: include_str!("../sql/0036_linear_issue_activity.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

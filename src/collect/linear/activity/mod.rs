@@ -176,9 +176,64 @@ impl LinearClient {
         target: &ActivityTarget,
         kind: ActivityKind,
     ) -> Result<Vec<serde_json::Value>> {
-        // Red skeleton (#190 step 6): no request yet.
-        let _ = (target, kind);
-        Ok(Vec::new())
+        let query = query_for(kind);
+        let connection = kind.connection();
+        let mut guard = PageGuard::new(kind.endpoint(), &target.identifier);
+        let mut nodes = Vec::new();
+        let mut after: Option<String> = None;
+        for page_number in 1usize.. {
+            let body = serde_json::json!({
+                "query": query,
+                "variables": {
+                    "id": target.issue_id,
+                    "first": ACTIVITY_PAGE_SIZE,
+                    "after": after,
+                    "includeArchived": true,
+                },
+            });
+            let mut data = with_retry(
+                "linear issue activity page",
+                &self.retry,
+                &self.budget,
+                || self.post_bulk(&body, &target.identifier, page_number),
+            )
+            .await
+            .map_err(|e| activity_error(e, kind, &target.identifier))?;
+            let page = data["issue"][connection].take();
+            // #190 step 6: `issue: null` or a missing `nodes` array is an
+            // error; read as empty, the store would delete the issue's rows.
+            let Some(rows) = page["nodes"].as_array() else {
+                return Err(CollectError::LinearActivityApi {
+                    status: 200,
+                    identifier: target.identifier.clone(),
+                    connection,
+                    page: page_number,
+                    message: format!("response has no issue.{connection}.nodes array"),
+                });
+            };
+            let count = rows.len();
+            nodes.extend(rows.iter().cloned());
+            let info = &page["pageInfo"];
+            let Some(has_next) = info["hasNextPage"].as_bool() else {
+                return Err(CollectError::LinearPageInfoInvalid {
+                    endpoint: kind.endpoint(),
+                    key: target.identifier.clone(),
+                    page: page_number,
+                    problem: "response has no boolean pageInfo.hasNextPage",
+                });
+            };
+            let next = guard.advance(
+                has_next,
+                info["endCursor"].as_str().map(String::from),
+                count,
+                page_number,
+            )?;
+            match next {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+        }
+        Ok(nodes)
     }
 }
 
