@@ -325,6 +325,28 @@ pub enum CollectError {
         /// What the page got wrong.
         problem: &'static str,
     },
+
+    /// A per-issue Linear `history` or `comments` walk failed on one page
+    /// (#190 step 6).
+    ///
+    /// The activity counterpart of [`CollectError::LinearBulkApi`]: it names
+    /// the issue and the connection, so the failed issue can be found.
+    #[error(
+        "Linear API error (HTTP {status}) reading {connection} of {identifier} \
+         (page {page}): {message}"
+    )]
+    LinearActivityApi {
+        /// HTTP status returned by Linear.
+        status: u16,
+        /// Identifier of the issue walked, e.g. `ENG-123`.
+        identifier: String,
+        /// The `Issue` connection walked: `history` or `comments`.
+        connection: &'static str,
+        /// 1-based page number within the walk.
+        page: usize,
+        /// Linear's response body, scrubbed of the API key and truncated.
+        message: String,
+    },
 }
 
 /// Module-wide `Result` alias.

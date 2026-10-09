@@ -40,6 +40,7 @@ fn http_status(err: &anyhow::Error) -> Option<u16> {
             CollectError::LinearApi { status, .. }
             | CollectError::LinearBulkApi { status, .. }
             | CollectError::LinearEntityApi { status, .. }
+            | CollectError::LinearActivityApi { status, .. }
             | CollectError::Throttled { status, .. } => Some(*status),
             CollectError::Http(h) => h.status().map(|s| s.as_u16()),
             _ => None,

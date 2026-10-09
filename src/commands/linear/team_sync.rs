@@ -8,6 +8,7 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
+use super::activity_sync::ActivityOutcome;
 use super::LinearSyncArgs;
 use tga::collect::linear::issue::ISSUE_FIELDS_VERSION;
 use tga::collect::linear::sync::{next_cursor, resolve_scope};
@@ -32,6 +33,8 @@ pub(crate) struct TeamOutcome {
     pub archived: usize,
     /// New / changed / moved / unchanged tallies against the stored rows.
     pub counts: ChangeCounts,
+    /// #190 step 6: the history and comments passes run after the issues.
+    pub activity: Vec<ActivityOutcome>,
 }
 
 impl TeamOutcome {
@@ -55,7 +58,8 @@ impl TeamOutcome {
     }
 }
 
-/// Fetch, store and advance the cursor for one team.
+/// Fetch, store and advance the cursor for one team; returns the outcome and
+/// the issues fetched.
 ///
 /// Why: #190 — one per-team unit, so `--all-teams` keeps a cursor per team
 /// and a re-sync with no remote change writes no issue row.
@@ -92,7 +96,7 @@ pub(super) async fn sync_team(
     args: &LinearSyncArgs,
     explicit_since: Option<DateTime<Utc>>,
     include_archived: bool,
-) -> anyhow::Result<TeamOutcome> {
+) -> anyhow::Result<(TeamOutcome, Vec<LinearIssue>)> {
     let stored_cursor = get_linear_cursor(db.connection(), team_key)?
         .and_then(|c| DateTime::parse_from_rfc3339(&c.last_synced_at).ok())
         .map(|d| d.with_timezone(&Utc));
@@ -156,10 +160,13 @@ pub(super) async fn sync_team(
         changes
     };
 
-    Ok(TeamOutcome {
+    let outcome = TeamOutcome {
         team_key: team_key.to_string(),
         fetched: issues.len(),
         archived,
         counts: ChangeCounts::of(&changes),
-    })
+        activity: Vec::new(),
+    };
+    // #190 step 6: the dry run's activity count reads the fetched issues.
+    Ok((outcome, issues))
 }
