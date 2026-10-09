@@ -159,6 +159,9 @@ linear:
     - FE
   fetch_on_reference: true        # Fetch issue details when ref appears in a commit
   ticket_regex: ""                # Custom regex; capture group 1 = ticket ID
+  stats:                          # Lower bounds for `tga linear stats` (optional)
+    field_use_created_since: 2025-01-01
+    concentration_completed_since: 2026-01-01
 
 # ── Azure DevOps ─────────────────────────────────────────────────────────────
 pm:
@@ -300,6 +303,8 @@ With `extend_defaults: false` in the last rules file, the LLM prompt offers only
 | `team_keys` | Vec\<String\> | no | — | Linear team identifiers to scope issue fetching. |
 | `fetch_on_reference` | bool | no | `true` | When `true`, fetch issue details from Linear whenever a ticket reference is detected in a commit message. |
 | `ticket_regex` | String | no | — | Custom regex. Capture group 1 = ticket ID. |
+| `stats.field_use_created_since` | Date (`YYYY-MM-DD`) | no | — | `tga linear stats`: field use counts only issues created on or after this UTC date. |
+| `stats.concentration_completed_since` | Date (`YYYY-MM-DD`) | no | — | `tga linear stats`: concentration counts only issues completed on or after this UTC date. |
 
 ### pm.azure_devops
 

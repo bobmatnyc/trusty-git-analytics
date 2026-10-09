@@ -225,6 +225,8 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `jira.project_key` | string | — | Project key filter (e.g. `API`) |
 | `jira.ticket_regex` | string | — | Override regex for detecting JIRA ticket refs in commit messages |
 | `linear.ticket_regex` | string | — | Override regex for detecting Linear ticket refs in commit messages |
+| `linear.stats.field_use_created_since` | date | — | `tga linear stats`: field use counts only issues created on or after this date |
+| `linear.stats.concentration_completed_since` | date | — | `tga linear stats`: concentration counts only issues completed on or after this date |
 | `pm.azure_devops.organization_url` | string | — | ADO org URL (e.g. `https://dev.azure.com/myorg`) |
 | `pm.azure_devops.pat` | string | — | Azure DevOps Personal Access Token |
 | `pm.azure_devops.project` | string | — | Default ADO project name |

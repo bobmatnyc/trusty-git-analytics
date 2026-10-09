@@ -270,6 +270,52 @@ A `--dry-run` line omits the removed counts: it reads and writes nothing.
 `tga linear freshness` reads the same cursor table and fails when a team has
 never synced or is older than `--max-age-days` (default 2).
 
+### `tga linear stats`
+
+Print the Linear delivery metrics (#190) computed by
+`report::linear_stats` from the tables `tga linear sync` (with `--entities`)
+already wrote. The command reads the database only and makes no network
+call.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | false | Print the full metrics as JSON instead of the Markdown block |
+| `--as-of <YYYY-MM-DD>` | now | Measure at midnight UTC at the start of this date |
+
+The as-of instant fixes the completion windows (the four whole quarters
+before the as-of quarter, and the four before those), project ages and the
+overdue figures. `linear.stats` in config.yaml sets the lower bounds for
+field use and concentration (see
+[configuration.md](configuration.md#linear--linearconfig)).
+
+Every figure is given for the whole workspace and per current team key,
+archived issues included:
+
+| Id | Figure |
+|----|--------|
+| C0 | Population: issues, archived share, state types, entity counts |
+| C1, C1b, C1c | Completions per UTC quarter; prior vs recent four-quarter trend; the same over teams that complete in every quarter of both windows |
+| C2 | Lead time (created to completed) and cycle time (started to completed) by completion year |
+| C3 | Cycle completion rate and carry-over by year of the cycle's end |
+| C5 | Issues by the number of bracketed tags their title starts with |
+| C9 | Share of issues with an estimate, label, assignee, project, due date, cycle or parent |
+| C11 | Projects by state, missing targets, overdue and late projects, milestones |
+| C12 | Cancel rate by closure year |
+| C14 | Contributors per year and the share of completed work held by the top 1, 3 and 5 assignees |
+
+The JSON carries `schema_version` (1), `as_of` (RFC 3339), both bounds, one
+key per metric (`population`, `completions`, `lead_cycle`, `cycles`,
+`title_tags`, `field_use`, `projects`, `cancel_rate`, `people`) and
+`tolerances`, which names where the published metric text and the
+reference implementation differ. A per-group figure sits under `all` (the
+workspace) and `teams.<KEY>`. A percentage is `null` when its denominator
+is 0. A stored timestamp, date or label list that does not parse fails the
+command with the row named.
+
+```text
+tga linear stats --json --as-of 2026-10-01
+```
+
 ### `tga override`
 
 Manage manual classification overrides (Tier 0).
