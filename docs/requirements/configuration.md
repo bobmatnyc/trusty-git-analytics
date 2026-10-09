@@ -963,6 +963,19 @@ is the only way an engagement states its own window.
 | `team_keys` | list[string] | [] | Team keys (e.g. `["ENG"]`). The per-commit lookup fetches only issues whose identifier prefix is listed (empty = every team). `tga linear sync` with no `--team` and no `--all-teams` needs exactly one entry. |
 | `fetch_on_reference` | bool | true | During `collect`, fetch the Linear issues that commit messages name. |
 | `ticket_regex` | string | None | Override regex for detecting Linear ticket refs (e.g. `([A-Z]+-\d+)`) in commit messages. Added in v1.0.6 (#75). |
+| `stats.field_use_created_since` | date (`YYYY-MM-DD`) | None | `tga linear stats` field use (C9) counts only issues created on or after this UTC date. None = every issue. |
+| `stats.concentration_completed_since` | date (`YYYY-MM-DD`) | None | `tga linear stats` concentration (C14) counts only issues completed on or after this UTC date. None = every completed issue. |
+
+The `stats` block is optional (#190). A value that is not a `YYYY-MM-DD`
+date fails the config load. See
+[cli-commands.md](cli-commands.md#tga-linear-stats).
+
+```yaml
+linear:
+  stats:
+    field_use_created_since: 2025-01-01
+    concentration_completed_since: 2026-01-01
+```
 
 There is no `team_id` key; the team scope is `team_keys`. The bulk sync
 (`tga linear sync`, see [cli-commands.md](cli-commands.md#tga-linear-sync))

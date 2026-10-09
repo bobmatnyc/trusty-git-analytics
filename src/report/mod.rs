@@ -10,6 +10,7 @@
 //! - [`errors`] — [`ReportError`] / [`Result`]
 //! - [`models`] — aggregated data structures
 //! - [`period_trends`] — N-week period roll-up for contributor profiles (#558)
+//! - [`linear_stats`] — Linear delivery metrics from the synced Linear tables (#190)
 pub mod aggregator;
 // #5453/#6004: ownership/bus-factor/trajectory figures the DD report renders.
 pub mod authorship;
@@ -19,6 +20,8 @@ pub mod dd_manifest_merge;
 pub mod drilldown;
 pub mod errors;
 pub mod formatters;
+// #190: Linear delivery metrics behind `tga linear stats`.
+pub mod linear_stats;
 pub mod models;
 pub mod period_trends;
 pub mod persist;

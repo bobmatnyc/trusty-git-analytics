@@ -23,7 +23,7 @@ use tga::core::db::Database;
 use crate::commands::aliases::AliasesArgs;
 use crate::commands::args::{
     AnalyzeArgs, ClassifyArgs, CollectArgs, DeploymentsSubcommandArgs, IncidentsSubcommandArgs,
-    JiraSubcommandArgs, LinearSubcommandArgs, ReportArgs, TuiArgs,
+    JiraSubcommandArgs, LinearSubcommand, LinearSubcommandArgs, ReportArgs, TuiArgs,
 };
 use crate::commands::audit::AuditArgs;
 use crate::commands::author::AuthorArgs;
@@ -147,7 +147,8 @@ enum Commands {
     Dora(DoraArgs),
     /// JIRA status-transition and comment ingestion (issue #3966).
     Jira(JiraSubcommandArgs),
-    /// Linear bulk team issue-set sync and freshness (issue #7139).
+    /// Linear bulk team issue-set sync and freshness (issue #7139), and the
+    /// delivery metrics over it (#190).
     Linear(LinearSubcommandArgs),
     /// Interactive terminal UI: repo picker, live progress, correlation results (#5197).
     Tui(TuiArgs),
@@ -424,6 +425,16 @@ async fn run() -> anyhow::Result<()> {
     // here instead, through a read-only open that names the cause and fails.
     if let Commands::Inspect(args) = cli.command {
         return commands::inspect::run(&db_path, args);
+    }
+
+    // #190: `tga linear stats` is a report over the database as it stands.
+    // Routed through the shared open, a wrong path minted an empty, migrated
+    // database and printed a zeroed report with exit 0; it opens read-only.
+    if let Commands::Linear(LinearSubcommandArgs {
+        subcommand: LinearSubcommand::Stats(args),
+    }) = &cli.command
+    {
+        return commands::linear::run_stats_at(&config, &db_path, args);
     }
 
     // #111: the eval harness reads a database copy through its own read-only
