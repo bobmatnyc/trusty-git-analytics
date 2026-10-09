@@ -379,11 +379,12 @@ than their issue. So the pass reads each team's comments by the comment's own
   and is counted.
 - **Issues moved into the team** (#190): moving an issue does not change its
   comments' `updatedAt`, so a comment written while the issue sat in another
-  team, older than the cursor minus 10 minutes, matches no bounded walk. The
-  issue pass therefore queues, in `linear_comment_due` and in the same
-  transaction as the issue rows, each issue it classifies as moved into the
-  team, and each issue new to the team whose `createdAt` is at or before the
-  team's comment cursor minus 10 minutes. It queues them whether or not the
+  team, older than the cursor minus 10 minutes, matches no bounded walk.
+  Every write of `linear_issues` (this issue pass and `tga collect`)
+  therefore queues, in `linear_comment_due` and in the same transaction as
+  the issue rows, each issue it classifies as moved into a team, and each
+  issue new to a team whose `createdAt` is at or before that team's comment
+  cursor minus 10 minutes. The cursor read is the issue's own team's. It queues them whether or not the
   run passes `--comments`, so a later `--comments` run, whose issue pass sees
   the issue unchanged, still reads them. A team with no comment cursor queues
   nothing: its next walk reads every comment. The next incremental comments

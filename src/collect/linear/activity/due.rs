@@ -6,13 +6,16 @@
 //! change its comments' `updatedAt`, so a comment written while the issue sat
 //! in another team, older than the team's cursor minus the overlap, would
 //! match no walk.
-//! What: the issue sync calls [`queue_comment_reads`] in its own transaction;
+//! What: every `linear_issues` write (`upsert_linear_issues_in`) calls
+//! [`queue_comment_reads`] in its own transaction;
 //! the comments pass lists the queue with [`due_comment_issues`] and
 //! [`super::store::commit_team_comments_with_due`] empties it.
 //! Test: `commands::linear::comment_cursor_tests::a_moved_issues_old_comments_are_read_in_full`,
 //! `commands::linear::comment_cursor_tests::a_move_seen_by_an_issue_only_run_is_read_by_the_next_comments_run`.
 
-use chrono::Utc;
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 
 use super::comments::COMMENT_OVERLAP;
@@ -20,22 +23,28 @@ use super::store::comment_cursor;
 use crate::collect::linear::{IssueChange, LinearIssue};
 use crate::core::errors::Result;
 
-/// Record the issues of one issue sync whose comments the team's next
-/// incremental comments walk cannot see; returns how many were recorded.
+/// Record the issues of one `linear_issues` write whose comments their
+/// team's next incremental comments walk cannot see; returns how many were
+/// recorded.
 ///
 /// Why: #190 — the walk's `updatedAt` bound skips a moved issue's older
-/// comments, and the move is visible only to the issue sync. Recording it in
-/// the issue sync's transaction keeps it visible to a later `--comments` run
-/// whose issue pass sees the issue unchanged.
-/// What: does nothing when `team_key` has no comment cursor (its next walk
-/// reads every comment of the team). Otherwise, with `since` = cursor minus
-/// [`COMMENT_OVERLAP`], upserts a `linear_comment_due` row for each issue
-/// classified [`IssueChange::Moved`], and each [`IssueChange::New`] issue
-/// whose `createdAt` is at or before `since` or unknown. An issue created
-/// after `since` is left out: every comment on it is newer than the bound.
-/// `issues` and `changes` are parallel, as `upsert_linear_issues_in` returns
-/// them. An issue with no `linear_id` is skipped (the walk filters by id).
-/// Test: `commands::linear::comment_cursor_tests::a_moved_issues_old_comments_are_read_in_full`.
+/// comments, and the move is visible only to the issue write. Recording it in
+/// the write's transaction keeps it visible to a later `--comments` run whose
+/// issue pass sees the issue unchanged. `upsert_linear_issues_in` calls this,
+/// so `tga collect` and `tga linear sync` both queue.
+/// What: for each issue, reads the comment cursor of the issue's OWN team
+/// (its `team_key`, else its identifier prefix), never the team a caller is
+/// syncing: one batch from `tga collect` spans teams. A team with no cursor
+/// queues nothing (its next walk reads every comment of the team). Otherwise,
+/// with `since` = cursor minus [`COMMENT_OVERLAP`], upserts a
+/// `linear_comment_due` row for each issue classified [`IssueChange::Moved`],
+/// and each [`IssueChange::New`] issue whose `createdAt` is at or before
+/// `since` or unknown. An issue created after `since` is left out: every
+/// comment on it is newer than the bound. `issues` and `changes` are
+/// parallel. An issue with no `linear_id` is skipped (the walk filters by
+/// id). The upsert keys on the issue id, so a re-run adds no second row.
+/// Test: `commands::linear::comment_cursor_tests::a_moved_issues_old_comments_are_read_in_full`,
+/// `collect::linear::store::tests::store_linear_issues_queues_comment_reads_for_moved_and_old_new_issues`.
 ///
 /// # Errors
 ///
@@ -44,7 +53,6 @@ use crate::core::errors::Result;
 /// is not RFC 3339.
 pub fn queue_comment_reads(
     conn: &Connection,
-    team_key: &str,
     issues: &[LinearIssue],
     changes: &[IssueChange],
 ) -> Result<usize> {
@@ -53,22 +61,38 @@ pub fn queue_comment_reads(
         changes.len(),
         "issues and changes are parallel"
     );
-    let Some(cursor) = comment_cursor(conn, team_key)? else {
-        return Ok(0);
-    };
-    let since = cursor - COMMENT_OVERLAP;
     let queued_at = Utc::now().to_rfc3339();
+    // #190: one cursor read per team, keyed on the issue's own team.
+    let mut cursors: HashMap<String, Option<DateTime<Utc>>> = HashMap::new();
     let mut queued = 0;
     for (issue, change) in issues.iter().zip(changes) {
+        if !matches!(change, IssueChange::Moved | IssueChange::New) {
+            continue;
+        }
+        let Some(issue_id) = issue.linear_id.as_deref() else {
+            continue;
+        };
+        let team = issue
+            .team_key
+            .clone()
+            .unwrap_or_else(|| issue.identifier.split('-').next().unwrap_or("").to_string());
+        let cursor = match cursors.get(&team) {
+            Some(c) => *c,
+            None => {
+                let c = comment_cursor(conn, &team)?;
+                cursors.insert(team.clone(), c);
+                c
+            }
+        };
+        let Some(cursor) = cursor else {
+            continue;
+        };
+        let since = cursor - COMMENT_OVERLAP;
         let reason = match change {
             IssueChange::Moved => "moved",
             IssueChange::New if issue.created_at.is_none_or(|c| c <= since) => "new",
             _ => continue,
         };
-        let Some(issue_id) = issue.linear_id.as_deref() else {
-            continue;
-        };
-        let team = issue.team_key.as_deref().unwrap_or(team_key);
         conn.execute(
             "INSERT INTO linear_comment_due (issue_id, team_key, reason, queued_at) \
              VALUES (?1, ?2, ?3, ?4) ON CONFLICT(issue_id) DO UPDATE SET \

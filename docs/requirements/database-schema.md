@@ -722,9 +722,9 @@ no `updatedAt` bound (#190). Migration `0038_linear_comment_due.sql`.
 | `reason` | TEXT | no | `moved` (identifier changed) or `new` (no row, created at or before the team's comment cursor minus 10 minutes) |
 | `queued_at` | TEXT | no | RFC3339 wall clock of the issue sync that queued it |
 
-The issue sync writes a row in the same transaction as the issue rows, only
-when the team has a comment cursor, whether or not the run passes
-`--comments`. The team's next incremental comments pass reads each listed
+Every `linear_issues` write (`tga linear sync` and `tga collect`) writes a
+row in the same transaction as the issue rows, only when the issue's own team
+has a comment cursor, whether or not the run passes `--comments`. The team's next incremental comments pass reads each listed
 issue's comments and deletes the rows in the same transaction as its comment
 rows and cursor; a failed walk keeps them. A `--backfill` per-issue comments
 write deletes the issue's row.
