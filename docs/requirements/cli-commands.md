@@ -191,6 +191,7 @@ pull.
 | `--backfill` | false | Ignore the stored cursor; with no `--since`, sync the whole history |
 | `--max-issues <N>` | no cap | Fail when a team holds more than N issues in the window. The error names the team and the cap, and nothing is written for that team |
 | `--dry-run` | false | Open the database read-only, fetch, and print what would be written. No row and no cursor is written |
+| `--entities` | false | After the issues, also sync the workspace's teams, users, labels, projects, project milestones and cycles (see below) |
 
 Rows are keyed by Linear's issue `id` (UUID); `identifier` (ENG-123) is a
 separate indexed column. An issue that moves team gets a new identifier and
@@ -209,6 +210,40 @@ Linear sync (ENG): 3 issue(s) fetched, 1 archived; wrote 2 (1 new, 1 changed, 0 
 
 The first team that fails stops the run with a non-zero exit naming that
 team; teams synced earlier in the run keep their rows and cursors.
+
+With `--entities`, the sync then walks six workspace-wide entity sets, each
+with `includeArchived: true` (users also with `includeDisabled: true`), and
+stores them in migration v34's tables, keyed by Linear's `id` with the
+GraphQL node in `raw_json`:
+
+| Set | Table | Columns beyond the timestamps and `archived` |
+|-----|-------|------|
+| teams | `linear_teams` | key, name, estimation type/allow-zero/extended/default, cycle settings |
+| users | `linear_users` | name, display name, email, active, admin, guest |
+| labels | `linear_labels` | name, color, group flag, parent id, team id (NULL = workspace-level) |
+| projects | `linear_projects` | state, status, progress, start/target date, started/completed/canceled at, lead id, team ids |
+| milestones | `linear_milestones` | project id, name, target date, sort order |
+| cycles | `linear_cycles` | team id, number, starts/ends/completed at, scope and completed counts, `is_empty` |
+
+Each set is a full refresh: every page is fetched first, then the set's rows
+and its `linear_entity_sync_state` row commit in one transaction. A failed
+page, or a page whose `pageInfo` does not say whether more pages follow,
+writes nothing for that set and leaves its state row as it was; the run
+exits non-zero naming the set, and sets synced earlier keep their rows.
+
+A stored row that the complete fetch no longer returns (Linear purged or
+deleted it, or the key lost access to its team) gets `removed_at` set in the
+same transaction. The row is kept so older issues still resolve its name;
+count current entities with `WHERE removed_at IS NULL`. A row that comes
+back has `removed_at` cleared. A cycle whose latest issue count is 0 has
+`is_empty = 1`; a cycle with no history yet has `is_empty` NULL. The pass
+prints one line, with the rows newly marked removed per set:
+
+```text
+Linear entities: teams 3 (1 archived, 0 removed), users 3 (1 archived, 0 removed), labels 4 (1 archived, 0 removed), projects 2 (1 archived, 1 removed), milestones 2 (1 archived, 0 removed), cycles 4 (1 archived, 0 removed); wrote 6 set(s).
+```
+
+A `--dry-run` line omits the removed counts: it reads and writes nothing.
 
 `tga linear freshness` reads the same cursor table and fails when a team has
 never synced or is older than `--max-age-days` (default 2).

@@ -35,6 +35,7 @@ use tga::collect::linear::LinearClient;
 use tga::core::config::Config;
 use tga::core::db::{get_linear_cursor, list_linear_cursor_teams, Database};
 
+mod entity_sync;
 mod team_sync;
 use team_sync::{sync_team, TeamOutcome};
 
@@ -51,6 +52,9 @@ Incremental by default: resumes from the stored `linear_sync_cursor` for each\n\
 team. Pass --backfill for a full historical pull (first-ever sync of a team\n\
 is always a full pull automatically, even without --backfill). An issue whose\n\
 `updatedAt` is already stored is not rewritten.\n\n\
+--entities also stores the workspace's teams, users, labels, projects,\n\
+project milestones and cycles (archived included) in their own tables, one\n\
+transaction per entity set, after the issues.\n\n\
 Requires `linear.api_key` (or a shared-credential fallback) configured, and\n\
 --team, --all-teams, or exactly one entry in `linear.team_keys`.",
     after_help = "EXAMPLES:\n\
@@ -58,6 +62,8 @@ Requires `linear.api_key` (or a shared-credential fallback) configured, and\n\
   tga linear sync --team ENG\n\n\
   # Every team the API key can see, archived issues included\n\
   tga linear sync --all-teams\n\n\
+  # Issues plus teams, users, labels, projects, milestones and cycles\n\
+  tga linear sync --all-teams --entities\n\n\
   # Full historical backfill, ignoring any stored cursor\n\
   tga linear sync --team ENG --backfill\n\n\
   # Preview without writing to the database\n\
@@ -90,6 +96,11 @@ pub struct LinearSyncArgs {
     /// the database or advancing the cursor. Opens the database read-only.
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
+    /// After the issues, also sync the workspace's reference entities:
+    /// teams, users, labels, projects, project milestones and cycles,
+    /// archived included. Each set is a full refresh.
+    #[arg(long, default_value_t = false)]
+    pub entities: bool,
 }
 
 /// Arguments for `tga linear freshness`.
@@ -210,7 +221,7 @@ pub async fn run_sync(
 /// [`team_sync::sync_team`], printing one line per team. Archived issues are
 /// included unless `--exclude-archived`. The first team that fails stops the
 /// run with an error naming it; teams already synced keep their rows and
-/// cursors.
+/// cursors. With `--entities`, [`entity_sync::sync_entities`] runs last.
 /// Test: `sync_tests::all_teams_syncs_each_team_under_its_own_cursor`,
 /// `sync_tests::cap_exceeded_fails_and_writes_nothing`,
 /// `sync_tests::dry_run_reports_and_writes_nothing`,
@@ -268,6 +279,11 @@ pub(crate) async fn run_sync_with(
                 ""
             }
         );
+    }
+    // #190: the reference entities run after the issues, behind a flag, so
+    // the issue path is unchanged without it.
+    if args.entities {
+        entity_sync::sync_entities(client, db, args.dry_run).await?;
     }
     Ok(outcomes)
 }
@@ -365,3 +381,6 @@ mod tests;
 
 #[cfg(test)]
 mod sync_tests;
+
+#[cfg(test)]
+mod entity_sync_tests;

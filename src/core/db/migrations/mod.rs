@@ -219,6 +219,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "linear_issue_fields",
         sql: include_str!("../sql/0033_linear_issue_fields.sql"),
     },
+    // #190: Linear reference entities (teams, users, labels, projects,
+    // milestones, cycles) and their sync state; additive.
+    Migration {
+        version: 34,
+        name: "linear_reference_entities",
+        sql: include_str!("../sql/0034_linear_reference_entities.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

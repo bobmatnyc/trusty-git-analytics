@@ -269,6 +269,62 @@ pub enum CollectError {
         /// The configured cap.
         cap: usize,
     },
+
+    /// A Linear reference-entity walk (`projects`, `cycles`, ...) failed on
+    /// one page (#190).
+    ///
+    /// The entity counterpart of [`CollectError::LinearBulkApi`], which names
+    /// a team key; these walks are workspace-wide and name the entity.
+    #[error("Linear API error (HTTP {status}) syncing {entity} (page {page}): {message}")]
+    LinearEntityApi {
+        /// HTTP status returned by Linear.
+        status: u16,
+        /// The GraphQL root field walked, e.g. `projects`.
+        entity: &'static str,
+        /// 1-based page number within the walk.
+        page: usize,
+        /// Linear's response body, scrubbed of the API key and truncated.
+        message: String,
+    },
+
+    /// A nested connection inside an entity node reported more rows than the
+    /// one page the query asked for (#190).
+    ///
+    /// Why: storing the first page as if it were the whole list would be a
+    /// silent truncation, so the walk fails instead.
+    #[error(
+        "Linear {entity} {id}: nested connection `{connection}` has more than {limit} rows; \
+         nothing was written for {entity}"
+    )]
+    LinearNestedConnectionTruncated {
+        /// The GraphQL root field walked, e.g. `projects`.
+        entity: &'static str,
+        /// Id of the node whose nested list was cut.
+        id: String,
+        /// The nested connection, e.g. `teams`.
+        connection: &'static str,
+        /// The `first:` the query sent for it.
+        limit: usize,
+    },
+
+    /// A Linear page's `pageInfo` does not say whether the walk is done
+    /// (#190).
+    ///
+    /// Why: reading a missing `hasNextPage`, or `hasNextPage: true` with a
+    /// null `endCursor`, as the last page cut the walk short with no error.
+    /// The entity store marks every row it did not see as removed, so a cut
+    /// walk would mark live rows removed.
+    #[error("Linear {endpoint} paging for {key} (page {page}): {problem}; the walk stopped")]
+    LinearPageInfoInvalid {
+        /// Short name of the endpoint being walked, e.g. `linear/projects`.
+        endpoint: &'static str,
+        /// The team key walked, or `*` for a workspace-wide walk.
+        key: String,
+        /// 1-based page number within the walk.
+        page: usize,
+        /// What the page got wrong.
+        problem: &'static str,
+    },
 }
 
 /// Module-wide `Result` alias.
