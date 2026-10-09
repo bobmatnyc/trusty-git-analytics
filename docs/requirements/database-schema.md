@@ -237,7 +237,7 @@ Unified ticket/work-item records from JIRA, GitHub, Linear, and Azure DevOps. Mi
 | `status` | TEXT | no | Provider status string |
 | `item_type` | TEXT | no | `Bug`, `User Story`, `Task`, `Epic`, … |
 | `tags` | TEXT | yes | Comma-separated labels — free text |
-| `project` | TEXT | yes | Project name or key |
+| `project` | TEXT | yes | Project name or key; for Linear, the Linear project id (name in `linear_projects`) |
 | `url` | TEXT | yes | Ticket URL |
 | `raw_json` | TEXT | yes | Full JSON payload as the collector serialized it |
 | `fetched_at` | TEXT | no | Default `datetime('now')` |
@@ -254,7 +254,8 @@ it. A Linear row written before v35 got its `stable_id` from `linear_issues`
 in the migration; one with no matching `linear_issues.linear_id` (written
 before v33, or a stale copy a move left behind) stays NULL until a sync
 returns its issue with that identifier in `previousIdentifiers`, which merges
-it into the issue's row. `tags` holds the issue's label names.
+it into the issue's row. `tags` holds the issue's label names, `project` the
+Linear project id (NULL when the issue has none), and `item_type` is `Issue`.
 
 The composite `(id, source)` key replaced the `(provider, external_id)` shape earlier
 drafts of this page described; `provider`, `external_id`, `work_item_type`, and `state`

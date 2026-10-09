@@ -209,12 +209,16 @@ updated in place (or deleted, when the issue already has a row). The
 `work_items` row follows the same rule: it is keyed by the issue id in
 `work_items.stable_id`, renamed when the issue moves, and its commit links
 and `fact_pm_work` / `fact_pm_effort` rows move with it. `work_items.tags`
-holds the label names.
+holds the label names, `work_items.project` the Linear project id (the name
+is in `linear_projects`), and `item_type` is `Issue`.
 
 Each team's cursor records the issue field set it was last read in full
-under. When a new tga adds fields to the issue query, the next sync of each
-team ignores the cursor once and reads the whole history, so issues that did
-not change also get the new fields; later runs resume from the cursor. A
+under. When a new tga adds fields to the issue query or changes how an issue
+is projected into `work_items`, the next sync of each team ignores the cursor
+once, reads the whole history and rewrites every issue's `work_items` row, so
+issues that did not change also get the new fields; later runs resume from
+the cursor. The full read is the same paged walk as any sync: the same
+`--max-issues` cap, and the same retry with backoff on HTTP 429/503. A
 `--since` or `--exclude-archived` run does not count as that full read.
 
 Output is one line per team, for example:
