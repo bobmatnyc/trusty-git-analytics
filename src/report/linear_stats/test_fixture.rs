@@ -198,7 +198,8 @@ pub(super) fn issues() -> Vec<Fx> {
 }
 
 /// A database holding [`issues`] and the reference entities.
-pub(super) fn seeded() -> Database {
+// #190: crate-visible so the `tga linear stats` command tests reuse it.
+pub(crate) fn seeded() -> Database {
     let db = Database::open_in_memory().expect("db");
     insert_issues(&db, &issues());
     insert_entities(&db);

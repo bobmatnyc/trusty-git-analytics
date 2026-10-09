@@ -15,7 +15,7 @@ use clap::{Args, Subcommand};
 use crate::commands::deployments::{self, DeploymentsCollectArgs};
 use crate::commands::incidents::{self, IncidentsCollectArgs};
 use crate::commands::jira::{self, JiraFreshnessArgs, JiraSyncArgs};
-use crate::commands::linear::{self, LinearFreshnessArgs, LinearSyncArgs};
+use crate::commands::linear::{self, LinearFreshnessArgs, LinearStatsArgs, LinearSyncArgs};
 use crate::core::config::Config;
 use crate::core::db::Database;
 
@@ -92,6 +92,9 @@ pub enum LinearSubcommand {
     /// Check freshness of the Linear bulk-sync cursor (fails loudly if
     /// stale/never run).
     Freshness(LinearFreshnessArgs),
+    /// Print Linear delivery metrics from the synced tables (#190). No
+    /// network call.
+    Stats(LinearStatsArgs),
 }
 
 // #111: the subcommand enums above are `#[non_exhaustive]`, and `main.rs` is a
@@ -144,6 +147,7 @@ impl LinearSubcommandArgs {
         match self.subcommand {
             LinearSubcommand::Sync(a) => linear::run_sync(config, db, a).await,
             LinearSubcommand::Freshness(a) => linear::run_freshness(&config, db, a),
+            LinearSubcommand::Stats(a) => linear::run_stats(&config, db, &a),
         }
     }
 
@@ -153,7 +157,7 @@ impl LinearSubcommandArgs {
     pub fn is_dry_run(&self) -> bool {
         match &self.subcommand {
             LinearSubcommand::Sync(a) => a.dry_run,
-            LinearSubcommand::Freshness(_) => false,
+            LinearSubcommand::Freshness(_) | LinearSubcommand::Stats(_) => false,
         }
     }
 }

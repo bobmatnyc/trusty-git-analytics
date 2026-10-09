@@ -147,7 +147,8 @@ enum Commands {
     Dora(DoraArgs),
     /// JIRA status-transition and comment ingestion (issue #3966).
     Jira(JiraSubcommandArgs),
-    /// Linear bulk team issue-set sync and freshness (issue #7139).
+    /// Linear bulk team issue-set sync and freshness (issue #7139), and the
+    /// delivery metrics over it (#190).
     Linear(LinearSubcommandArgs),
     /// Interactive terminal UI: repo picker, live progress, correlation results (#5197).
     Tui(TuiArgs),

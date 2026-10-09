@@ -1,5 +1,5 @@
 //! `tga linear sync` / `tga linear freshness` — Linear bulk team ingestion
-//! (issue #7139).
+//! (issue #7139) — and `tga linear stats`, the metrics over it (#190).
 //!
 //! Why: `linear.fetch_on_reference` (`collect::linear_pipeline`) only ever
 //! resolves issues a commit message names, so an engagement registered with
@@ -36,7 +36,10 @@ use tga::core::config::Config;
 use tga::core::db::{get_linear_cursor, list_linear_cursor_teams, Database};
 
 mod entity_sync;
+// #190 step 4: the read-only metrics command.
+mod stats;
 mod team_sync;
+pub use stats::{render_stats, run_stats, LinearStatsArgs};
 use team_sync::{sync_team, TeamOutcome};
 
 /// Arguments for `tga linear sync`.

@@ -118,6 +118,6 @@ pub fn compute_linear_stats(conn: &Connection, opts: &StatsOptions) -> Result<Li
 }
 
 #[cfg(test)]
-mod test_fixture;
+pub(crate) mod test_fixture;
 #[cfg(test)]
 mod tests;
