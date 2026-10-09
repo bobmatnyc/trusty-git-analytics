@@ -508,3 +508,98 @@ async fn failed_field_set_write_rolls_the_team_back() {
         .expect("read")
         .is_none());
 }
+
+/// #190 step 3: a field-set refresh re-projects every issue it reads into
+/// `work_items`, including issues whose stored node is identical. Otherwise
+/// a bump of `ISSUE_FIELDS_VERSION` for a projection-only change (such as
+/// filling `work_items.project`) would re-read history and write nothing.
+#[tokio::test]
+async fn field_refresh_reprojects_unchanged_issues() {
+    let server = MockServer::start().await;
+    mount_issues(
+        &server,
+        "ENG",
+        vec![node("ENG-1", "2026-01-01T00:01:00.000Z", None)],
+    )
+    .await;
+    let client = mock_client(&server.uri());
+    let mut db = Database::open_in_memory().expect("db");
+    run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+        .await
+        .expect("first");
+    // A row projected by an older projection, under an older field set.
+    db.connection()
+        .execute_batch(
+            "UPDATE work_items SET title = 'stale projection' WHERE source = 'linear'; \
+             UPDATE linear_sync_cursor SET fields_version = 0;",
+        )
+        .expect("age the projection");
+
+    let refresh = run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+        .await
+        .expect("refresh");
+    assert_eq!(refresh[0].counts.unchanged, 1, "{:?}", refresh[0].counts);
+    let title: String = db
+        .connection()
+        .query_row(
+            "SELECT title FROM work_items WHERE id = 'ENG-1' AND source = 'linear'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("row");
+    assert_eq!(title, "Title for ENG-1");
+}
+
+/// #190 step 3 (code-critic): the one-time full read is capped like any
+/// walk. Over `--max-issues` it fails with `LinearIssueCapExceeded`, writes
+/// no issue row, and leaves the cursor and its field-set version as they
+/// were, so the next run tries the full read again.
+#[tokio::test]
+async fn full_read_over_the_cap_fails_and_writes_nothing() {
+    let server = MockServer::start().await;
+    mount_issues(
+        &server,
+        "ENG",
+        vec![
+            node("ENG-1", "2026-01-01T00:01:00.000Z", None),
+            node("ENG-2", "2026-01-01T00:02:00.000Z", None),
+        ],
+    )
+    .await;
+    let mut db = Database::open_in_memory().expect("db");
+    tga::core::db::set_linear_cursor(db.connection(), "ENG", "2026-01-01T00:01:00+00:00", 1)
+        .expect("seed cursor");
+    let before = get_linear_cursor(db.connection(), "ENG").expect("read");
+
+    let capped = LinearSyncArgs {
+        max_issues: Some(1),
+        ..args(Some("ENG"))
+    };
+    let err = run_sync_with(
+        &mock_client(&server.uri()),
+        &Config::default(),
+        &mut db,
+        &capped,
+    )
+    .await
+    .expect_err("over the cap must fail");
+    assert!(
+        matches!(
+            err.downcast_ref::<CollectError>(),
+            Some(CollectError::LinearIssueCapExceeded { cap: 1, .. })
+        ),
+        "{err:#}"
+    );
+    let request = last_request(&server).await;
+    assert!(!request.contains("\"gte\""), "a full read: {request}");
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM linear_issues"), 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM work_items"), 0);
+    assert_eq!(
+        get_linear_cursor(db.connection(), "ENG").expect("read"),
+        before
+    );
+    assert_eq!(
+        tga::core::db::get_linear_fields_version(db.connection(), "ENG").expect("read"),
+        Some(0)
+    );
+}

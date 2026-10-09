@@ -691,6 +691,40 @@ mod tests {
         assert_eq!(tags.as_deref(), Some("bug,api"));
     }
 
+    /// #190 step 3 (Architect ruling): `work_items.project` holds the Linear
+    /// project id — the name is reached through `linear_projects` — and every
+    /// Linear row's `item_type` is `Issue`.
+    #[test]
+    fn work_item_carries_the_project_id_and_issue_type() {
+        let mut db = Database::open_in_memory().expect("db");
+        let mut no_project = node_issue("uuid-2", "ENG-2", "ENG", &[]);
+        no_project.project_id = None;
+        persist_work_items(
+            &mut db,
+            &[node_issue("uuid-1", "ENG-1", "ENG", &[]), no_project],
+            &HashMap::new(),
+        )
+        .expect("persist");
+        let rows: Vec<(String, Option<String>, String)> = db
+            .connection()
+            .prepare(
+                "SELECT id, project, item_type FROM work_items \
+                 WHERE source = 'linear' ORDER BY id",
+            )
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("query")
+            .collect::<std::result::Result<_, _>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("ENG-1".into(), Some("project-1".into()), "Issue".into()),
+                ("ENG-2".into(), None, "Issue".into()),
+            ]
+        );
+    }
+
     #[test]
     fn persist_work_items_no_issues_is_a_noop() {
         let mut db = Database::open_in_memory().expect("db");
