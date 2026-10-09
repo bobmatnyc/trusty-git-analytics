@@ -195,10 +195,12 @@ fn build_commit_refs(commits: &[(String, String)]) -> HashMap<String, Vec<String
 /// because the join table's foreign key would reject it. Returns the number
 /// of `work_items` rows written.
 ///
-/// `project` is left `None`: the issue query carries only the project id since
-/// #190, and DOC-70 §6 routes project resolution through trusty-common's
-/// client instead. Writing the team name there would fill the column DOC-70
-/// filters on with a value that is not a project.
+/// `project` holds the Linear project id (#190, Architect ruling on the
+/// approved plan); the project's name is reached through the
+/// `linear_projects` table. It replaces the earlier rule, citing DOC-70 §6,
+/// that left the column NULL because the issue query carried no project: the
+/// query has carried `project { id }` since #190 step 1, and the id is a real
+/// project, never the team. `item_type` is `Issue` for every Linear row.
 ///
 /// # Errors
 ///
@@ -214,7 +216,8 @@ fn build_commit_refs(commits: &[(String, String)]) -> HashMap<String, Vec<String
 /// `persist_work_items_rolls_back_a_partial_write`,
 /// `moved_issue_keeps_one_work_items_row_and_its_links`,
 /// `commit_naming_a_previous_identifier_links_the_moved_issue`,
-/// `work_item_tags_carry_the_labels`.
+/// `work_item_tags_carry_the_labels`,
+/// `work_item_carries_the_project_id_and_issue_type`.
 pub fn persist_work_items(
     db: &mut Database,
     issues: &[LinearIssue],
@@ -259,7 +262,8 @@ pub fn persist_work_items_in(
             item_type: LINEAR_ITEM_TYPE.to_string(),
             // #190 step 3: label names, comma-separated like every provider's.
             tags: (!issue.label_names.is_empty()).then(|| issue.label_names.join(",")),
-            project: None,
+            // #190: the Linear project id; the name lives in `linear_projects`.
+            project: issue.project_id.clone(),
             url: Some(issue.url.clone()),
             // #190: the GraphQL node as Linear returned it, so the
             // Linear-aware effort and work extractors find `estimate`,

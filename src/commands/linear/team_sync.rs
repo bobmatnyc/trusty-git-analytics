@@ -72,8 +72,12 @@ impl TeamOutcome {
 /// [`ISSUE_FIELDS_VERSION`] ignores the cursor and reads its whole history,
 /// so unchanged issues get the new fields too. A run that read the whole
 /// history with archived issues included records the current version in the
-/// same transaction; a `--since` or `--exclude-archived` run does not.
+/// same transaction; a `--since` or `--exclude-archived` run does not. A
+/// refresh run projects every issue it read into `work_items`, unchanged ones
+/// included.
 /// Test: `super::sync_tests` (every test there runs through this);
+/// `field_refresh_reprojects_unchanged_issues`,
+/// `full_read_over_the_cap_fails_and_writes_nothing`,
 /// `older_field_set_refetches_full_history_once`,
 /// `since_bounded_run_does_not_mark_the_field_set_current`,
 /// `failed_field_set_write_rolls_the_team_back`.
@@ -127,11 +131,13 @@ pub(super) async fn sync_team(
         let changes = upsert_linear_issues_in(&tx, &issues)?;
         // #7139: the same issues land in `work_items`; no commit correlation
         // here, so `commit_refs` is empty. #190: only new or changed issues,
-        // so a re-sync with no remote change writes nothing.
+        // so a re-sync with no remote change writes nothing — except during
+        // a field-set refresh, which re-projects every issue it reads so a
+        // projection change reaches unchanged issues too.
         let written: Vec<LinearIssue> = issues
             .iter()
             .zip(&changes)
-            .filter(|(_, c)| **c != IssueChange::Unchanged)
+            .filter(|(_, c)| refresh || **c != IssueChange::Unchanged)
             .map(|(i, _)| i.clone())
             .collect();
         persist_work_items_in(&tx, &written, &HashMap::new())?;

@@ -40,8 +40,11 @@ pub const ISSUE_FIELDS: &str = "id identifier title description url priority est
 /// so a field added to the query never reaches an issue that did not change.
 /// What: `tga linear sync` stores the version a team was last read in full
 /// under (`linear_sync_cursor.fields_version`); a team stored under an older
-/// one is read in full once. Version 0 is every cursor written before this
-/// constant existed.
+/// one is read in full once, and that read re-projects every issue into
+/// `work_items`, so a projection-only change needs a bump too. Version 0 is
+/// every cursor written before this constant existed; version 1 adds
+/// `description` and `previousIdentifiers` and the projection that fills
+/// `tags` and `project` and keys rows by `stable_id`.
 /// Test: `issue_fields_version_tracks_the_field_set`,
 /// `commands::linear::sync_tests::older_field_set_refetches_full_history_once`.
 pub const ISSUE_FIELDS_VERSION: i64 = 1;

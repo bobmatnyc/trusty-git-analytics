@@ -123,9 +123,10 @@ pub struct PmTicket {
     /// Board / project this ticket belongs to, if the system exposes one.
     ///
     /// #5219: this lands in `work_items.project`, which DOC-70's board axis
-    /// filters on. Only Azure DevOps fills it today (`System.TeamProject`);
-    /// the other three leave it `None` rather than writing something that is
-    /// not a project — see the Linear note in `linear_pipeline`.
+    /// filters on. Azure DevOps fills it (`System.TeamProject`); JIRA and
+    /// GitHub leave it `None` rather than writing something that is not a
+    /// project. Linear's `work_items` rows are written by `linear_pipeline`,
+    /// not through this struct, and carry the Linear project id (#190).
     pub project: Option<String>,
     /// Source PM system this ticket originated from.
     pub source: PmSource,
