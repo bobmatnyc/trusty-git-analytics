@@ -71,6 +71,23 @@ impl ContributorSelector {
         Ok(Self { db, resolver })
     }
 
+    /// Open the database at `db_path` read-only and build the resolver from it.
+    ///
+    /// #189: `tga profile --dry-run` reads the database and must leave it
+    /// unchanged, so it skips [`ContributorSelector::open`]'s migrating open.
+    ///
+    /// # Errors
+    ///
+    /// [`ProfileError::Db`] when the file is missing, is not a tga database,
+    /// has pending migrations, or cannot be queried.
+    ///
+    /// Test: `tests/dry_run_no_migrate.rs`.
+    pub fn open_read_only(db_path: &Path) -> Result<Self> {
+        let db = Database::open_read_only(db_path)?;
+        let resolver = build_resolver_from_db(&db)?;
+        Ok(Self { db, resolver })
+    }
+
     /// Open an in-memory database. Test-only.
     #[cfg(test)]
     pub(crate) fn open_in_memory() -> Result<Self> {

@@ -12,7 +12,8 @@
 //! - `mmap_size = 268435456` — 256 MB memory-mapped I/O window
 //!
 //! WAL mode is **mandatory** per project conventions and is set on every
-//! [`Database::open`] call.
+//! [`Database::open`] call. [`Database::open_read_only`] (#189, for
+//! `--dry-run`) is the one exception: it never writes, so it never sets it.
 //!
 //! ## Connection pooling
 //!
@@ -101,6 +102,46 @@ impl Database {
         Ok(db)
     }
 
+    /// Open an existing database read-only, for a `--dry-run`.
+    ///
+    /// Why: #189 — [`Database::open`] switches the file to WAL, runs every
+    /// pending migration and creates a missing file. A dry run routed through
+    /// it moved a production database from schema 30 to 32.
+    /// What: opens through [`crate::core::inspect::open_read_only`], which
+    /// refuses a missing or non-SQLite file and never creates one, then
+    /// applies the tuning pragmas but not `journal_mode`. A schema older than
+    /// this binary is refused with the pending versions named: the dry run
+    /// cannot preview what a migrated database would do. Any write through
+    /// the returned handle fails with `SQLITE_READONLY`.
+    /// Test: `tests/dry_run_no_migrate.rs`.
+    ///
+    /// # Errors
+    ///
+    /// - The errors of [`crate::core::inspect::open_read_only`].
+    /// - [`TgaError::MigrationError`] when migrations are pending.
+    pub fn open_read_only(path: &Path) -> Result<Database> {
+        let conn = crate::core::inspect::open_read_only(path)?;
+        Self::apply_tuning_pragmas(&conn)?;
+        let (current, pending) = migrations::pending(&conn)?;
+        if let Some(last) = pending.last() {
+            let names: Vec<String> = pending
+                .iter()
+                .map(|m| format!("v{} ({})", m.version, m.name))
+                .collect();
+            return Err(TgaError::MigrationError(format!(
+                "{} is at schema v{} but this tga needs v{}; pending migrations: {}. \
+                 --dry-run opens the database read-only and never migrates it. Run the \
+                 command without --dry-run to apply them (back up the file first)",
+                expand_path(path).display(),
+                current,
+                last.version,
+                names.join(", ")
+            )));
+        }
+        debug!(path = %expand_path(path).display(), "database opened read-only");
+        Ok(Database { conn })
+    }
+
     /// Open an in-memory database. Primarily intended for tests.
     ///
     /// # Errors
@@ -140,6 +181,15 @@ impl Database {
             .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
             .map_err(TgaError::from)?;
         debug!(journal_mode = %mode, "applied WAL pragma");
+        Self::apply_tuning_pragmas(conn)
+    }
+
+    /// Apply every canonical pragma except `journal_mode`.
+    ///
+    /// #189: split out of [`Database::apply_pragmas`] because setting
+    /// `journal_mode=WAL` rewrites the file header, which a read-only open
+    /// must never do. None of these pragmas writes to the database file.
+    fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
         // Bundle the remaining pragmas in a single batch — none of them
         // return rows so `execute_batch` is appropriate. `busy_timeout` is
         // first so a transient lock from a concurrent writer is waited out

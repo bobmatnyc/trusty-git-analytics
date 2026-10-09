@@ -125,6 +125,17 @@ impl JiraSubcommandArgs {
             JiraSubcommand::Freshness(a) => jira::run_freshness(&config, db, a),
         }
     }
+
+    /// Whether the selected operation is a `--dry-run`.
+    ///
+    /// #189: `main` reads this before opening the database, so a dry run gets
+    /// a read-only handle instead of the creating, migrating open.
+    pub fn is_dry_run(&self) -> bool {
+        match &self.subcommand {
+            JiraSubcommand::Sync(a) => a.dry_run,
+            JiraSubcommand::Freshness(_) => false,
+        }
+    }
 }
 
 impl LinearSubcommandArgs {
@@ -133,6 +144,16 @@ impl LinearSubcommandArgs {
         match self.subcommand {
             LinearSubcommand::Sync(a) => linear::run_sync(config, db, a).await,
             LinearSubcommand::Freshness(a) => linear::run_freshness(&config, db, a),
+        }
+    }
+
+    /// Whether the selected operation is a `--dry-run`.
+    ///
+    /// #189: see [`JiraSubcommandArgs::is_dry_run`].
+    pub fn is_dry_run(&self) -> bool {
+        match &self.subcommand {
+            LinearSubcommand::Sync(a) => a.dry_run,
+            LinearSubcommand::Freshness(_) => false,
         }
     }
 }

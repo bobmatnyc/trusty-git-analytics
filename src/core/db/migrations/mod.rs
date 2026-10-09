@@ -255,6 +255,34 @@ pub(super) fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>
     Ok(names)
 }
 
+/// List the migrations `conn`'s schema has not applied yet, without writing.
+///
+/// Why: #189 — a `--dry-run` opens the database read-only and must refuse a
+/// schema older than this binary rather than read it as if it were current.
+/// What: returns the highest version in `schema_migrations` (0 when that
+/// table does not exist) and every [`MIGRATIONS`] entry above it. Only reads,
+/// so it is safe on a read-only connection.
+/// Test: `tests/dry_run_no_migrate.rs`
+/// (`dry_run_refuses_an_older_schema_and_leaves_it_untouched`).
+///
+/// # Errors
+///
+/// Returns [`TgaError::DbError`] if reading `sqlite_master` or
+/// `schema_migrations` fails.
+pub fn pending(conn: &Connection) -> Result<(i64, Vec<&'static Migration>)> {
+    let has_table: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+             WHERE type = 'table' AND name = 'schema_migrations')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(TgaError::from)?;
+    let current = if has_table { current_version(conn)? } else { 0 };
+    let pending = MIGRATIONS.iter().filter(|m| m.version > current).collect();
+    Ok((current, pending))
+}
+
 /// Apply all migrations whose version is greater than the current schema version.
 ///
 /// Idempotent: running it twice in a row is a no-op the second time.
@@ -277,10 +305,13 @@ pub fn run(conn: &mut Connection) -> Result<()> {
 /// [`i64::MAX`], so its behaviour is unchanged.
 /// Test: `tests::migration_v24_preserves_an_existing_v23_database`.
 ///
+/// Public since #189 so the CLI-level tests in `tests/dry_run_no_migrate.rs`
+/// can build an older-schema database file for the binary to run against.
+///
 /// # Errors
 ///
 /// Returns [`TgaError::MigrationError`] if a migration's SQL fails.
-pub(crate) fn run_through(conn: &mut Connection, max_version: i64) -> Result<()> {
+pub fn run_through(conn: &mut Connection, max_version: i64) -> Result<()> {
     ensure_migrations_table(conn)?;
     let current = current_version(conn)?;
     debug!(current_version = current, "running migrations");
