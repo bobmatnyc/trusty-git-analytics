@@ -162,7 +162,9 @@ pub async fn run_reporting_fetch(
         .with_verbose_fetch(args.verbose_fetch);
 
     // In dry-run mode, redirect all writes to an ephemeral in-memory
-    // database. The real `db` is never opened for write.
+    // database; nothing here touches `db`. #189: `db` itself is the caller's
+    // to open — `main` hands a dry run an in-memory database rather than
+    // opening the real file, which would migrate it.
     let stats = if args.dry_run {
         tracing::info!("Dry run — no database writes will occur");
         let mut shadow = Database::open_in_memory()?;

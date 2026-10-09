@@ -200,6 +200,36 @@ fn run_validation(config: &Config, no_validate: bool, validate_only: bool) -> an
     ))
 }
 
+/// How `main` opens the database for a command (#189).
+enum DryRunOpen {
+    /// Not a dry run: the creating, migrating, WAL open.
+    No,
+    /// A dry run whose pipeline runs on its own in-memory shadow database.
+    Shadow,
+    /// A dry run that reads the real file: read-only, never migrated.
+    ReadOnly,
+}
+
+/// Classify `command` by how its database must be opened.
+///
+/// Why: #189 — `--dry-run` is read inside each command, after `main` has
+/// already migrated the file, so `main` has to decide before the open.
+/// What: `collect`/`analyze` dry runs get [`DryRunOpen::Shadow`]; `backfill`,
+/// `linear sync` and `jira sync` dry runs get [`DryRunOpen::ReadOnly`];
+/// everything else [`DryRunOpen::No`]. `profile` is dispatched before this
+/// point and opens read-only itself.
+/// Test: `tests/dry_run_no_migrate.rs`.
+fn dry_run_open(command: &Commands) -> DryRunOpen {
+    match command {
+        Commands::Collect(a) if a.dry_run => DryRunOpen::Shadow,
+        Commands::Analyze(a) if a.dry_run => DryRunOpen::Shadow,
+        Commands::Backfill(a) if a.dry_run => DryRunOpen::ReadOnly,
+        Commands::Linear(a) if a.is_dry_run() => DryRunOpen::ReadOnly,
+        Commands::Jira(a) if a.is_dry_run() => DryRunOpen::ReadOnly,
+        _ => DryRunOpen::No,
+    }
+}
+
 /// Bundled declarative help config (issue #216). Loaded once per process.
 ///
 /// Why: every standalone trusty-* binary embeds its `help.yaml` via
@@ -418,9 +448,23 @@ async fn run() -> anyhow::Result<()> {
         return commands::profile::run(config, &db_path, args).await;
     }
 
-    // Open SQLite database (runs migrations on open).
-    tracing::info!(path = %db_path.display(), "opening database");
-    let mut db = Database::open(&db_path)?;
+    // #189: a `--dry-run` must leave the database file exactly as it found it.
+    // `Database::open` creates a missing file, switches it to WAL and runs
+    // every pending migration, so only a real run goes through it.
+    let mut db = match dry_run_open(&cli.command) {
+        DryRunOpen::No => {
+            // Open SQLite database (runs migrations on open).
+            tracing::info!(path = %db_path.display(), "opening database");
+            Database::open(&db_path)?
+        }
+        // `collect` and `analyze` run a dry run's whole pipeline on an
+        // in-memory shadow and never read the real file.
+        DryRunOpen::Shadow => Database::open_in_memory()?,
+        DryRunOpen::ReadOnly => {
+            tracing::info!(path = %db_path.display(), "opening database read-only (--dry-run)");
+            Database::open_read_only(&db_path)?
+        }
+    };
 
     match cli.command {
         Commands::Author(args) => commands::author::run(config, &db, args)?,

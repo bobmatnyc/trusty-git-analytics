@@ -150,8 +150,13 @@ pub async fn run(config: Config, db_path: &Path, args: ProfileArgs) -> Result<()
     };
     eprintln!("[tga profile] database: {}", db_path.display());
 
-    let selector = ContributorSelector::open(&db_path)
-        .with_context(|| format!("cannot open tga database {}", db_path.display()))?;
+    // #189: a dry run reads the database read-only and never migrates it.
+    let selector = if args.dry_run {
+        ContributorSelector::open_read_only(&db_path)
+    } else {
+        ContributorSelector::open(&db_path)
+    }
+    .with_context(|| format!("cannot open tga database {}", db_path.display()))?;
     let identity = selector.resolve(&args.contributor)?;
     eprintln!(
         "[tga profile] contributor: {} <{}>",
