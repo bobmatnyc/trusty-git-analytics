@@ -321,6 +321,10 @@ pub const CONSTRAINED: &[&str] = &[
     "linear_sync_cursor.team_key",
     "linear_sync_cursor.last_synced_at",
     "linear_sync_cursor.last_run_at",
+    // #190: the incremental comments cursor (migration v37).
+    "linear_comment_cursor.team_key",
+    "linear_comment_cursor.cursor_updated_at",
+    "linear_comment_cursor.last_run_at",
     // #111: LLM-tier token accounting; every value is written by tga.
     "llm_usage.commit_sha",
     "llm_usage.provider",

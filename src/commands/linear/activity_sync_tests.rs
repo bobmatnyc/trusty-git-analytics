@@ -1,9 +1,12 @@
 //! `tga linear sync --history --comments` end to end against a mock Linear
 //! (#190 step 6): rows per issue, the failed read that must stay due, the
 //! re-run that reads nothing, `--backfill`, and the dry run. Hand-built
-//! GraphQL pages; no network.
+//! GraphQL pages; no network. Since #190's comment cursor, an incremental
+//! `--comments` reads the workspace `comments` query
+//! (`super::comment_cursor_tests`); only `--backfill` walks each issue's.
 
 use super::*;
+use serde_json::json;
 use tga::collect::linear::activity::tests::{
     activity_call, activity_page, comment_node, history_node, not_found_page,
 };
@@ -33,7 +36,37 @@ async fn mount_issue_list(server: &MockServer, identifiers: &[&str]) {
         .collect();
     Mock::given(method("POST"))
         .and(body_string_contains("\"eq\":\"ENG\""))
+        .and(body_string_contains("issues(first: $first"))
         .respond_with(page_response(nodes, false, None))
+        .mount(server)
+        .await;
+}
+
+/// #190: answer the workspace `comments` query with one comment on each of
+/// `identifiers`, the same comment [`mount_activity`] gives the issue.
+async fn mount_team_comments(server: &MockServer, identifiers: &[&str]) {
+    let nodes: Vec<_> = identifiers
+        .iter()
+        .map(|i| {
+            let id = format!("uuid-{i}");
+            let mut n = comment_node(
+                &format!("{id}-c1"),
+                "2026-01-01T00:00:10.000Z",
+                "lgtm",
+                None,
+            );
+            n["issue"] = json!({"id": id, "identifier": i, "team": {"key": "ENG"}});
+            n
+        })
+        .collect();
+    Mock::given(method("POST"))
+        .and(body_string_contains(
+            "comments(first: $first, after: $after, filter:",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"comments": {"nodes": nodes,
+                     "pageInfo": {"hasNextPage": false, "endCursor": null}}}
+        })))
         .mount(server)
         .await;
 }
@@ -110,6 +143,7 @@ async fn activity_requests(server: &MockServer) -> usize {
 async fn history_and_comments_land_for_every_issue() {
     let server = MockServer::start().await;
     mount_issues(&server).await;
+    mount_team_comments(&server, &ISSUES).await;
     for i in ISSUES {
         mount_activity(&server, i).await;
     }
@@ -132,7 +166,7 @@ async fn history_and_comments_land_for_every_issue() {
         2
     );
     let activity = &outcomes[0].activity;
-    assert_eq!(activity.len(), 2);
+    assert_eq!(activity.len(), 1, "incremental comments are not per issue");
     assert_eq!(
         (
             activity[0].kind,
@@ -142,15 +176,8 @@ async fn history_and_comments_land_for_every_issue() {
         ),
         (ActivityKind::History, 2, 2, 4)
     );
-    assert_eq!(
-        (
-            activity[1].kind,
-            activity[1].due,
-            activity[1].read,
-            activity[1].rows
-        ),
-        (ActivityKind::Comments, 2, 2, 2)
-    );
+    let comments = outcomes[0].comments.as_ref().expect("comments pass");
+    assert_eq!((comments.read, comments.written), (2, 2));
     assert!(activity[0].summary_line(false).contains("wrote 4"));
 }
 
@@ -234,6 +261,7 @@ async fn requests_for(server: &MockServer, issue_id: &str) -> usize {
 /// connections.
 async fn mount_one_missing(server: &MockServer, listed: &[&str]) {
     mount_issue_list(server, listed).await;
+    mount_team_comments(server, &["ENG-1", "ENG-3"]).await;
     mount_activity(server, "ENG-1").await;
     mount_activity(server, "ENG-3").await;
     for kind in [ActivityKind::History, ActivityKind::Comments] {
@@ -247,7 +275,8 @@ async fn mount_one_missing(server: &MockServer, listed: &[&str]) {
 /// #190 step 6 (owner ruling D28: 404 = counted warning): an issue Linear no
 /// longer has does not stop the run. The issues after it are read, the
 /// missing one is counted in the summary line and tombstoned, and the run
-/// succeeds. The comments pass skips the issue the history pass tombstoned.
+/// succeeds. The incremental comments pass reads the workspace query, which
+/// Linear answers without the deleted issue.
 #[tokio::test]
 async fn a_missing_issue_is_tombstoned_and_the_run_goes_on() {
     let server = MockServer::start().await;
@@ -267,10 +296,8 @@ async fn a_missing_issue_is_tombstoned_and_the_run_goes_on() {
         (activity[0].due, activity[0].read, activity[0].rows),
         (3, 2, 4)
     );
-    assert_eq!(
-        (activity[1].due, activity[1].read, activity[1].rows),
-        (2, 2, 2)
-    );
+    let comments = outcomes[0].comments.as_ref().expect("comments pass");
+    assert_eq!((comments.read, comments.written), (2, 2));
     let line = activity[0].summary_line(false);
     assert!(
         line.contains("1 issue(s) no longer in Linear") && line.contains("ENG-2"),
@@ -302,6 +329,7 @@ async fn a_missing_issue_is_tombstoned_and_the_run_goes_on() {
 async fn a_tombstoned_issue_is_skipped_until_backfill() {
     let server = MockServer::start().await;
     mount_issue_list(&server, &["ENG-1", "ENG-2", "ENG-3"]).await;
+    mount_team_comments(&server, &["ENG-1", "ENG-2", "ENG-3"]).await;
     for i in ["ENG-1", "ENG-2", "ENG-3"] {
         mount_activity(&server, i).await;
     }
@@ -371,12 +399,15 @@ async fn a_tombstoned_issue_is_skipped_until_backfill() {
     );
 }
 
-/// #190 step 6: a re-run with no issue change sends no activity request;
-/// `--backfill` reads every issue again and leaves the row counts stable.
+/// #190 step 6: a re-run with no issue change sends no history request;
+/// `--backfill` reads every issue's history and comments again and leaves the
+/// row counts stable. (#190: incremental comments are keyed on the comment,
+/// not the issue — `super::comment_cursor_tests`.)
 #[tokio::test]
 async fn unchanged_issues_are_not_read_again() {
     let server = MockServer::start().await;
     mount_issues(&server).await;
+    mount_team_comments(&server, &ISSUES).await;
     for i in ISSUES {
         mount_activity(&server, i).await;
     }
@@ -385,10 +416,11 @@ async fn unchanged_issues_are_not_read_again() {
     run_sync_with(&client, &Config::default(), &mut db, &args(true, true))
         .await
         .expect("first");
+    // Two history walks and one workspace comments walk.
     let first = activity_requests(&server).await;
-    assert_eq!(first, 4);
+    assert_eq!(first, 3);
 
-    let outcomes = run_sync_with(&client, &Config::default(), &mut db, &args(true, true))
+    let outcomes = run_sync_with(&client, &Config::default(), &mut db, &args(true, false))
         .await
         .expect("second");
     assert_eq!(activity_requests(&server).await, first);
@@ -419,7 +451,8 @@ async fn unchanged_issues_are_not_read_again() {
 }
 
 /// #190 step 6: a dry run counts the due issues from the fetched issues,
-/// sends no activity request, and leaves the database file unchanged.
+/// sends no activity request, and leaves the database file unchanged. #190:
+/// the incremental comments pass reports its bound and sends no request.
 #[tokio::test]
 async fn dry_run_counts_due_issues_and_sends_no_activity_request() {
     let server = MockServer::start().await;
@@ -454,6 +487,15 @@ async fn dry_run_counts_due_issues_and_sends_no_activity_request() {
     assert!(outcomes[0].activity[0]
         .summary_line(true)
         .contains("would read 2"));
+    let comments = outcomes[0].comments.as_ref().expect("comments pass");
+    assert_eq!(comments.read, 0);
+    assert!(
+        comments
+            .summary_line(true)
+            .contains("would read every comment of the team"),
+        "{}",
+        comments.summary_line(true)
+    );
     assert_eq!(activity_requests(&server).await, 0);
     assert_eq!(std::fs::read(&path).expect("read db"), before);
 }

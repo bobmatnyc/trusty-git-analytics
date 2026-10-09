@@ -37,6 +37,8 @@ use tga::core::db::{get_linear_cursor, list_linear_cursor_teams, Database};
 
 // #190 step 6: per-issue history and comments.
 mod activity_sync;
+// #190: the incremental comments pass, keyed on the comment's updatedAt.
+mod comment_sync;
 // #190 step 5: the bulk sync `tga collect` runs under `linear.sync_on_collect`.
 pub mod collect_sync;
 mod entity_sync;
@@ -62,9 +64,13 @@ is always a full pull automatically, even without --backfill). An issue whose\n\
 --entities also stores the workspace's teams, users, labels, projects,\n\
 project milestones and cycles (archived included) in their own tables, one\n\
 transaction per entity set, after the issues.\n\n\
---history stores each issue's workflow-state transitions and --comments its\n\
-comment metadata (author, times, body length; never the body), one request\n\
-walk per issue, for issues that changed since their last read.\n\n\
+--history stores each issue's workflow-state transitions, one request walk per\n\
+issue, for issues that changed since their last read. --comments stores\n\
+comment metadata (author, times, body length; never the body): each team's\n\
+comments updated since its comment cursor (minus a 10-minute overlap), read\n\
+through Linear's workspace `comments` query, or every comment of the team on\n\
+the first run. With --backfill, --comments walks each issue instead and also\n\
+removes comments Linear deleted; the incremental walk cannot see deletions.\n\n\
 Requires `linear.api_key` (or a shared-credential fallback) configured, and\n\
 --team, --all-teams, or exactly one entry in `linear.team_keys`.",
     after_help = "EXAMPLES:\n\
@@ -119,10 +125,11 @@ pub struct LinearSyncArgs {
     /// walk per issue.
     #[arg(long, default_value_t = false)]
     pub history: bool,
-    /// After each team's issues, read the comment metadata of every issue
-    /// that changed since its comments were last read (all of the team's
-    /// issues with --backfill) into `fact_linear_comment_detail`. Comment
-    /// bodies are never stored. One request walk per issue.
+    /// After each team's issues, read the team's comments updated since its
+    /// comment cursor (every comment on the first run) into
+    /// `fact_linear_comment_detail`, 250 per request. With --backfill, walk
+    /// each issue's comments instead, which also removes deleted comments.
+    /// Comment bodies are never stored.
     #[arg(long, default_value_t = false)]
     pub comments: bool,
 }
@@ -260,7 +267,10 @@ pub async fn run_sync(
 /// included unless `--exclude-archived`. The first team that fails stops the
 /// run with an error naming it; teams already synced keep their rows and
 /// cursors. #190 step 6: with `--history` / `--comments`,
-/// [`activity_sync::sync_activity`] runs after each team's issue pass. An
+/// [`activity_sync::sync_activity`] runs after each team's issue pass —
+/// except an incremental `--comments`, which runs
+/// [`comment_sync::sync_comments`] (#190: keyed on the comment's own
+/// `updatedAt`, not the issue's). An
 /// issue Linear no longer has is counted and tombstoned, not a failure
 /// (owner ruling D28); any other failure stops the run the same way, after
 /// the team's issue rows and cursor are committed. With `--entities`,
@@ -268,6 +278,8 @@ pub async fn run_sync(
 /// Test: `sync_tests::all_teams_syncs_each_team_under_its_own_cursor`,
 /// `activity_sync_tests::a_failed_history_read_fails_the_sync_and_stays_due`,
 /// `activity_sync_tests::a_missing_issue_is_tombstoned_and_the_run_goes_on`,
+/// `comment_cursor_tests::a_failed_comments_page_fails_the_run_and_keeps_the_cursor`,
+/// `comment_cursor_tests::backfill_keeps_the_per_issue_walk`,
 /// `sync_tests::cap_exceeded_fails_and_writes_nothing`,
 /// `sync_tests::dry_run_reports_and_writes_nothing`,
 /// `sync_tests::second_sync_with_no_remote_change_writes_nothing`,
@@ -320,6 +332,22 @@ pub(crate) async fn run_sync_with(
             &[]
         };
         for kind in args.activity_kinds() {
+            // #190: an incremental run reads comments by their own
+            // updatedAt; `--backfill` keeps the per-issue walk.
+            if kind == ActivityKind::Comments && !args.backfill {
+                let comments = comment_sync::sync_comments(client, db, team_key, args.dry_run)
+                    .await
+                    .map_err(|e| {
+                        e.context(format!(
+                            "tga linear sync failed reading Linear comments for team {team_key}; \
+                             the team's issue rows and cursor were kept, no comment from this \
+                             walk was written, and the comments cursor did not move"
+                        ))
+                    })?;
+                println!("{}", comments.summary_line(args.dry_run));
+                outcome.comments = Some(comments);
+                continue;
+            }
             let activity = activity_sync::sync_activity(
                 client,
                 db,

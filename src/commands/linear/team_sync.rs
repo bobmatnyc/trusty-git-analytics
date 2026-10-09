@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use super::activity_sync::ActivityOutcome;
+use super::comment_sync::CommentsOutcome;
 use super::LinearSyncArgs;
 use tga::collect::linear::issue::ISSUE_FIELDS_VERSION;
 use tga::collect::linear::sync::{next_cursor, resolve_scope};
@@ -34,7 +35,11 @@ pub(crate) struct TeamOutcome {
     /// New / changed / moved / unchanged tallies against the stored rows.
     pub counts: ChangeCounts,
     /// #190 step 6: the history and comments passes run after the issues.
+    /// Comments land here only under `--backfill` (the per-issue walk).
     pub activity: Vec<ActivityOutcome>,
+    /// #190: the incremental comments pass (`--comments` without
+    /// `--backfill`).
+    pub comments: Option<CommentsOutcome>,
 }
 
 impl TeamOutcome {
@@ -166,6 +171,7 @@ pub(super) async fn sync_team(
         archived,
         counts: ChangeCounts::of(&changes),
         activity: Vec::new(),
+        comments: None,
     };
     // #190 step 6: the dry run's activity count reads the fetched issues.
     Ok((outcome, issues))

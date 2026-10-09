@@ -240,6 +240,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "linear_issue_activity",
         sql: include_str!("../sql/0036_linear_issue_activity.sql"),
     },
+    // #190: the per-team cursor of the incremental comments walk; additive,
+    // see the SQL file header.
+    Migration {
+        version: 37,
+        name: "linear_comment_cursor",
+        sql: include_str!("../sql/0037_linear_comment_cursor.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

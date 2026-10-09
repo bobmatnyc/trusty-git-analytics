@@ -261,17 +261,19 @@ async fn a_failed_comments_page_fails_the_run_and_keeps_the_cursor() {
         body: "why?",
     };
     mount(&server, &[C1, c2.clone()]).await;
-    // Mounted later, so these answer the workspace query first.
+    // Priority 1 beats the default 5, so these answer the workspace query.
     Mock::given(method("POST"))
         .and(body_string_contains(WORKSPACE_COMMENTS))
         .and(body_string_contains("\"after\":null"))
         .respond_with(workspace_page(&[c2], true, Some("p-1")))
+        .with_priority(1)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(body_string_contains(WORKSPACE_COMMENTS))
         .and(body_string_contains("\"after\":\"p-1\""))
         .respond_with(ResponseTemplate::new(500).set_body_string("upstream down"))
+        .with_priority(1)
         .mount(&server)
         .await;
     let err = sync(&server, &mut db, false)
@@ -304,7 +306,7 @@ async fn first_run_sweeps_the_team_without_a_bound() {
     assert_eq!(bodies.len(), 1, "{bodies:?}");
     assert!(
         bodies[0].contains("\"team\":{\"key\":{\"eq\":\"ENG\"}}")
-            && !bodies[0].contains("updatedAt"),
+            && !bodies[0].contains("\"updatedAt\":{"),
         "{}",
         bodies[0]
     );
@@ -340,4 +342,73 @@ async fn backfill_keeps_the_per_issue_walk() {
         "a deleted comment's row is removed"
     );
     assert!(stored(&db, "c1").is_some());
+}
+
+/// #190: a comment whose issue is not in `linear_issues` (created after the
+/// issue pass, or never synced) is stored and counted in the summary line,
+/// never dropped silently.
+#[tokio::test]
+async fn unlinked_comments_are_stored_and_counted() {
+    let server = MockServer::start().await;
+    let elsewhere = C {
+        id: "c9",
+        issue: "ENG-9",
+        ..C1
+    };
+    mount(&server, &[C1, elsewhere]).await;
+    let mut db = Database::open_in_memory().expect("db");
+    let outcomes = run_sync_with(
+        &mock_client(&server.uri()),
+        &Config::default(),
+        &mut db,
+        &args(false),
+    )
+    .await
+    .expect("sync");
+    let comments = outcomes[0].comments.as_ref().expect("comments pass");
+    assert_eq!((comments.written, comments.unlinked), (2, 1));
+    let line = comments.summary_line(false);
+    assert!(
+        line.contains("1 on issue(s) not yet in linear_issues"),
+        "{line}"
+    );
+    assert!(stored(&db, "c9").is_some());
+}
+
+/// #190: a dry run with a stored cursor reports the bound it would read from
+/// and sends no comments request.
+#[tokio::test]
+async fn dry_run_sends_no_comments_request() {
+    let server = MockServer::start().await;
+    mount(&server, &[C1]).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("tga.db");
+    {
+        let mut db = Database::open(&path).expect("create");
+        sync(&server, &mut db, false).await.expect("first run");
+    }
+    let before = workspace_requests(&server).await.len();
+    let mut db = Database::open_read_only(&path).expect("read-only open");
+    let dry = LinearSyncArgs {
+        dry_run: true,
+        ..args(false)
+    };
+    let outcomes = run_sync_with(
+        &mock_client(&server.uri()),
+        &Config::default(),
+        &mut db,
+        &dry,
+    )
+    .await
+    .expect("dry run");
+    assert_eq!(workspace_requests(&server).await.len(), before);
+    let line = outcomes[0]
+        .comments
+        .as_ref()
+        .expect("comments pass")
+        .summary_line(true);
+    assert!(
+        line.contains("would read comments updated after 2026-01-01T23:50:00.000Z"),
+        "{line}"
+    );
 }

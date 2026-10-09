@@ -9,9 +9,14 @@
 //! [`LinearClient::fetch_issue_activity`] walks one issue's `history` or
 //! `comments` to the end and returns the raw GraphQL nodes; [`store`] picks
 //! the issues whose activity is out of date and writes their rows. Linear has
-//! no workspace-wide history list, so the walk is per issue.
+//! no workspace-wide history list, so the history walk is per issue. #190:
+//! an incremental comments pass reads [`comments`] instead (a comment edit
+//! does not reliably move its issue's `updatedAt`); `--backfill` still walks
+//! each issue's comments.
 //! Test: `tests` below; `commands::linear::activity_sync_tests`.
 
+// #190: the incremental comments walk, keyed on the comment's own updatedAt.
+pub mod comments;
 pub mod store;
 
 use super::bulk::PageGuard;
@@ -257,3 +262,6 @@ impl LinearClient {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod comment_walk_tests;
