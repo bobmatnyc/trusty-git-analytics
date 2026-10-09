@@ -271,6 +271,159 @@ fn migration_v33_preserves_a_v32_linear_row() {
     );
 }
 
+/// #190 step 3: migration v35 gives each existing Linear `work_items` row
+/// the Linear id its `linear_issues` row holds, and changes nothing else. A
+/// row with no such `linear_issues` row (written before v33, or a stale copy
+/// a move left behind) keeps a NULL key; another source's row is untouched.
+#[test]
+fn migration_v35_keys_existing_linear_work_items() {
+    use crate::core::db::migrations::{run, run_through};
+    let mut conn = rusqlite::Connection::open_in_memory().expect("conn");
+    run_through(&mut conn, 34).expect("v34");
+    conn.execute_batch(
+        "INSERT INTO linear_issues (identifier, title, state, team, team_key, fetched_at, \
+         linear_id) VALUES ('OPS-12', 't', 'Todo', 'Ops', 'OPS', 'f', 'uuid-5'); \
+         INSERT INTO linear_issues (identifier, title, state, team, team_key, fetched_at) \
+         VALUES ('ENG-9', 't', 'Todo', 'Engineering', 'ENG', 'f'); \
+         INSERT INTO work_items (id, source, title, status, item_type) VALUES \
+         ('OPS-12', 'linear', 'current', 'Todo', 'Issue'), \
+         ('ENG-5', 'linear', 'stale copy', 'Todo', 'Issue'), \
+         ('ENG-9', 'linear', 'pre-v33', 'Todo', 'Issue'), \
+         ('OPS-12', 'jira', 'other source', 'Open', 'Task');",
+    )
+    .expect("seed v34 rows");
+
+    run(&mut conn).expect("migrate");
+    let rows: Vec<(String, String, String, Option<String>)> = conn
+        .prepare("SELECT id, source, title, stable_id FROM work_items ORDER BY source, id")
+        .expect("prepare")
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .expect("query")
+        .collect::<std::result::Result<_, _>>()
+        .expect("rows");
+    assert_eq!(
+        rows,
+        vec![
+            ("OPS-12".into(), "jira".into(), "other source".into(), None),
+            ("ENG-5".into(), "linear".into(), "stale copy".into(), None),
+            ("ENG-9".into(), "linear".into(), "pre-v33".into(), None),
+            (
+                "OPS-12".into(),
+                "linear".into(),
+                "current".into(),
+                Some("uuid-5".into())
+            ),
+        ]
+    );
+}
+
+/// A pre-v33 row (NULL `linear_id`) the way migration v33 left it.
+fn legacy_row(db: &Database, identifier: &str) -> i64 {
+    db.connection()
+        .execute(
+            "INSERT INTO linear_issues (identifier, title, state, team, team_key, fetched_at) \
+             VALUES (?1, 'old', 'Todo', 'Engineering', 'ENG', '2026-01-01T00:00:00Z')",
+            [identifier],
+        )
+        .expect("legacy row");
+    db.connection().last_insert_rowid()
+}
+
+/// `issue` carrying Linear's `previousIdentifiers` for a moved issue.
+fn moved(lid: &str, identifier: &str, team_key: &str, previous: &[&str]) -> LinearIssue {
+    let mut node = full_node(lid, identifier, team_key);
+    node["previousIdentifiers"] = serde_json::json!(previous);
+    parse_issue_node("", &node)
+}
+
+/// #190 step 3: an issue that moved team before its first post-v33 sync left
+/// a pre-v33 row under its old identifier. Linear lists that identifier in
+/// `previousIdentifiers`, so the sync adopts the row in place instead of
+/// inserting a second one.
+#[test]
+fn orphan_under_a_previous_identifier_is_adopted() {
+    let db = Database::open_in_memory().expect("db");
+    let legacy_id = legacy_row(&db, "ENG-5");
+
+    let changes =
+        upsert_linear_issues(&db, &[moved("uuid-5", "OPS-12", "OPS", &["ENG-5"])]).expect("sync");
+    assert_eq!(changes, vec![IssueChange::Moved]);
+    assert_eq!(
+        rows(&db),
+        vec![(
+            Some("uuid-5".to_string()),
+            "OPS-12".to_string(),
+            "OPS".to_string()
+        )]
+    );
+    let id: i64 = db
+        .connection()
+        .query_row("SELECT id FROM linear_issues", [], |r| r.get(0))
+        .expect("id");
+    assert_eq!(id, legacy_id, "the legacy row is updated in place");
+}
+
+/// #190 step 3: the state step 1 left after such a move — the pre-v33 row
+/// under the old identifier beside the post-v33 row under the new one. The
+/// next sync of the issue drops the stale copy.
+#[test]
+fn stale_copy_under_a_previous_identifier_is_evicted() {
+    let db = Database::open_in_memory().expect("db");
+    legacy_row(&db, "ENG-5");
+    upsert_linear_issues(
+        &db,
+        &[issue("uuid-5", "OPS-12", "OPS", "2026-01-01T00:00:00Z")],
+    )
+    .expect("step-1 sync");
+    assert_eq!(rows(&db).len(), 2, "precondition: the orphan exists");
+
+    upsert_linear_issues(&db, &[moved("uuid-5", "OPS-12", "OPS", &["ENG-5"])]).expect("re-sync");
+    assert_eq!(
+        rows(&db),
+        vec![(
+            Some("uuid-5".to_string()),
+            "OPS-12".to_string(),
+            "OPS".to_string()
+        )]
+    );
+}
+
+/// A row under a previous identifier that carries a DIFFERENT `linear_id`
+/// is another issue's row; it is never evicted.
+#[test]
+fn previous_identifier_held_by_another_issue_is_kept() {
+    let db = Database::open_in_memory().expect("db");
+    upsert_linear_issues(
+        &db,
+        &[issue("uuid-other", "ENG-5", "ENG", "2026-01-01T00:00:00Z")],
+    )
+    .expect("other issue");
+
+    upsert_linear_issues(&db, &[moved("uuid-5", "OPS-12", "OPS", &["ENG-5"])]).expect("sync");
+    assert_eq!(rows(&db).len(), 2);
+}
+
+/// #190 step 3: a field added to the query (here `description`) reaches an
+/// issue whose `updatedAt` did not change. Comparing `updatedAt` alone
+/// reported it `Unchanged` and never stored the new field.
+#[test]
+fn widened_field_set_rewrites_an_issue_with_the_same_updated_at() {
+    let db = Database::open_in_memory().expect("db");
+    let before = issue("uuid-1", "ENG-1", "ENG", "2026-01-01T00:00:00Z");
+    upsert_linear_issues(&db, &[before]).expect("first");
+
+    let mut node = full_node("uuid-1", "ENG-1", "ENG");
+    node["updatedAt"] = serde_json::json!("2026-01-01T00:00:00Z");
+    node["description"] = serde_json::json!("Body text.");
+    let changes = upsert_linear_issues(&db, &[parse_issue_node("", &node)]).expect("second");
+    assert_eq!(changes, vec![IssueChange::Changed]);
+    let raw: String = db
+        .connection()
+        .query_row("SELECT raw_json FROM linear_issues", [], |r| r.get(0))
+        .expect("row");
+    assert!(raw.contains("Body text."), "{raw}");
+}
+
 #[test]
 fn store_linear_issues_handles_missing_assignee() {
     let db = Database::open_in_memory().expect("db");

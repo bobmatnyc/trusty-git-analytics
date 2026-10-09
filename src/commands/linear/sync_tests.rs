@@ -360,3 +360,151 @@ async fn failed_work_items_write_is_repaired_by_the_next_sync() {
         "the failed sync must roll its linear_issues rows back"
     );
 }
+
+/// #190 step 3: the team move keeps one `work_items` row as well, under the
+/// new identifier. Keyed by identifier, the second sync added `OPS-12` beside
+/// the stale `ENG-5`.
+#[tokio::test]
+async fn moved_issue_keeps_one_work_items_row_across_runs() {
+    let server = MockServer::start().await;
+    mount_issues(
+        &server,
+        "ENG",
+        vec![team_node("uuid-m", "ENG-5", "ENG", "2026-01-01T00:00:00Z")],
+    )
+    .await;
+    let client = mock_client(&server.uri());
+    let mut db = Database::open_in_memory().expect("db");
+    run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+        .await
+        .expect("first");
+
+    server.reset().await;
+    let mut moved = team_node("uuid-m", "OPS-12", "OPS", "2026-01-02T00:00:00Z");
+    moved["previousIdentifiers"] = serde_json::json!(["ENG-5"]);
+    mount_issues(&server, "OPS", vec![moved]).await;
+    run_sync_with(&client, &Config::default(), &mut db, &args(Some("OPS")))
+        .await
+        .expect("second");
+
+    let ids: Vec<String> = db
+        .connection()
+        .prepare("SELECT id FROM work_items WHERE source = 'linear'")
+        .expect("prepare")
+        .query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("ids");
+    assert_eq!(ids, vec!["OPS-12".to_string()]);
+}
+
+/// The JSON body of the last request the mock received.
+async fn last_request(server: &MockServer) -> String {
+    let requests = server.received_requests().await.expect("recorded");
+    String::from_utf8_lossy(&requests.last().expect("a request").body).to_string()
+}
+
+/// #190 step 3: a team whose cursor was written under the older field set
+/// is re-read in full once, so issues that did not change since still get
+/// the new fields; the run after that resumes from the cursor.
+#[tokio::test]
+async fn older_field_set_refetches_full_history_once() {
+    let server = MockServer::start().await;
+    mount_issues(
+        &server,
+        "ENG",
+        vec![node("ENG-1", "2026-01-01T00:01:00.000Z", None)],
+    )
+    .await;
+    let client = mock_client(&server.uri());
+    let mut db = Database::open_in_memory().expect("db");
+    // A cursor as an earlier tga wrote it, with no record of the field set.
+    tga::core::db::set_linear_cursor(db.connection(), "ENG", "2026-01-01T00:01:00+00:00", 1)
+        .expect("seed cursor");
+
+    run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+        .await
+        .expect("refresh");
+    let refresh = last_request(&server).await;
+    assert!(
+        !refresh.contains("\"gte\""),
+        "the refresh must not bound updatedAt: {refresh}"
+    );
+
+    run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+        .await
+        .expect("incremental");
+    let incremental = last_request(&server).await;
+    assert!(
+        incremental.contains("\"gte\""),
+        "the run after the refresh resumes from the cursor: {incremental}"
+    );
+}
+
+/// #190 step 3: a `--since` run does not read the whole history, so it must
+/// not record the field set as current; the next plain run still refreshes.
+#[tokio::test]
+async fn since_bounded_run_does_not_mark_the_field_set_current() {
+    let server = MockServer::start().await;
+    mount_issues(
+        &server,
+        "ENG",
+        vec![node("ENG-1", "2026-01-01T00:01:00.000Z", None)],
+    )
+    .await;
+    let client = mock_client(&server.uri());
+    let mut db = Database::open_in_memory().expect("db");
+    tga::core::db::set_linear_cursor(db.connection(), "ENG", "2026-01-01T00:01:00+00:00", 1)
+        .expect("seed cursor");
+
+    let bounded = LinearSyncArgs {
+        since: Some("2025-12-01".to_string()),
+        ..args(Some("ENG"))
+    };
+    run_sync_with(&client, &Config::default(), &mut db, &bounded)
+        .await
+        .expect("bounded");
+    run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+        .await
+        .expect("plain");
+    let plain = last_request(&server).await;
+    assert!(
+        !plain.contains("\"gte\""),
+        "the field set was never refreshed in full: {plain}"
+    );
+}
+
+/// #190 step 3 (Fail-Open): when recording the field set fails, the team's
+/// whole sync rolls back — no issue row, no cursor — instead of advancing
+/// state that claims a refresh that was never recorded.
+#[tokio::test]
+async fn failed_field_set_write_rolls_the_team_back() {
+    let server = MockServer::start().await;
+    mount_issues(
+        &server,
+        "ENG",
+        vec![node("ENG-1", "2026-01-01T00:01:00.000Z", None)],
+    )
+    .await;
+    let mut db = Database::open_in_memory().expect("db");
+    db.connection()
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_cursor_update BEFORE UPDATE ON linear_sync_cursor \
+             BEGIN SELECT RAISE(ABORT, 'injected cursor failure'); END;",
+        )
+        .expect("trigger");
+
+    let err = run_sync_with(
+        &mock_client(&server.uri()),
+        &Config::default(),
+        &mut db,
+        &args(Some("ENG")),
+    )
+    .await
+    .expect_err("a failed field-set write must fail the sync");
+    assert!(format!("{err:#}").contains("injected"), "{err:#}");
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM linear_issues"), 0);
+    assert!(get_linear_cursor(db.connection(), "ENG")
+        .expect("read")
+        .is_none());
+}

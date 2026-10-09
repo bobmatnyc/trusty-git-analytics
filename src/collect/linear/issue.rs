@@ -276,6 +276,17 @@ pub(crate) mod tests {
         assert_eq!(issue.raw.as_ref(), Some(&node));
     }
 
+    /// #190 step 3: the effort and work extractors read `description`, and the
+    /// move handling reads `previousIdentifiers`; the query must ask for both.
+    #[test]
+    fn issue_fields_request_description_and_previous_identifiers() {
+        assert!(ISSUE_FIELDS.contains(" description "), "{ISSUE_FIELDS}");
+        assert!(
+            ISSUE_FIELDS.contains("previousIdentifiers"),
+            "{ISSUE_FIELDS}"
+        );
+    }
+
     #[test]
     fn parse_issue_node_tolerates_absent_optional_fields() {
         let node = serde_json::json!({"identifier": "ENG-1", "title": "t"});

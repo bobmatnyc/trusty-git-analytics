@@ -481,6 +481,205 @@ mod tests {
         );
     }
 
+    /// An issue parsed from a GraphQL node, as the sync and the per-commit
+    /// lookup see it: `lid` is Linear's id, `previous` its
+    /// `previousIdentifiers`.
+    fn node_issue(lid: &str, identifier: &str, team: &str, previous: &[&str]) -> LinearIssue {
+        let mut node = crate::collect::linear::issue::tests::full_node(lid, identifier, team);
+        node["previousIdentifiers"] = serde_json::json!(previous);
+        crate::collect::linear::issue::parse_issue_node("", &node)
+    }
+
+    /// `(id, commit_sha)` for every Linear work item and its links.
+    fn linear_ids_and_links(db: &Database) -> (Vec<String>, Vec<(String, String)>) {
+        let conn = db.connection();
+        let ids = conn
+            .prepare("SELECT id FROM work_items WHERE source = 'linear' ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("ids");
+        let links = conn
+            .prepare(
+                "SELECT commit_sha, work_item_id FROM commit_work_items \
+                 WHERE work_item_source = 'linear' ORDER BY commit_sha",
+            )
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .expect("query")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("links");
+        (ids, links)
+    }
+
+    /// #190 step 3: an issue that moves team (same Linear id, new identifier)
+    /// keeps ONE `work_items` row, now under its new identifier, and the
+    /// commit links follow it. Keyed by identifier alone, the move wrote a
+    /// second row and left the links on the stale one. The node carries no
+    /// `previousIdentifiers`, so only the stored Linear id can find the row.
+    #[test]
+    fn moved_issue_keeps_one_work_items_row_and_its_links() {
+        let mut db = Database::open_in_memory().expect("db");
+        let refs = build_commit_refs(&[("sha1".to_string(), "ENG-5: work".to_string())]);
+        persist_work_items(&mut db, &[node_issue("uuid-5", "ENG-5", "ENG", &[])], &refs)
+            .expect("first");
+
+        persist_work_items(
+            &mut db,
+            &[node_issue("uuid-5", "OPS-12", "OPS", &[])],
+            &HashMap::new(),
+        )
+        .expect("move");
+
+        let (ids, links) = linear_ids_and_links(&db);
+        assert_eq!(ids, vec!["OPS-12".to_string()]);
+        assert_eq!(links, vec![("sha1".to_string(), "OPS-12".to_string())]);
+    }
+
+    /// #190 step 3: a row written before the Linear id was stored, under an
+    /// identifier the issue has since left, is merged into the issue's row —
+    /// its commit links and its `fact_pm_work` row move with it.
+    #[test]
+    fn legacy_work_item_under_a_previous_identifier_is_merged() {
+        use crate::core::db::work_items::{link_commit_work_item, upsert_work_item};
+        let mut db = Database::open_in_memory().expect("db");
+        let mut legacy = issue("ENG-5");
+        legacy.title = "Legacy row".to_string();
+        let row = WorkItemRow {
+            id: "ENG-5".to_string(),
+            source: LINEAR_SOURCE.to_string(),
+            title: legacy.title.clone(),
+            status: legacy.state.clone(),
+            item_type: LINEAR_ITEM_TYPE.to_string(),
+            tags: None,
+            project: None,
+            url: Some(legacy.url.clone()),
+            raw_json: legacy.raw_json(),
+        };
+        upsert_work_item(db.connection(), &row).expect("legacy work item");
+        link_commit_work_item(db.connection(), "sha1", "ENG-5", LINEAR_SOURCE).expect("link");
+        db.connection()
+            .execute(
+                "INSERT INTO fact_pm_work (work_item_id, work_item_source, is_meaningful, \
+                 exclusion_reason, title_word_count, body_word_count, computed_at) \
+                 VALUES ('ENG-5', 'linear', 1, 'NONE', 2, 0, 0)",
+                [],
+            )
+            .expect("legacy fact row");
+
+        persist_work_items(
+            &mut db,
+            &[node_issue("uuid-5", "OPS-12", "OPS", &["ENG-5"])],
+            &HashMap::new(),
+        )
+        .expect("sync of the moved issue");
+
+        let (ids, links) = linear_ids_and_links(&db);
+        assert_eq!(ids, vec!["OPS-12".to_string()]);
+        assert_eq!(links, vec![("sha1".to_string(), "OPS-12".to_string())]);
+        let fact: String = db
+            .connection()
+            .query_row("SELECT work_item_id FROM fact_pm_work", [], |r| r.get(0))
+            .expect("fact row");
+        assert_eq!(fact, "OPS-12");
+    }
+
+    /// #190 step 3: a commit that names an issue by an identifier it has
+    /// since left links to the issue. Linear resolves the old identifier to
+    /// the moved issue, and the link used to be dropped because the fetched
+    /// identifier differed from the one the commit named.
+    #[test]
+    fn commit_naming_a_previous_identifier_links_the_moved_issue() {
+        let mut db = Database::open_in_memory().expect("db");
+        let refs = build_commit_refs(&[("sha9".to_string(), "ENG-5: old name".to_string())]);
+        persist_work_items(
+            &mut db,
+            &[node_issue("uuid-5", "OPS-12", "OPS", &["ENG-5"])],
+            &refs,
+        )
+        .expect("persist");
+        let (_, links) = linear_ids_and_links(&db);
+        assert_eq!(links, vec![("sha9".to_string(), "OPS-12".to_string())]);
+    }
+
+    /// #190 step 3 (Fail-Open): one identifier claimed by two Linear ids is
+    /// an error, and the row already stored is not overwritten.
+    #[test]
+    fn identifier_held_by_another_linear_id_errors() {
+        let mut db = Database::open_in_memory().expect("db");
+        persist_work_items(
+            &mut db,
+            &[node_issue("uuid-a", "ENG-1", "ENG", &[])],
+            &HashMap::new(),
+        )
+        .expect("first issue");
+        let mut other = node_issue("uuid-b", "ENG-1", "ENG", &[]);
+        other.title = "A different issue".to_string();
+
+        let err = persist_work_items(&mut db, &[other], &HashMap::new())
+            .expect_err("a second Linear id under one identifier must fail");
+        assert!(err.to_string().contains("ENG-1"), "{err}");
+        let title: String = db
+            .connection()
+            .query_row(
+                "SELECT title FROM work_items WHERE id = 'ENG-1' AND source = 'linear'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(title, "Title for ENG-1");
+    }
+
+    /// #190 step 3 (Fail-Open): a merge that fails part-way rolls the whole
+    /// batch back; the stale row and its link stay where they were.
+    #[test]
+    fn failed_merge_rolls_back() {
+        let mut db = Database::open_in_memory().expect("db");
+        let refs = build_commit_refs(&[("sha1".to_string(), "ENG-5: work".to_string())]);
+        persist_work_items(&mut db, &[node_issue("uuid-5", "ENG-5", "ENG", &[])], &refs)
+            .expect("first");
+        db.connection()
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_delete BEFORE DELETE ON work_items \
+                 BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;",
+            )
+            .expect("trigger");
+
+        let err = persist_work_items(
+            &mut db,
+            &[node_issue("uuid-5", "OPS-12", "OPS", &[])],
+            &HashMap::new(),
+        )
+        .expect_err("a failed merge must fail the write");
+        assert!(err.to_string().contains("injected"), "{err}");
+        let (ids, links) = linear_ids_and_links(&db);
+        assert_eq!(ids, vec!["ENG-5".to_string()]);
+        assert_eq!(links, vec![("sha1".to_string(), "ENG-5".to_string())]);
+    }
+
+    /// #190 step 3: `work_items.tags` carries the issue's label names, the
+    /// way the other providers' rows carry theirs.
+    #[test]
+    fn work_item_tags_carry_the_labels() {
+        let mut db = Database::open_in_memory().expect("db");
+        persist_work_items(
+            &mut db,
+            &[node_issue("uuid-1", "ENG-1", "ENG", &[])],
+            &HashMap::new(),
+        )
+        .expect("persist");
+        let tags: Option<String> = db
+            .connection()
+            .query_row(
+                "SELECT tags FROM work_items WHERE id = 'ENG-1' AND source = 'linear'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(tags.as_deref(), Some("bug,api"));
+    }
+
     #[test]
     fn persist_work_items_no_issues_is_a_noop() {
         let mut db = Database::open_in_memory().expect("db");
