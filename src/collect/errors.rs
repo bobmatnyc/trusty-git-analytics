@@ -306,6 +306,25 @@ pub enum CollectError {
         /// The `first:` the query sent for it.
         limit: usize,
     },
+
+    /// A Linear page's `pageInfo` does not say whether the walk is done
+    /// (#190).
+    ///
+    /// Why: reading a missing `hasNextPage`, or `hasNextPage: true` with a
+    /// null `endCursor`, as the last page cut the walk short with no error.
+    /// The entity store marks every row it did not see as removed, so a cut
+    /// walk would mark live rows removed.
+    #[error("Linear {endpoint} paging for {key} (page {page}): {problem}; the walk stopped")]
+    LinearPageInfoInvalid {
+        /// Short name of the endpoint being walked, e.g. `linear/projects`.
+        endpoint: &'static str,
+        /// The team key walked, or `*` for a workspace-wide walk.
+        key: String,
+        /// 1-based page number within the walk.
+        page: usize,
+        /// What the page got wrong.
+        problem: &'static str,
+    },
 }
 
 /// Module-wide `Result` alias.

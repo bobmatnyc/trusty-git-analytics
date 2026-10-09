@@ -279,9 +279,19 @@ async fn workspace_with_projects(nodes: &[serde_json::Value], has_next: bool) ->
 async fn a_row_linear_stops_returning_is_marked_removed() {
     let mut db = synced_db().await;
     let server = workspace_with_projects(&[project("proj-old", &["team-ops"], true)], false).await;
-    sync_entities(&mock_client(&server.uri()), &mut db, false)
+    let outcomes = sync_entities(&mock_client(&server.uri()), &mut db, false)
         .await
         .expect("second sync");
+    for o in &outcomes {
+        let expected = usize::from(o.kind == EntityKind::Projects);
+        assert_eq!(o.removed, Some(expected), "{:?}", o.kind);
+    }
+    let line = super::entity_sync::summary_line(&outcomes, false);
+    assert!(
+        line.contains("projects 1 (1 archived, 1 removed)"),
+        "{line}"
+    );
+    assert!(line.contains("teams 3 (1 archived, 0 removed)"), "{line}");
 
     assert_eq!(
         count(

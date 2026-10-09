@@ -153,11 +153,13 @@ impl LinearClient {
     /// What: sends [`queries::query_for`] with `includeArchived: true`,
     /// `orderBy: createdAt` and (for users) `includeDisabled: true`, follows
     /// `endCursor` until `hasNextPage` is false, and returns every node as
-    /// Linear sent it. A 429/503 is retried with backoff.
+    /// Linear sent it. A 429/503 is retried with backoff. A page that does
+    /// not say whether more follow is an error, never the last page.
     /// Test: `entities::tests::every_entity_query_sends_include_archived`,
     /// `entities::tests::fetch_walks_every_page`,
     /// `entities::tests::a_cut_nested_team_list_fails_the_walk`,
-    /// `entities::tests::a_response_without_nodes_is_an_error`.
+    /// `entities::tests::a_response_without_nodes_is_an_error`,
+    /// `entities::tests::a_page_without_page_info_fails_the_walk`.
     ///
     /// # Errors
     ///
@@ -166,6 +168,8 @@ impl LinearClient {
     /// - [`CollectError::LinearNestedConnectionTruncated`] when a project has
     ///   more teams than the nested page holds.
     /// - [`CollectError::PagingBudgetExceeded`] when the cursor stops moving.
+    /// - [`CollectError::LinearPageInfoInvalid`] when a page has no boolean
+    ///   `hasNextPage`, or says more follow with a null `endCursor`.
     /// - [`CollectError::Http`] / [`CollectError::Throttled`] on transport
     ///   failure or spent retries.
     pub async fn fetch_entity_nodes(&self, kind: EntityKind) -> Result<Vec<serde_json::Value>> {
@@ -207,8 +211,19 @@ impl LinearClient {
             let rows = page.len();
             nodes.extend(page.iter().cloned());
             let info = &connection["pageInfo"];
+            // #190: a page that does not say whether more follow fails the
+            // set. Read as the last page, it would let the store mark every
+            // unseen row removed.
+            let Some(has_next) = info["hasNextPage"].as_bool() else {
+                return Err(CollectError::LinearPageInfoInvalid {
+                    endpoint: kind.endpoint(),
+                    key: "*".to_string(),
+                    page: page_number,
+                    problem: "response has no boolean pageInfo.hasNextPage",
+                });
+            };
             let next = guard.advance(
-                info["hasNextPage"].as_bool().unwrap_or(false),
+                has_next,
                 info["endCursor"].as_str().map(String::from),
                 rows,
                 page_number,

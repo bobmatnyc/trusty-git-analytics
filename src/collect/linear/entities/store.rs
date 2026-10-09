@@ -3,11 +3,14 @@
 //! Why: each entity set must land whole or not at all, and a re-sync must
 //! update rows in place rather than add new ones.
 //! What: [`commit_entity_sync`] upserts one set's nodes, keyed by Linear's
-//! `id`, and records the set's [`EntitySyncState`] in one transaction.
-//! [`upsert_entities_in`] is the same write inside a caller's transaction.
+//! `id`, marks the set's rows the fetch did not return as removed, and
+//! records the set's [`EntitySyncState`], all in one transaction.
+//! [`upsert_entities_in`] is the upsert alone inside a caller's transaction.
 //! Each row keeps the node as `raw_json`; the named columns are listed in
 //! `sql/0034_linear_reference_entities.sql`.
 //! Test: `commands::linear::entity_sync_tests`.
+
+use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
@@ -28,6 +31,17 @@ pub struct EntitySyncState {
     pub last_run_at: String,
     /// Nodes the last successful sync wrote.
     pub rows_synced: i64,
+}
+
+/// What one [`commit_entity_sync`] changed in its set's table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EntityCommit {
+    /// Nodes upserted: every node the fetch returned.
+    pub written: usize,
+    /// Rows newly marked removed: stored, not yet removed, and missing from
+    /// the fetch.
+    pub removed: usize,
 }
 
 /// Read the stored sync state for `kind`; `None` before its first sync.
@@ -55,33 +69,45 @@ pub fn get_entity_sync_state(
     .map_err(TgaError::from)
 }
 
-/// Upsert one entity set and record its sync state in one transaction.
+/// Store one complete entity set and record its sync state in one
+/// transaction.
 ///
 /// Why: #190 — a set written page by page could leave a partial set
 /// behind a failed walk; the caller fetches the whole set first and this
-/// writes it, with its state row, as one unit.
-/// What: [`upsert_entities_in`] then the `linear_entity_sync_state` row,
-/// both inside one transaction. A failure rolls both back. Returns the
-/// number of nodes written.
+/// writes it, with its state row, as one unit. Upserting alone kept a row
+/// Linear stopped returning (a purged project, a deleted label, a team the
+/// key lost) as if it were current, so the table outgrew Linear's totals.
+/// What: [`upsert_entities_in`], then [`mark_removed_in`] for the rows
+/// `nodes` does not hold, then the `linear_entity_sync_state` row, all inside
+/// one transaction. A failure rolls all three back. `nodes` must be the
+/// whole set: the fetch walk fails rather than return a cut one.
 /// Test: `commands::linear::entity_sync_tests::rerun_is_idempotent`,
-/// `commands::linear::entity_sync_tests::mid_pagination_failure_writes_nothing_and_keeps_the_state`.
+/// `commands::linear::entity_sync_tests::mid_pagination_failure_writes_nothing_and_keeps_the_state`,
+/// `commands::linear::entity_sync_tests::a_row_linear_stops_returning_is_marked_removed`.
 ///
 /// # Errors
 ///
 /// [`TgaError::DbError`] on SQL failure; [`TgaError::ValidationError`] on a
 /// node without an `id`.
-pub fn commit_entity_sync(db: &mut Database, kind: EntityKind, nodes: &[Json]) -> Result<usize> {
+pub fn commit_entity_sync(
+    db: &mut Database,
+    kind: EntityKind,
+    nodes: &[Json],
+) -> Result<EntityCommit> {
     let tx = db.connection_mut().transaction()?;
     let written = upsert_entities_in(&tx, kind, nodes)?;
+    // #190: same transaction as the upsert, so a failed write marks nothing.
+    let removed = mark_removed_in(&tx, kind, nodes)?;
     record_state(&tx, kind, nodes)?;
     tx.commit()?;
-    Ok(written)
+    Ok(EntityCommit { written, removed })
 }
 
 /// Upsert `nodes` into `kind`'s table without opening a transaction.
 ///
 /// What: one `INSERT ... ON CONFLICT(id) DO UPDATE` per node, so a re-run
-/// rewrites each row in place. Nothing commits here.
+/// rewrites each row in place and clears its `removed_at`. Nothing commits
+/// here.
 ///
 /// # Errors
 ///
@@ -96,6 +122,8 @@ pub fn upsert_entities_in(conn: &Connection, kind: EntityKind, nodes: &[Json]) -
         ));
         cols.push(("raw_json", Value::Text(node.to_string())));
         cols.push(("fetched_at", Value::Text(fetched_at.clone())));
+        // #190: a row Linear returns again is current again.
+        cols.push(("removed_at", Value::Null));
         let names: Vec<&str> = cols.iter().map(|(c, _)| *c).collect();
         let marks: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
         let updates: Vec<String> = names
@@ -115,6 +143,28 @@ pub fn upsert_entities_in(conn: &Connection, kind: EntityKind, nodes: &[Json]) -
             .execute(rusqlite::params_from_iter(values))?;
     }
     Ok(nodes.len())
+}
+
+/// Mark `kind`'s stored rows that `nodes` does not hold as removed.
+///
+/// What: sets `removed_at` to now on every row with no `removed_at` whose id
+/// is not in `nodes`; a row already marked keeps its first mark. Returns the
+/// number of rows newly marked. Nothing commits here.
+fn mark_removed_in(conn: &Connection, kind: EntityKind, nodes: &[Json]) -> Result<usize> {
+    let fetched: HashSet<&str> = nodes.iter().filter_map(|n| n["id"].as_str()).collect();
+    let table = kind.table();
+    let current: Vec<String> = conn
+        .prepare(&format!("SELECT id FROM {table} WHERE removed_at IS NULL"))?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let now = Utc::now().to_rfc3339();
+    let mut mark = conn.prepare(&format!("UPDATE {table} SET removed_at = ?1 WHERE id = ?2"))?;
+    let mut removed = 0;
+    for id in current.iter().filter(|id| !fetched.contains(id.as_str())) {
+        mark.execute(params![now, id])?;
+        removed += 1;
+    }
+    Ok(removed)
 }
 
 /// Write the set's state row; `max_updated_at` only moves forward.

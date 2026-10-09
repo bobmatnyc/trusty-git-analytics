@@ -7,6 +7,11 @@
 -- as the API returned it; the named columns are the fields reports read.
 -- `archived` is 1 when the node carries an `archivedAt`.
 --
+-- `removed_at` is set when a complete fetch of the set no longer returns the
+-- row: Linear purged it, deleted it, or the key lost access to its team. The
+-- row stays, so older issue rows still resolve its name; current-entity
+-- queries add `WHERE removed_at IS NULL`. It is cleared when the row returns.
+--
 -- Additive only: six new tables and one bookkeeping table. No existing table
 -- or row changes.
 --
@@ -33,7 +38,8 @@ CREATE TABLE IF NOT EXISTS linear_teams (
     archived_at                 TEXT,
     archived                    INTEGER NOT NULL DEFAULT 0,
     raw_json                    TEXT NOT NULL,
-    fetched_at                  TEXT NOT NULL
+    fetched_at                  TEXT NOT NULL,
+    removed_at                  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_linear_teams_key ON linear_teams(key);
 
@@ -50,7 +56,8 @@ CREATE TABLE IF NOT EXISTS linear_users (
     archived_at  TEXT,
     archived     INTEGER NOT NULL DEFAULT 0,
     raw_json     TEXT NOT NULL,
-    fetched_at   TEXT NOT NULL
+    fetched_at   TEXT NOT NULL,
+    removed_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_linear_users_email ON linear_users(email);
 
@@ -68,7 +75,8 @@ CREATE TABLE IF NOT EXISTS linear_labels (
     archived_at TEXT,
     archived    INTEGER NOT NULL DEFAULT 0,
     raw_json    TEXT NOT NULL,
-    fetched_at  TEXT NOT NULL
+    fetched_at  TEXT NOT NULL,
+    removed_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_linear_labels_team ON linear_labels(team_id);
 
@@ -96,7 +104,8 @@ CREATE TABLE IF NOT EXISTS linear_projects (
     archived_at  TEXT,
     archived     INTEGER NOT NULL DEFAULT 0,
     raw_json     TEXT NOT NULL,
-    fetched_at   TEXT NOT NULL
+    fetched_at   TEXT NOT NULL,
+    removed_at   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS linear_milestones (
@@ -110,7 +119,8 @@ CREATE TABLE IF NOT EXISTS linear_milestones (
     archived_at TEXT,
     archived    INTEGER NOT NULL DEFAULT 0,
     raw_json    TEXT NOT NULL,
-    fetched_at  TEXT NOT NULL
+    fetched_at  TEXT NOT NULL,
+    removed_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_linear_milestones_project ON linear_milestones(project_id);
 
@@ -138,7 +148,8 @@ CREATE TABLE IF NOT EXISTS linear_cycles (
     archived_at        TEXT,
     archived           INTEGER NOT NULL DEFAULT 0,
     raw_json           TEXT NOT NULL,
-    fetched_at         TEXT NOT NULL
+    fetched_at         TEXT NOT NULL,
+    removed_at         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_linear_cycles_team ON linear_cycles(team_id);
 

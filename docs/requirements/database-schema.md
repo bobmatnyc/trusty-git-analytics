@@ -218,7 +218,9 @@ Linear ticket data fetched on reference detection. Migration `0002_linear_issues
 `tga linear sync --entities` (#190). Migration `0034_linear_reference_entities.sql`;
 its header and column comments are the column reference. Each entity table is
 keyed by Linear's `id` (TEXT PK) and carries `archived`, `archived_at`,
-`raw_json` and `fetched_at`.
+`raw_json`, `fetched_at` and `removed_at`. `removed_at` is set when a
+complete fetch of the set no longer returns the row, and cleared when it
+returns; current-entity queries filter on `removed_at IS NULL`.
 
 ---
 
