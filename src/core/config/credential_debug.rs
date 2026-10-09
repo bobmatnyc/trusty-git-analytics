@@ -76,12 +76,14 @@ impl fmt::Debug for LinearConfig {
             team_keys,
             fetch_on_reference,
             ticket_regex,
+            stats,
         } = self;
         f.debug_struct("LinearConfig")
             .field("api_key", &mask(api_key.as_ref()))
             .field("team_keys", team_keys)
             .field("fetch_on_reference", fetch_on_reference)
             .field("ticket_regex", ticket_regex)
+            .field("stats", stats)
             .finish()
     }
 }

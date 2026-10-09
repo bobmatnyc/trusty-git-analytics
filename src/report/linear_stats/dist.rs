@@ -7,7 +7,6 @@
 //! (linear interpolation between order statistics, Hyndman-Fan type 7),
 //! [`round1`] (one decimal, half to even on the binary value), [`share`],
 //! [`days`] and [`quarter`].
-//! Red skeleton (#190 step 4): bodies land with the implementation.
 //! Test: `report::linear_stats::tests::percentile_is_type_7_linear`,
 //! `report::linear_stats::tests::round1_is_half_even_on_the_binary_value`.
 
@@ -34,8 +33,15 @@ pub struct Dist {
 /// [`Dist`] of `values`, in any order.
 #[must_use]
 pub fn dist(values: &[f64]) -> Dist {
-    let _ = values;
-    Dist::default()
+    let mut xs = values.to_vec();
+    xs.sort_by(f64::total_cmp);
+    let at = |p| percentile(&xs, p).map(round1);
+    Dist {
+        n: xs.len(),
+        median: at(0.5),
+        p75: at(0.75),
+        p90: at(0.9),
+    }
 }
 
 /// The `p` quantile of ascending `sorted`, unrounded; `None` when empty.
@@ -46,8 +52,15 @@ pub fn dist(values: &[f64]) -> Dist {
 /// of the two middle values.
 #[must_use]
 pub fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
-    let _ = (sorted, p);
-    None
+    let n = sorted.len();
+    if n == 0 {
+        return None;
+    }
+    let k = (n - 1) as f64 * p;
+    let f = k.floor();
+    let lo = f as usize;
+    let hi = (lo + 1).min(n - 1);
+    Some(sorted[lo] + (sorted[hi] - sorted[lo]) * (k - f))
 }
 
 /// `x` rounded to one decimal, half to even on the exact binary value.
@@ -57,27 +70,22 @@ pub fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
 /// at `.x5` ties too.
 #[must_use]
 pub fn round1(x: f64) -> f64 {
-    x
-}
-
-/// `x` rounded to a whole number, half to even on the binary value.
-#[must_use]
-pub fn round0(x: f64) -> f64 {
-    x
+    format!("{x:.1}").parse().unwrap_or(x)
 }
 
 /// `100 * num / den` rounded with [`round1`]; `None` when `den` is 0.
 #[must_use]
 pub fn share(num: i64, den: i64) -> Option<f64> {
-    let _ = (num, den);
-    None
+    if den == 0 {
+        return None;
+    }
+    Some(round1(100.0 * num as f64 / den as f64))
 }
 
 /// Fractional days from `from` to `to`; negative when `to` is earlier.
 #[must_use]
 pub fn days(from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
-    let _ = (from, to);
-    0.0
+    (to - from).num_milliseconds() as f64 / 86_400_000.0
 }
 
 /// Midnight UTC at the start of `date`.
@@ -101,8 +109,8 @@ pub fn quarter_label((year, q): (i32, u32)) -> String {
 /// The quarter `back` quarters before `(year, q)`.
 #[must_use]
 pub fn quarter_minus((year, q): (i32, u32), back: u32) -> (i32, u32) {
-    let _ = back;
-    (year, q)
+    let index = year * 4 + q as i32 - 1 - back as i32;
+    (index.div_euclid(4), index.rem_euclid(4) as u32 + 1)
 }
 
 /// `YYYY-Qn` label of `t`'s UTC quarter.

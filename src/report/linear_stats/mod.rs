@@ -15,13 +15,19 @@
 //! Test: `tests` below (golden figures against an independent recomputation).
 
 pub mod dist;
+mod issues;
+mod load;
+mod markdown;
 pub mod model;
+mod projects;
 pub mod tolerance;
+mod usage;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::Connection;
 
 pub use dist::Dist;
+pub use markdown::render_markdown;
 pub use model::{
     CancelYear, Completions, Concentration, CycleStats, CycleYear, EstimatingTeams, FieldShares,
     FieldUse, Grouped, LeadCycle, LinearStats, People, Population, ProjectStats, StableTrend,
@@ -29,6 +35,7 @@ pub use model::{
 };
 pub use tolerance::{NamedTolerance, TOLERANCES};
 
+use crate::core::config::LinearStatsConfig;
 use crate::report::errors::Result;
 
 /// Version of the [`LinearStats`] JSON shape. Bump it when a field is
@@ -60,6 +67,16 @@ impl StatsOptions {
             concentration_completed_since: None,
         }
     }
+
+    /// Options at `as_of` with the lower bounds from `linear.stats`.
+    #[must_use]
+    pub fn from_config(as_of: DateTime<Utc>, config: &LinearStatsConfig) -> Self {
+        Self {
+            as_of,
+            field_use_created_since: config.field_use_created_since,
+            concentration_completed_since: config.concentration_completed_since,
+        }
+    }
 }
 
 /// Compute every Linear delivery metric from the tables on `conn`.
@@ -81,17 +98,23 @@ impl StatsOptions {
 /// [`crate::report::ReportError::Report`] naming the row when a stored
 /// timestamp, date or label list does not parse.
 pub fn compute_linear_stats(conn: &Connection, opts: &StatsOptions) -> Result<LinearStats> {
-    let _ = (conn, opts);
-    Err(crate::report::ReportError::Report(
-        "linear stats: not implemented".to_string(),
-    ))
-}
-
-/// Render `s` as a Markdown block headed `## Linear delivery`.
-#[must_use]
-pub fn render_markdown(s: &LinearStats) -> String {
-    let _ = s;
-    String::new()
+    let snap = load::load(conn)?;
+    Ok(LinearStats {
+        schema_version: LINEAR_STATS_SCHEMA_VERSION,
+        as_of: opts.as_of.to_rfc3339(),
+        field_use_created_since: opts.field_use_created_since.map(|d| d.to_string()),
+        concentration_completed_since: opts.concentration_completed_since.map(|d| d.to_string()),
+        population: issues::population(&snap),
+        completions: issues::completions(&snap.issues, opts.as_of),
+        lead_cycle: issues::lead_cycle(&snap.issues),
+        cycles: projects::cycles(&snap.cycles),
+        title_tags: issues::title_tags(&snap.issues),
+        field_use: usage::field_use(&snap, opts.field_use_created_since),
+        projects: projects::projects(&snap, opts.as_of),
+        cancel_rate: issues::cancel_rate(&snap.issues),
+        people: usage::people(&snap, opts.concentration_completed_since),
+        tolerances: TOLERANCES.to_vec(),
+    })
 }
 
 #[cfg(test)]

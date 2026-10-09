@@ -46,6 +46,8 @@ mod credential_debug;
 // the same credentials to disk rather than to a log.
 mod credential_serialize;
 pub mod database_path;
+// #190: the `linear.stats` block.
+mod linear_stats;
 // #131: the `llm:` section and the LLM-tier routing enums.
 mod llm;
 // #111: anchor a config's relative paths to its own directory.
@@ -59,6 +61,7 @@ pub use azdo::AzureDevOpsConfig;
 pub use buckets::{
     Bucket, BucketMap, BucketSource, DEFAULT_BUCKETS, MAP_ONLY_CATEGORIES, NO_BUCKET_LABELS,
 };
+pub use linear_stats::LinearStatsConfig;
 pub use llm::{
     // #178: the per-source input budget defaults and the load-time floor.
     default_max_input_tokens_for,
@@ -941,6 +944,10 @@ pub struct LinearConfig {
     /// to return an error.
     #[serde(default)]
     pub ticket_regex: Option<String>,
+
+    /// Lower bounds for `tga linear stats` (#190). Absent: no bounds.
+    #[serde(default)]
+    pub stats: LinearStatsConfig,
 }
 
 /// Project management integrations config block.
