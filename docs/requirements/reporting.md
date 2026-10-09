@@ -155,6 +155,25 @@ CSV delimiter and encoding configurable via `output.csv_delimiter` and `output.c
 
 Generated via `tera` template engine. Templates ship in `tga-report/templates/`.
 
+#### Linear delivery section
+
+`report.md` ends with a `## Linear delivery` section when all of these hold
+(#190):
+
+- `linear.stats.report: true` in config (default false; see
+  [configuration.md](configuration.md#linear--linearconfig));
+- Markdown is among the output formats;
+- the report is not scoped with `--author`;
+- `linear_issues` holds at least one row with a Linear id (`tga linear sync`).
+
+The section is the block `tga linear stats` prints, as of the report's
+`Generated` timestamp, with the `linear.stats` bounds. One blank line
+separates it from the rest of the report. In every other case `report.md` is
+byte-identical to a report without Linear. The section is computed before any
+report file is written; a figure that cannot be computed fails the report with
+an error starting `Linear delivery section:` and no file is written. The
+report reads the Linear tables and never writes them.
+
 ### JSON Files
 
 | Filename | Contents |

@@ -965,6 +965,7 @@ is the only way an engagement states its own window.
 | `ticket_regex` | string | None | Override regex for detecting Linear ticket refs (e.g. `([A-Z]+-\d+)`) in commit messages. Added in v1.0.6 (#75). |
 | `stats.field_use_created_since` | date (`YYYY-MM-DD`) | None | `tga linear stats` field use (C9) counts only issues created on or after this UTC date. None = every issue. |
 | `stats.concentration_completed_since` | date (`YYYY-MM-DD`) | None | `tga linear stats` concentration (C14) counts only issues completed on or after this UTC date. None = every completed issue. |
+| `stats.report` | bool | false | Append the Linear delivery section to `report.md` in `tga report` and `tga analyze`, when the database holds synced Linear issues. The bounds above apply. See [reporting.md](reporting.md#linear-delivery-section). |
 
 The `stats` block is optional (#190). A value that is not a `YYYY-MM-DD`
 date fails the config load. See
@@ -975,6 +976,7 @@ linear:
   stats:
     field_use_created_since: 2025-01-01
     concentration_completed_since: 2026-01-01
+    report: true          # #190: Linear delivery section in report.md
 ```
 
 There is no `team_id` key; the team scope is `team_keys`. The bulk sync

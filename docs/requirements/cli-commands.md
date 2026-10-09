@@ -125,6 +125,18 @@ Stage 3 only — generate reports from cache.
 | `--anonymize` | from config | |
 | `--log <LEVEL>` | warn | (global) |
 
+Linear delivery section (#190): with `linear.stats.report: true` and synced
+Linear issues in the database, `report.md` ends with the block
+`tga linear stats` prints, measured as of the report's `Generated` time. The
+section is left out under `--author` (its figures are workspace-wide), when
+Markdown is not among the formats, and when the database holds no Linear
+issue with a Linear id. When the switch is off or `linear:` is absent,
+`report.md` is unchanged. If the figures cannot be computed (a damaged row),
+the command fails with an error starting `Linear delivery section:` and
+writes no report file. It reads the Linear tables and never writes them.
+`tga analyze` writes the same section. See
+[reporting.md](reporting.md#linear-delivery-section).
+
 ### `tga fetch`
 
 Fetch external data only (GitHub PRs/issues, JIRA tickets) — no git extraction.

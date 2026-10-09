@@ -20,6 +20,8 @@ pub mod dd_manifest_merge;
 pub mod drilldown;
 pub mod errors;
 pub mod formatters;
+// #190: the Linear delivery section `tga report` appends to report.md.
+mod linear_section;
 // #190: Linear delivery metrics behind `tga linear stats`.
 pub mod linear_stats;
 pub mod models;

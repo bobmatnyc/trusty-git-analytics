@@ -22,6 +22,28 @@ const TOP_AUTHOR_LIMIT: usize = 10;
 /// - [`crate::report::ReportError::Template`] on Tera failure.
 /// - [`crate::report::ReportError::Io`] on write failure.
 pub fn write_markdown(data: &ReportData, output_dir: &Path) -> Result<PathBuf> {
+    write_markdown_with_linear(data, output_dir, None)
+}
+
+/// [`write_markdown`], with the Linear delivery block appended when
+/// `linear` is `Some`.
+///
+/// Why: #190 — the block is rendered by
+/// [`crate::report::linear_stats::render_markdown`], outside the template.
+/// What: `None` writes exactly what [`write_markdown`] writes. `Some(block)`
+/// trims the template's trailing newlines, adds one blank line, then the
+/// block.
+/// Test: `report::pipeline_linear_tests::report_md_carries_the_linear_section_when_enabled_and_synced`,
+/// `report::pipeline_linear_tests::report_md_is_byte_identical_when_linear_is_off_or_empty`.
+///
+/// # Errors
+///
+/// As [`write_markdown`].
+pub(crate) fn write_markdown_with_linear(
+    data: &ReportData,
+    output_dir: &Path,
+    linear: Option<&str>,
+) -> Result<PathBuf> {
     let mut ctx = Context::new();
     ctx.insert("generated_at", &data.generated_at);
     ctx.insert("period_start", &data.period_start);
@@ -42,7 +64,14 @@ pub fn write_markdown(data: &ReportData, output_dir: &Path) -> Result<PathBuf> {
     cats.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     ctx.insert("category_breakdown", &cats);
 
-    let rendered = Tera::one_off(MARKDOWN_REPORT, &ctx, true)?;
+    let mut rendered = Tera::one_off(MARKDOWN_REPORT, &ctx, true)?;
+    // #190: the Linear block goes after the template output; `None` leaves
+    // the bytes untouched.
+    if let Some(block) = linear {
+        rendered.truncate(rendered.trim_end_matches('\n').len());
+        rendered.push_str("\n\n");
+        rendered.push_str(block);
+    }
     let path = output_dir.join(REPORT_MD);
     std::fs::write(&path, rendered)?;
     debug!(path = %path.display(), "wrote report.md");

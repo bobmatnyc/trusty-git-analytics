@@ -9,6 +9,7 @@ use crate::core::db::Database;
 use crate::report::aggregator::Aggregator;
 use crate::report::errors::{ReportError, Result};
 use crate::report::formatters::{csv as csv_fmt, json as json_fmt, markdown as md_fmt};
+use crate::report::linear_section::linear_section;
 
 /// Default output directory when [`crate::core::config::OutputConfig::directory`] is unset.
 const DEFAULT_OUTPUT_DIR: &str = "./reports";
@@ -17,6 +18,11 @@ const DEFAULT_OUTPUT_DIR: &str = "./reports";
 const FORMAT_CSV: &str = "csv";
 const FORMAT_JSON: &str = "json";
 const FORMAT_MARKDOWN: &str = "markdown";
+
+/// `fmt` names the Markdown report (`markdown` or `md`).
+fn is_markdown(fmt: &str) -> bool {
+    fmt == FORMAT_MARKDOWN || fmt == "md"
+}
 
 /// Stage 3 orchestrator.
 ///
@@ -81,18 +87,31 @@ impl ReportPipeline {
     /// What: delegates to [`Aggregator::build_filtered`] when `author_email`
     /// is `Some`; falls back to the full aggregate when `None`.  All
     /// formatters receive the (possibly filtered) [`ReportData`](crate::report::ReportData) unchanged.
-    /// Test: covered by `report::tests::pipeline_author_filter_single_author`.
+    /// When Markdown is among the formats and `linear.stats.report` is on,
+    /// `report.md` also carries the Linear delivery section (#190); that
+    /// section is computed before any file is written, so its failure fails
+    /// the run with no partial output.
+    /// Test: covered by `report::tests::pipeline_author_filter_single_author`;
+    /// the Linear section by `report::pipeline_linear_tests`.
     pub fn run_with_filter(
         &self,
         db: &Database,
         author_email: Option<&str>,
     ) -> Result<ReportStats> {
         let data = Aggregator::build_filtered(db, &self.config, author_email)?;
+        let formats = self.resolve_formats();
+        // #190: computed before the output directory or any file exists, so a
+        // Linear stats failure fails the report instead of dropping the
+        // section from a report that claims success.
+        let linear = if formats.iter().any(|f| is_markdown(f)) {
+            linear_section(db, &self.config, author_email, &data.generated_at)?
+        } else {
+            None
+        };
         let output_dir = self.resolve_output_dir();
         std::fs::create_dir_all(&output_dir)?;
         info!(dir = %output_dir.display(), "writing reports");
 
-        let formats = self.resolve_formats();
         let mut files_written = Vec::new();
 
         for fmt in &formats {
@@ -117,8 +136,12 @@ impl ReportPipeline {
                     files_written.push(json_fmt::write_quality_json(&data, &output_dir)?);
                     files_written.push(json_fmt::write_dora_json(&data, &output_dir)?);
                 }
-                FORMAT_MARKDOWN | "md" => {
-                    files_written.push(md_fmt::write_markdown(&data, &output_dir)?);
+                f if is_markdown(f) => {
+                    files_written.push(md_fmt::write_markdown_with_linear(
+                        &data,
+                        &output_dir,
+                        linear.as_deref(),
+                    )?);
                 }
                 other => {
                     warn!(format = %other, "ignoring unknown output format");
