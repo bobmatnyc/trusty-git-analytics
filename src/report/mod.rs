@@ -20,6 +20,8 @@ pub mod dd_manifest_merge;
 pub mod drilldown;
 pub mod errors;
 pub mod formatters;
+// #190: the Linear delivery section `tga report` appends to report.md.
+mod linear_section;
 // #190: Linear delivery metrics behind `tga linear stats`.
 pub mod linear_stats;
 pub mod models;
@@ -47,5 +49,8 @@ pub use pipeline::{ReportPipeline, ReportStats};
 pub use ticketed_stats::{compute_ticketed_stats, TicketedStats};
 pub use ticketing::{build_ticketing_summary, TicketingSummary, TICKETING_SCHEMA_VERSION};
 
+// #190: the Linear delivery section in `tga report`.
+#[cfg(test)]
+mod pipeline_linear_tests;
 #[cfg(test)]
 mod tests;

@@ -154,6 +154,28 @@ metrics fresh without re-fetching closed PRs.
   (default: `customfield_10016`)
 - `issue_type` (e.g. `Bug`, `Story`, `Task`) cached for Tier 1.5 classifier
 
+## Linear Bulk Sync in `collect` (#190)
+
+Off by default (`linear.sync_on_collect: false`). Off, `tga collect` makes no
+bulk Linear request. With `linear.sync_on_collect: true`, `tga collect` and
+`tga analyze` run the same work as `tga linear sync --entities` after the git
+and provider stages:
+
+- **Scope**: each `linear.team_keys` entry, or every team the API key can see
+  when `team_keys` is empty (archived issues included). Each team resumes from
+  its own `linear_sync_cursor`.
+- **Entities**: then teams, users, labels, projects, milestones and cycles.
+- **Dry run**: `--dry-run` fetches and reports without writing.
+- **Failures** follow the #146 (D28) contract. An HTTP 404 on a scope is one
+  counted warning naming every 404 scope; the run exits 0. Any other failure
+  (401, 403, a 5xx after the client's retries, a transport or database error,
+  a missing API key) is one stage failure naming the scope and status. The
+  sync stops there, and `tga collect` exits non-zero after its remaining
+  stages. Teams synced before the failure keep their rows and cursors.
+
+The per-commit lookup (`linear.fetch_on_reference`) is unchanged and runs
+separately.
+
 ---
 
 ## PM Adapter Layer (`src/collect/pm_adapter.rs`)

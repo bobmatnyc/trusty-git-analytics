@@ -70,13 +70,15 @@ impl Serialize for LinearConfig {
             fetch_on_reference,
             ticket_regex,
             stats,
+            sync_on_collect,
         } = self;
-        let mut s = serializer.serialize_struct("LinearConfig", 5)?;
+        let mut s = serializer.serialize_struct("LinearConfig", 6)?;
         s.serialize_field("api_key", &mask(api_key.as_ref()))?;
         s.serialize_field("team_keys", team_keys)?;
         s.serialize_field("fetch_on_reference", fetch_on_reference)?;
         s.serialize_field("ticket_regex", ticket_regex)?;
         s.serialize_field("stats", stats)?;
+        s.serialize_field("sync_on_collect", sync_on_collect)?;
         s.end()
     }
 }

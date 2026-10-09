@@ -948,6 +948,13 @@ pub struct LinearConfig {
     /// Lower bounds for `tga linear stats` (#190). Absent: no bounds.
     #[serde(default)]
     pub stats: LinearStatsConfig,
+
+    /// Run the bulk Linear sync (issues and reference entities) inside
+    /// `tga collect` and `tga analyze`. Scope: every entry in `team_keys`,
+    /// or every team the key can see when `team_keys` is empty.
+    // #190: opt-in (D8f); off, collect makes no bulk Linear request.
+    #[serde(default)]
+    pub sync_on_collect: bool,
 }
 
 /// Project management integrations config block.

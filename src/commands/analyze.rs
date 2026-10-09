@@ -78,12 +78,21 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
         } else if args.allow_stale {
             eprintln!("WARNING: --allow-stale active. Fetch failures will not abort the run.");
         }
-        let collect_stats = CollectionPipeline::new(cfg.clone())
+        let mut collect_stats = CollectionPipeline::new(cfg.clone())
             .with_force(args.force)
             .with_no_fetch(args.no_fetch)
             .with_strict_fetch(effective_strict)
             .run(db)
             .await?;
+        // #190: the same opt-in bulk Linear sync `tga collect` runs; its
+        // failures are reported with the other collect stage failures.
+        crate::commands::linear::collect_sync::sync_on_collect(
+            &cfg,
+            db,
+            args.dry_run,
+            &mut collect_stats,
+        )
+        .await;
         // Print fetch summary to stderr before the commit count so fetch
         // failures are visible even when the counts look normal.
         crate::commands::collect::print_fetch_summary_pub(&collect_stats.fetch_outcomes, false);
