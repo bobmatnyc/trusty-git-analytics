@@ -147,6 +147,8 @@ impl LinearSubcommandArgs {
         match self.subcommand {
             LinearSubcommand::Sync(a) => linear::run_sync(config, db, a).await,
             LinearSubcommand::Freshness(a) => linear::run_freshness(&config, db, a),
+            // #190: `main` sends stats to `linear::run_stats_at` before the
+            // shared open; this arm serves a caller that already holds a database.
             LinearSubcommand::Stats(a) => linear::run_stats(&config, db, &a),
         }
     }

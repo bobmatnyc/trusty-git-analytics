@@ -121,6 +121,28 @@ impl Database {
     /// - The errors of [`crate::core::inspect::open_read_only`].
     /// - [`TgaError::MigrationError`] when migrations are pending.
     pub fn open_read_only(path: &Path) -> Result<Database> {
+        Self::open_read_only_with_remedy(
+            path,
+            "--dry-run opens the database read-only and never migrates it. Run the \
+             command without --dry-run to apply them (back up the file first)",
+        )
+    }
+
+    /// [`Database::open_read_only`] with the caller's own advice for a
+    /// database that has pending migrations.
+    ///
+    /// Why: #190 — a read-only command that is not a dry run (`tga linear
+    /// stats`) must not tell its user to drop a `--dry-run` flag they never
+    /// passed.
+    /// What: the same open and checks; `remedy` is appended to the
+    /// pending-migrations error after the pending versions.
+    /// Test: `tests/linear_stats_read_only.rs`,
+    /// `tests/dry_run_no_migrate.rs`.
+    ///
+    /// # Errors
+    ///
+    /// See [`Database::open_read_only`].
+    pub fn open_read_only_with_remedy(path: &Path, remedy: &str) -> Result<Database> {
         let conn = crate::core::inspect::open_read_only(path)?;
         Self::apply_tuning_pragmas(&conn)?;
         let (current, pending) = migrations::pending(&conn)?;
@@ -130,9 +152,7 @@ impl Database {
                 .map(|m| format!("v{} ({})", m.version, m.name))
                 .collect();
             return Err(TgaError::MigrationError(format!(
-                "{} is at schema v{} but this tga needs v{}; pending migrations: {}. \
-                 --dry-run opens the database read-only and never migrates it. Run the \
-                 command without --dry-run to apply them (back up the file first)",
+                "{} is at schema v{} but this tga needs v{}; pending migrations: {}. {remedy}",
                 expand_path(path).display(),
                 current,
                 last.version,

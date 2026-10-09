@@ -39,7 +39,7 @@ mod entity_sync;
 // #190 step 4: the read-only metrics command.
 mod stats;
 mod team_sync;
-pub use stats::{render_stats, run_stats, LinearStatsArgs};
+pub use stats::{render_stats, run_stats, run_stats_at, LinearStatsArgs};
 use team_sync::{sync_team, TeamOutcome};
 
 /// Arguments for `tga linear sync`.

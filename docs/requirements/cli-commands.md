@@ -274,8 +274,10 @@ never synced or is older than `--max-age-days` (default 2).
 
 Print the Linear delivery metrics (#190) computed by
 `report::linear_stats` from the tables `tga linear sync` (with `--entities`)
-already wrote. The command reads the database only and makes no network
-call.
+already wrote. The command makes no network call and opens the database
+read-only: it never creates or migrates it. A missing file fails with the
+path named; a database with pending migrations fails and asks for a
+migrating command (such as `tga linear sync`) first.
 
 | Flag | Default | Description |
 |------|---------|-------------|

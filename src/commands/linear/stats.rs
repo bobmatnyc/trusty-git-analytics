@@ -10,6 +10,8 @@
 //! Test: `stats_tests` (argument parsing, JSON shape on the fixture
 //! database, `--as-of` moving the result).
 
+use std::path::Path;
+
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::Args;
 
@@ -89,7 +91,7 @@ pub fn render_stats(
     }
 }
 
-/// Dispatch entry point for `tga linear stats`.
+/// Print `tga linear stats` for a database the caller already opened.
 ///
 /// # Errors
 ///
@@ -97,6 +99,30 @@ pub fn render_stats(
 pub fn run_stats(config: &Config, db: &Database, args: &LinearStatsArgs) -> anyhow::Result<()> {
     println!("{}", render_stats(config, db, args, Utc::now())?);
     Ok(())
+}
+
+/// What a pending-migrations error tells the `tga linear stats` user to do.
+const MIGRATE_FIRST: &str = "tga linear stats reads the database read-only and never \
+    migrates it. Run a command that migrates it first, such as `tga linear sync` \
+    (back up the file first)";
+
+/// Dispatch entry point for `tga linear stats`, as `main` calls it.
+///
+/// Why: #190 — the shared `Database::open` creates a missing file and runs
+/// every migration, so a wrong `--database` path printed a zeroed report and
+/// exited 0. A report must read the database as it stands.
+/// What: opens `db_path` with [`Database::open_read_only_with_remedy`],
+/// which refuses a missing or non-SQLite file and a schema with pending
+/// migrations, then runs [`run_stats`].
+/// Test: `tests/linear_stats_read_only.rs`.
+///
+/// # Errors
+///
+/// A missing path (named in the error), pending migrations, or the errors
+/// of [`render_stats`].
+pub fn run_stats_at(config: &Config, db_path: &Path, args: &LinearStatsArgs) -> anyhow::Result<()> {
+    let db = Database::open_read_only_with_remedy(db_path, MIGRATE_FIRST)?;
+    run_stats(config, &db, args)
 }
 
 #[cfg(test)]
