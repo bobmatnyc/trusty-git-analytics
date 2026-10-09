@@ -150,6 +150,8 @@ pub async fn run_reporting_fetch(
     // #5249: state what agentic detection can and cannot see, once per run.
     tracing::info!("{}", tga::collect::ai_markers::detection_disclosure());
 
+    // #190: the bulk Linear sync below reads the same overridden config.
+    let linear_cfg = cfg.clone();
     let pipeline = CollectionPipeline::new(cfg)
         .with_progress(progress.clone())
         .with_force(args.force)
@@ -165,13 +167,25 @@ pub async fn run_reporting_fetch(
     // database; nothing here touches `db`. #189: `db` itself is the caller's
     // to open — `main` hands a dry run an in-memory database rather than
     // opening the real file, which would migrate it.
-    let stats = if args.dry_run {
+    let mut shadow;
+    let target: &mut Database = if args.dry_run {
         tracing::info!("Dry run — no database writes will occur");
-        let mut shadow = Database::open_in_memory()?;
-        pipeline.run(&mut shadow).await?
+        shadow = Database::open_in_memory()?;
+        &mut shadow
     } else {
-        pipeline.run(db).await?
+        db
     };
+    let mut stats = pipeline.run(target).await?;
+    // #190: `linear.sync_on_collect` (opt-in, D8f) adds the bulk Linear sync;
+    // its failures join `stats.errors` under the #146 contract, so the
+    // stage-failure check below sets the exit code. Off: no Linear call.
+    crate::commands::linear::collect_sync::sync_on_collect(
+        &linear_cfg,
+        target,
+        args.dry_run,
+        &mut stats,
+    )
+    .await;
 
     if args.dry_run {
         // #6073 review: no `repos_skipped` here. A dry run walks against an

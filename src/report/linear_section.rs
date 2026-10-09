@@ -7,7 +7,7 @@
 //! Test: `report::pipeline_linear_tests`.
 
 use chrono::{DateTime, Utc};
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::core::config::Config;
 use crate::core::db::Database;
@@ -19,6 +19,10 @@ use crate::report::linear_stats::{compute_linear_stats, render_markdown, StatsOp
 /// the section that caused it.
 const SECTION: &str = "Linear delivery section";
 
+/// The line `report.md` carries instead of the section under `--author`.
+const AUTHOR_NOTE: &str = "The Linear delivery section is left out under an author filter \
+    because it covers the whole workspace.";
+
 /// What a failed section tells the user to do.
 const REMEDY: &str = "fix the named row (re-run `tga linear sync`), or set \
     `linear.stats.report: false` to generate the report without the section";
@@ -27,16 +31,16 @@ fn failed(err: impl std::fmt::Display) -> ReportError {
     ReportError::Report(format!("{SECTION}: {err}; {REMEDY}"))
 }
 
-/// The Linear delivery block for `report.md`, or `None` when the report
-/// carries no Linear section.
+/// The Linear delivery block for `report.md` (or the line saying why it is
+/// left out), or `None` when the report carries nothing about Linear.
 ///
 /// Why: a report must either carry the Linear figures or say why it failed;
 /// a section dropped on a read error would let the report claim success with
 /// a part missing.
 /// What: `None` when `linear.stats.report` is off or the `linear:` block is
-/// absent; when `author_email` scopes the report to one git identity (the
-/// figures are workspace-wide); or when `linear_issues` holds no row with a
-/// Linear id. Otherwise computes [`compute_linear_stats`] as of
+/// absent, or when `linear_issues` holds no row with a Linear id. When
+/// `author_email` scopes the report to one author, [`AUTHOR_NOTE`] instead
+/// of the figures, which cover the whole workspace. Otherwise computes [`compute_linear_stats`] as of
 /// `generated_at` (the report's own timestamp) with the `linear.stats`
 /// bounds and returns [`render_markdown`]'s block. Writes nothing.
 /// Test: `report_md_carries_the_linear_section_when_enabled_and_synced`,
@@ -59,10 +63,6 @@ pub(crate) fn linear_section(
     let Some(linear) = config.linear.as_ref().filter(|l| l.stats.report) else {
         return Ok(None);
     };
-    if author_email.is_some() {
-        info!("Linear delivery section omitted: its figures are workspace-wide, not per author");
-        return Ok(None);
-    }
     let conn = db.connection();
     let synced: bool = conn
         .query_row(
@@ -77,6 +77,10 @@ pub(crate) fn linear_section(
              run `tga linear sync`. The report carries no Linear section"
         );
         return Ok(None);
+    }
+    // #190: the reader is told in the report itself, not only in a log.
+    if author_email.is_some() {
+        return Ok(Some(format!("{AUTHOR_NOTE}\n")));
     }
     let as_of = DateTime::parse_from_rfc3339(generated_at)
         .map_err(|e| failed(format!("report timestamp '{generated_at}': {e}")))?

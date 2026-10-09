@@ -70,6 +70,15 @@ Stage 1 only — extract git data and external APIs into SQLite cache.
 | `--force` | false | Override `weekly_fetch_status` immutability |
 | `--log <LEVEL>` | warn | (global) |
 
+Linear bulk sync (#190): with `linear.sync_on_collect: true`, `collect` (and
+`analyze`) also runs the work of `tga linear sync --entities`: every
+`linear.team_keys` entry, or all teams when the list is empty, then the
+reference entities. Off (the default), `collect` makes no bulk Linear request.
+A Linear HTTP 404 is a counted warning (exit 0). A 401, 403, 5xx after
+retries, or any other sync failure is a stage failure: `collect` prints it as
+an `error:` line and exits non-zero after its remaining stages. See
+[collection.md](collection.md#linear-bulk-sync-in-collect-190).
+
 ### `tga classify`
 
 Stage 2 only — run classification cascade against cached commits.
@@ -128,9 +137,10 @@ Stage 3 only — generate reports from cache.
 Linear delivery section (#190): with `linear.stats.report: true` and synced
 Linear issues in the database, `report.md` ends with the block
 `tga linear stats` prints, measured as of the report's `Generated` time. The
-section is left out under `--author` (its figures are workspace-wide), when
-Markdown is not among the formats, and when the database holds no Linear
-issue with a Linear id. When the switch is off or `linear:` is absent,
+section is left out when Markdown is not among the formats and when the
+database holds no Linear issue with a Linear id. Under `--author` it is
+replaced by one line saying it is left out because it covers the whole
+workspace. When the switch is off or `linear:` is absent,
 `report.md` is unchanged. If the figures cannot be computed (a damaged row),
 the command fails with an error starting `Linear delivery section:` and
 writes no report file. It reads the Linear tables and never writes them.

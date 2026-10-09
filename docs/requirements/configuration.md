@@ -965,6 +965,7 @@ is the only way an engagement states its own window.
 | `ticket_regex` | string | None | Override regex for detecting Linear ticket refs (e.g. `([A-Z]+-\d+)`) in commit messages. Added in v1.0.6 (#75). |
 | `stats.field_use_created_since` | date (`YYYY-MM-DD`) | None | `tga linear stats` field use (C9) counts only issues created on or after this UTC date. None = every issue. |
 | `stats.concentration_completed_since` | date (`YYYY-MM-DD`) | None | `tga linear stats` concentration (C14) counts only issues completed on or after this UTC date. None = every completed issue. |
+| `sync_on_collect` | bool | false | `tga collect` and `tga analyze` also run the bulk Linear sync with entities: each `team_keys` entry, or every team the key can see when `team_keys` is empty. Off: no bulk Linear request. See [collection.md](collection.md#linear-bulk-sync-in-collect-190). |
 | `stats.report` | bool | false | Append the Linear delivery section to `report.md` in `tga report` and `tga analyze`, when the database holds synced Linear issues. The bounds above apply. See [reporting.md](reporting.md#linear-delivery-section). |
 
 The `stats` block is optional (#190). A value that is not a `YYYY-MM-DD`
@@ -973,6 +974,8 @@ date fails the config load. See
 
 ```yaml
 linear:
+  team_keys: [ENG]        # empty: every team the key can see
+  sync_on_collect: true   # #190: bulk sync inside tga collect / analyze
   stats:
     field_use_created_since: 2025-01-01
     concentration_completed_since: 2026-01-01
@@ -981,7 +984,9 @@ linear:
 
 There is no `team_id` key; the team scope is `team_keys`. The bulk sync
 (`tga linear sync`, see [cli-commands.md](cli-commands.md#tga-linear-sync))
-takes its scope from `--team`, `--all-teams` or `team_keys`.
+takes its scope from `--team`, `--all-teams` or `team_keys`. Under
+`sync_on_collect`, `tga collect` syncs every `team_keys` entry, or all teams
+when the list is empty.
 
 ### `pm.azure_devops` — AzureDevOpsConfig
 

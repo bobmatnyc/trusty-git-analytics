@@ -168,8 +168,11 @@ Generated via `tera` template engine. Templates ship in `tga-report/templates/`.
 
 The section is the block `tga linear stats` prints, as of the report's
 `Generated` timestamp, with the `linear.stats` bounds. One blank line
-separates it from the rest of the report. In every other case `report.md` is
-byte-identical to a report without Linear. The section is computed before any
+separates it from the rest of the report. When the first, second and fourth
+conditions hold but the report is scoped with `--author`, `report.md` ends
+instead with one line: "The Linear delivery section is left out under an
+author filter because it covers the whole workspace." In every other case
+`report.md` is byte-identical to a report without Linear. The section is computed before any
 report file is written; a figure that cannot be computed fails the report with
 an error starting `Linear delivery section:` and no file is written. The
 report reads the Linear tables and never writes them.

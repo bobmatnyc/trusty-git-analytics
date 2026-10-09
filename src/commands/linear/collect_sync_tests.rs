@@ -143,7 +143,7 @@ async fn a_linear_sync_auth_or_server_error_is_a_stage_failure() {
 }
 
 /// #146 (D28): a 404 is a counted warning, not a stage failure — the run
-/// still exits 0 — and it names the team.
+/// still exits 0 — and it names each scope: the team and the entity pass.
 #[tokio::test]
 async fn a_linear_sync_404_is_a_counted_warning() {
     let server = MockServer::start().await;
@@ -167,9 +167,9 @@ async fn a_linear_sync_404_is_a_counted_warning() {
     let fault = &stats.errors[0];
     assert_eq!(fault.severity, FaultSeverity::ItemSkipped);
     assert!(
-        fault.message.contains("1 of 1")
+        fault.message.contains("2 of 2")
             && fault.message.contains("HTTP 404")
-            && fault.message.contains("ENG"),
+            && fault.message.contains("ENG, reference entities"),
         "{}",
         fault.message
     );
