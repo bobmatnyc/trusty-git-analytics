@@ -215,16 +215,13 @@ mod approve_tests {
     #[cfg(unix)]
     #[test]
     fn a_stub_search_that_refuses_is_reported_rather_than_ignored() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let stub = tmp.path().join("trusty-search");
-        std::fs::write(
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(
             &stub,
             "#!/bin/sh\necho \"indexing refused: $3 is not approved\" >&2\nexit 1\n",
-        )
-        .expect("write stub");
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        );
 
         let err = approve_for_indexing(&stub, Path::new("/w/repos/xsv"))
             .expect_err("a refusing search must fail the repository");
@@ -235,12 +232,10 @@ mod approve_tests {
     #[cfg(unix)]
     #[test]
     fn a_stub_search_that_approves_lets_the_repository_proceed() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let stub = tmp.path().join("trusty-search");
-        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub");
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(&stub, "#!/bin/sh\nexit 0\n");
 
         approve_for_indexing(&stub, Path::new("/w/repos/xsv")).expect("a zero exit is an approval");
     }

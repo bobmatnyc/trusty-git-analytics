@@ -1342,7 +1342,6 @@ trusty-review = "0.15.1"
     #[cfg(unix)]
     fn install_stubs(work: &crate::workdir::WorkDir) {
         use crate::tools::RequiredTool;
-        use std::os::unix::fs::PermissionsExt as _;
 
         const TGA: &str = "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  \
              case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
@@ -1362,8 +1361,8 @@ trusty-review = "0.15.1"
             } else {
                 "#!/bin/sh\nexit 0\n"
             };
-            std::fs::write(&path, body).expect("stub binary");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            // #152: the shared writer leaves no write fd a sibling fork can leak.
+            crate::stub_executable::write_stub_executable(&path, body);
         }
         let record = format!(
             "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{tga}\"\n\

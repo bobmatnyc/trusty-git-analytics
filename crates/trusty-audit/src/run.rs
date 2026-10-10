@@ -1161,13 +1161,8 @@ trusty-review = "0.15.1"
             } else {
                 script
             };
-            std::fs::write(&path, body).expect("stub binary");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod");
-            }
+            // #152: the shared writer leaves no write fd a sibling fork can leak.
+            crate::stub_executable::write_stub_executable(&path, body);
         }
         let record = format!(
             "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{tga}\"\n\
@@ -1725,12 +1720,8 @@ exit 0
 
     /// Write `script` at `path` and make it runnable.
     fn write_executable(path: &Path, script: &str) {
-        std::fs::write(path, script).expect("write stub");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        }
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(path, script);
     }
 
     /// The three tools this client installed, and no tga at all — the state of
@@ -3473,16 +3464,14 @@ exit 0
     #[cfg(unix)]
     #[test]
     fn the_invocation_log_lands_in_the_work_root_whatever_the_child_cwd_is() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
         std::fs::create_dir_all(work.root()).expect("mkdir root");
         let elsewhere = tempfile::tempdir().expect("tempdir");
 
         let script = work.root().join("stub.sh");
-        std::fs::write(&script, counts_invocations(&work, NEVER)).expect("write stub");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(&script, &counts_invocations(&work, NEVER));
 
         let output = work.path(Area::Output).join("00-acme-api");
         let audit = std::process::Command::new(&script)

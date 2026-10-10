@@ -132,6 +132,10 @@ pub mod run;
 // the same binary and both were masked by the same update-availability notice.
 pub(crate) mod search_stderr;
 pub mod session;
+// #152: the one writer for a stub executable a test runs, so no exec of one
+// can fail with ETXTBSY under parallel tests that fork. Test-only.
+#[cfg(test)]
+pub(crate) mod stub_executable;
 // #6132: the operator's one documented way to run the chain on a locally built
 // binary, kept beside `tools` rather than inside it — `tools` owns the pinned
 // set and its installation, this owns the explicit escape hatch from it.

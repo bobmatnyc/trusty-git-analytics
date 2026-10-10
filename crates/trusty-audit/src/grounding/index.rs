@@ -431,13 +431,12 @@ mod index_tests {
     #[cfg(unix)]
     #[test]
     fn an_update_notice_from_the_real_spawn_path_does_not_become_the_reason() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let stub = tmp.path().join("trusty-search");
-        std::fs::write(
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(
             &stub,
-            format!(
+            &format!(
                 "#!/bin/sh\n\
                  echo '{REAL_NOTICE}' >&2\n\
                  [ \"$1 $2\" = \"index add\" ] && exit 0\n\
@@ -445,9 +444,7 @@ mod index_tests {
                  echo 'indexing refused: root is not allowlisted' >&2\n\
                  exit 1\n"
             ),
-        )
-        .expect("write stub");
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        );
 
         let reason = ensure_indexed(&stub, Path::new("/w/repos/xsv"), "xsv")
             .expect_err("a refused index must not report a status");
@@ -475,17 +472,14 @@ mod index_tests {
     #[cfg(unix)]
     #[test]
     fn a_served_index_is_not_rebuilt() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let calls = tmp.path().join("calls");
         let stub = tmp.path().join("trusty-search");
-        std::fs::write(
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(
             &stub,
-            format!("#!/bin/sh\necho \"$1\" >> {}\nexit 0\n", calls.display()),
-        )
-        .expect("write stub");
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            &format!("#!/bin/sh\necho \"$1\" >> {}\nexit 0\n", calls.display()),
+        );
 
         let status = ensure_indexed(&stub, Path::new("/w/repos/xsv"), "xsv").expect("served");
         assert_eq!(status, IndexStatus::AlreadyServed);
@@ -501,22 +495,19 @@ mod index_tests {
     #[cfg(unix)]
     #[test]
     fn an_unserved_index_is_built_under_the_requested_id() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let calls = tmp.path().join("calls");
         let stub = tmp.path().join("trusty-search");
         // `index add` and `index … --name` succeed; `index-status` reports the
         // 404 the real daemon reports for an index it does not serve.
-        std::fs::write(
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(
             &stub,
-            format!(
+            &format!(
                 "#!/bin/sh\necho \"$*\" >> {}\n[ \"$1\" = index-status ] && exit 1\nexit 0\n",
                 calls.display()
             ),
-        )
-        .expect("write stub");
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        );
 
         let status = ensure_indexed(&stub, Path::new("/w/repos/xsv"), "xsv").expect("indexed");
         assert_eq!(status, IndexStatus::Indexed);
@@ -531,22 +522,19 @@ mod index_tests {
     #[cfg(unix)]
     #[test]
     fn a_refused_index_is_a_reason_not_a_status() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let stub = tmp.path().join("trusty-search");
         // `index add` is approved; `index-status` reports the daemon's 404; the
         // build itself refuses on stderr the way a non-allowlisted root does.
-        std::fs::write(
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(
             &stub,
             "#!/bin/sh\n\
              [ \"$1 $2\" = \"index add\" ] && exit 0\n\
              [ \"$1\" = index-status ] && exit 1\n\
              echo 'indexing refused: root is not allowlisted' >&2\n\
              exit 1\n",
-        )
-        .expect("write stub");
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        );
 
         let reason = ensure_indexed(&stub, Path::new("/w/repos/xsv"), "xsv")
             .expect_err("a refused index must not report a status");

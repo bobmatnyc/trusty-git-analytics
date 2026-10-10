@@ -655,13 +655,8 @@ trusty-review = "0.15.1"
             } else {
                 script
             };
-            std::fs::write(&path, body).expect("stub binary");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod");
-            }
+            // #152: the shared writer leaves no write fd a sibling fork can leak.
+            crate::stub_executable::write_stub_executable(&path, body);
         }
         let record = format!(
             "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{tga}\"\n\

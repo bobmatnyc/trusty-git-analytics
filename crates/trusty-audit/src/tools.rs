@@ -1100,13 +1100,11 @@ trusty-review = "0.0.0-never-published"
     #[cfg(unix)]
     #[test]
     fn an_overridden_tool_needs_no_install() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
         let local = tmp.path().join("locally-built-tga");
-        std::fs::write(&local, b"#!/bin/sh\nexit 0\n").expect("write stub");
-        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // #152: the shared writer leaves no write fd a sibling fork can leak.
+        crate::stub_executable::write_stub_executable(&local, "#!/bin/sh\nexit 0\n");
 
         let value = local.display().to_string();
         let overrides = ToolOverrides::resolve(|name| {

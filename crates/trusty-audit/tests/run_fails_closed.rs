@@ -21,9 +21,12 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// #152: the crate's one stub-executable writer, shared with the unit tests.
+#[path = "../src/stub_executable.rs"]
+mod stub_executable;
 
 const TAUDIT: &str = env!("CARGO_BIN_EXE_taudit");
 
@@ -80,8 +83,8 @@ impl Engagement {
     fn install_stubs(&self, script: &str) {
         for name in ["tga", "trusty-search", "trusty-analyze", "trusty-review"] {
             let path = self.work.join("tools").join(name);
-            std::fs::write(&path, script).expect("stub");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            // #152: the shared writer leaves no write fd a sibling fork can leak.
+            stub_executable::write_stub_executable(&path, script);
         }
         let record = format!(
             "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{d}/tga\"\n\
