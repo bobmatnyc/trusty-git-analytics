@@ -664,11 +664,11 @@ mod fetch_issue_tests {
 // ─── Bounded pagination and rate-limit termination (#6084) ────────────────────
 
 mod bounded_fetch_tests {
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::collect::github::budget::MAX_PAGES;
+    use crate::collect::github::budget::{MAX_PAGES, PULLS_MAX_PAGES};
     use crate::collect::github::client::PAGE_SIZE;
     use crate::collect::pr_provider::PrProvider;
 
@@ -687,6 +687,37 @@ mod bounded_fetch_tests {
                     "title": "t",
                     "state": "open",
                     "html_url": "https://example.invalid/1",
+                })
+            })
+            .collect();
+        serde_json::Value::Array(items)
+    }
+
+    /// One full page of pull requests for the `/pulls` walk (a PR payload).
+    fn full_pulls_page() -> serde_json::Value {
+        let items: Vec<serde_json::Value> = (0..PAGE_SIZE)
+            .map(|i| {
+                serde_json::json!({
+                    "number": i + 1,
+                    "title": "t",
+                    "state": "open",
+                    "created_at": "2026-01-01T00:00:00Z",
+                })
+            })
+            .collect();
+        serde_json::Value::Array(items)
+    }
+
+    /// A short (final) `/pulls` page: fewer than [`PAGE_SIZE`] items, so a
+    /// post-cap walk terminates on it instead of running to the ceiling.
+    fn pulls_page_101() -> serde_json::Value {
+        let items: Vec<serde_json::Value> = (0..50)
+            .map(|i| {
+                serde_json::json!({
+                    "number": 10000 + i + 1,
+                    "title": "t",
+                    "state": "open",
+                    "created_at": "2026-01-01T00:00:00Z",
                 })
             })
             .collect();
@@ -726,6 +757,98 @@ mod bounded_fetch_tests {
             "the notice must say the result is incomplete, got: {}",
             notices[0]
         );
+    }
+
+    /// Why (#200): the bulk PR listing is the only walk that scales with a
+    /// repository's entire PR history, and real repositories exceed the shared
+    /// 10,000-PR bound. A listing whose first 100 pages are all full — i.e. a
+    /// repository with more than 10,000 PRs — must keep walking past the shared
+    /// cap and collect the remainder, not truncate at page 100.
+    /// What: page 101 answers short (the real end of the list); every other page
+    /// is full. The walk must fetch all 101 pages and return all rows.
+    /// Test: itself — the pre-fix walk stops at 100 requests and returns only
+    /// 10,000 rows, so this assertion fails before the fix.
+    #[tokio::test]
+    async fn a_pulls_listing_pages_past_the_shared_cap_and_collects_fully() {
+        let server = MockServer::start().await;
+        // First-mounted wins on a query match, so the short page 101 is mounted
+        // before the full-page catch-all: page 101 is the genuine end of the
+        // list, every earlier page is full.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls"))
+            .and(query_param("page", "101"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pulls_page_101()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(full_pulls_page()))
+            .mount(&server)
+            .await;
+
+        let client = client_at(&server.uri());
+        let prs = client
+            .fetch_pull_requests()
+            .await
+            .expect("the walk returns a complete list");
+
+        // 100 full pages (10,000) + the 50-row final page, no truncation.
+        assert_eq!(
+            prs.len(),
+            ((MAX_PAGES * PAGE_SIZE) + 50) as usize,
+            "a repository past the shared cap must collect fully, not truncate"
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .map(|r| r.len())
+            .unwrap_or_default();
+        assert_eq!(
+            requests,
+            (MAX_PAGES + 1) as usize,
+            "the walk must reach page 101, not stop at the shared cap"
+        );
+        assert!(
+            client.fetch_notices().is_empty(),
+            "a complete walk must not be reported as PARTIAL, got: {:?}",
+            client.fetch_notices()
+        );
+    }
+
+    /// Why (#200): the raised bound must stay finite — #6084's guarantee that a
+    /// never-ending `/pulls` listing cannot loop forever. The pulls cap is
+    /// [`PULLS_MAX_PAGES`] (200k PRs), not the shared 10,000.
+    /// What: a listing that always answers full must stop at exactly
+    /// [`PULLS_MAX_PAGES`] requests and be reported PARTIAL.
+    #[tokio::test]
+    async fn a_pulls_listing_that_never_ends_stops_at_the_pulls_cap_and_says_so() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(full_pulls_page()))
+            .mount(&server)
+            .await;
+
+        let client = client_at(&server.uri());
+        let prs = client.fetch_pull_requests().await.expect("walk returns");
+
+        assert_eq!(
+            prs.len(),
+            (PULLS_MAX_PAGES * PAGE_SIZE) as usize,
+            "the pulls walk must be bounded by the pulls cap"
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .map(|r| r.len())
+            .unwrap_or_default();
+        assert_eq!(
+            requests, PULLS_MAX_PAGES as usize,
+            "the pulls walk must be finite at the pulls cap"
+        );
+        let notices = client.fetch_notices();
+        assert_eq!(notices.len(), 1, "a trimmed pulls walk must be reported");
+        assert!(notices[0].contains("PARTIAL"), "got: {}", notices[0]);
     }
 
     /// Why: the notice has to reach the pipeline through the trait the
@@ -882,7 +1005,11 @@ fn a_truncation_recorded_by_one_client_is_visible_to_the_other() {
         .with_run_budget(&run);
 
     assert!(second.fetch_notices().is_empty());
-    assert!(first.page_cap_reached("pulls", "acme/widget", super::MAX_PAGES + 1));
+    assert!(first.page_cap_reached(
+        "pulls",
+        "acme/widget",
+        crate::collect::github::budget::PULLS_MAX_PAGES + 1
+    ));
     assert_eq!(
         second.fetch_notices().len(),
         1,
