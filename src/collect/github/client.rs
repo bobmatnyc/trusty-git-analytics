@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::fault::CollectionFault;
-use crate::collect::github::budget::{RunBudget, MAX_PAGES};
+use crate::collect::github::budget::{RunBudget, MAX_PAGES, PULLS_MAX_PAGES};
 use crate::collect::github::fetch_faults::{http_status, FaultWording, FetchFaults};
 use crate::collect::github::repo_resolver::{
     build_http_client_with_token, parse_slug, resolve_github_token,
@@ -551,30 +551,44 @@ impl GitHubClient {
         retry_get(&self.client, url, self.budget.shared()).await
     }
 
-    /// Whether a paginated walk has reached [`MAX_PAGES`] and must stop.
+    /// Whether a paginated walk has reached its page cap and must stop.
     ///
     /// Why (#6084): every listing here looped until GitHub returned a short
     /// page, which trusts the server to eventually end the walk. A cap makes
     /// each walk finite; recording the stop is what keeps the shortened result
     /// from reading downstream exactly like a complete one.
-    /// What: returns `false` below the cap. At the cap, warns, appends a
-    /// truncation notice to the budget, and returns `true` for the caller to
-    /// break on.
-    /// Test: `client_tests::a_listing_that_never_ends_stops_at_the_page_cap_and_says_so`.
+    ///
+    /// Why (#200): the cap is per-endpoint. The bulk pull-request listing
+    /// scales with a repository's entire PR history and can exceed the shared
+    /// [`MAX_PAGES`] bound (10,000 PRs) in real repositories, so it alone gets
+    /// the larger [`PULLS_MAX_PAGES`] bound. The per-PR walks (reviews, commits)
+    /// and the issues/org walks keep [`MAX_PAGES`] — none of them scales with
+    /// repository size, so raising their bound would only let a misbehaving
+    /// listing run longer for no coverage gain.
+    /// What: returns `false` below the cap for this endpoint. At the cap,
+    /// warns, appends a truncation notice to the budget, and returns `true`
+    /// for the caller to break on.
+    /// Test: `client_tests::a_listing_that_never_ends_stops_at_the_page_cap_and_says_so`,
+    /// `client_tests::a_pulls_listing_pages_past_the_shared_cap_and_collects_fully`.
     fn page_cap_reached(&self, endpoint: &str, scope: &str, page: u32) -> bool {
-        if page <= MAX_PAGES {
+        let cap = if endpoint == "pulls" {
+            PULLS_MAX_PAGES
+        } else {
+            MAX_PAGES
+        };
+        if page <= cap {
             return false;
         }
         warn!(
             endpoint,
             scope,
-            pages = MAX_PAGES,
+            pages = cap,
             "GitHub listing hit the page cap; results for this scope are partial"
         );
         self.budget.shared().note_truncation(format!(
-            "GitHub {endpoint} listing for {scope} stopped at the {MAX_PAGES}-page cap \
+            "GitHub {endpoint} listing for {scope} stopped at the {cap}-page cap \
              ({} items); these results are PARTIAL",
-            MAX_PAGES * PAGE_SIZE
+            cap * PAGE_SIZE
         ));
         true
     }

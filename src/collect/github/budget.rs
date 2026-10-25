@@ -30,6 +30,20 @@ use crate::collect::errors::CollectError;
 /// answering with full pages.
 pub(crate) const MAX_PAGES: u32 = 100;
 
+/// Hard ceiling on the pages the bulk pull-request listing will walk.
+///
+/// Why (#200): the PR listing is the only walk that scales with a repository's
+/// ENTIRE pull-request history, and real repositories exceed [`MAX_PAGES`]
+/// (10,000 PRs) — duetto held 10,000 and rust-lang/rust holds ~99,000. The
+/// shared cap silently truncated them. The `/pulls` endpoint ends a walk with a
+/// short page, so a large-but-finite cap keeps the #6084 guarantee (a walk
+/// stays finite even when GitHub keeps answering with full pages) while letting
+/// a large repository collect fully.
+///
+/// At 100 per page this is 200,000 pull requests.
+/// Test: `bounded_fetch_tests::a_pulls_listing_pages_past_the_shared_cap_and_collects_fully`.
+pub(crate) const PULLS_MAX_PAGES: u32 = 2000;
+
 /// Hard ceiling on per-reference issue lookups in one classification batch.
 ///
 /// The `fetch_on_reference` path issues one Issues-API call per unique `#N`
