@@ -278,8 +278,8 @@ pub fn build_dd_manifest(
     Ok(DdManifest {
         report: DdReportSection {
             title: clean(&opts.title),
-            analyst: opts.analyst.as_deref().map(&clean),
-            client: opts.client.as_deref().map(&clean),
+            analyst: opts.analyst.as_deref().map(clean),
+            client: opts.client.as_deref().map(clean),
             gaps: opts.gaps.iter().map(|g| clean(g)).collect(),
             // #5405: a filename this crate chose, never operator text — so it
             // carries no credential to scrub.
