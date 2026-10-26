@@ -49,7 +49,9 @@ rules:
 /// A custom-only rule set. With the built-in catch-all gone, the weighted-sum
 /// tier — which the catch-all otherwise pre-empts — votes on most of the
 /// corpus; since #165 every vote outside this set's one category (`release`)
-/// is dropped, so those commits are stored as `uncategorized`.
+/// is dropped, so those commits are stored as `uncategorized`. Since #131 the
+/// tier is off for this set (`weighted_sum.enabled` unset); it could never
+/// vote `release`, so the stored rows are unchanged.
 const CUSTOM_ONLY_RULES: &str = r#"
 extend_defaults: false
 rules:

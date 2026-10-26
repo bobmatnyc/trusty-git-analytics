@@ -53,7 +53,7 @@ fn config(rules: &std::path::Path) -> Config {
                 .into_iter()
                 .collect::<HashMap<_, _>>(),
             weighted_sum: WeightedSumConfig {
-                enabled: false,
+                enabled: Some(false),
                 ..WeightedSumConfig::default()
             },
             ..ClassificationConfig::default()

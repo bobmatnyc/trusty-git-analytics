@@ -49,7 +49,7 @@ fn custom_engine_with(
     };
     let cfg = ClassificationEngineConfig {
         weighted_sum: WeightedSumConfig {
-            enabled: weighted_sum,
+            enabled: Some(weighted_sum),
             ..Default::default()
         },
         ..ClassificationEngineConfig::default()

@@ -691,12 +691,16 @@ pub struct ClassificationConfig {
     /// restore pre-1.3.0 behaviour (regex falls directly to fuzzy).
     /// The tier votes among built-in category names (`feature`, `bugfix`,
     /// `chore`, `integration`, `platform`, `docs`, `refactor`, `merge`).
-    /// #165: when the rules files define the whole category set
-    /// (`extend_defaults: false`), that set is the rule categories plus any
-    /// `categories:` entries, the set the LLM tier is restricted to. A
-    /// verdict whose category is outside it is dropped and the commit falls
-    /// through to the next tier; one inside it is kept in the set's
-    /// spelling. This holds with or without a `categories:` list.
+    /// #131: when the rules files define the whole category set
+    /// (`extend_defaults: false`), the tier is off unless
+    /// `weighted_sum.enabled: true` is set; see
+    /// `docs/requirements/classification.md`.
+    /// #165: an opted-in tier under `extend_defaults: false` answers only
+    /// inside that set, the rule categories plus any `categories:` entries,
+    /// the set the LLM tier is restricted to. A verdict whose category is
+    /// outside it is dropped and the commit falls through to the next tier;
+    /// one inside it is kept in the set's spelling. This holds with or
+    /// without a `categories:` list.
     #[serde(default)]
     pub weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig,
 

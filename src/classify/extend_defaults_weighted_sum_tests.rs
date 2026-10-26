@@ -77,17 +77,19 @@ fn with_rules(rules: &tempfile::NamedTempFile, extra: &str) -> ClassificationEng
 fn dump(engine: &ClassificationEngine) -> String {
     MESSAGES
         .iter()
-        .map(|(msg, is_merge)| match engine.classify_sync(msg, *is_merge) {
-            Some(v) => format!(
-                "{}|{}|{:.4}|{:?}|{:?}\n",
-                v.category,
-                v.method.as_str(),
-                v.confidence,
-                v.top_level,
-                v.ticket_id
-            ),
-            None => "none\n".to_string(),
-        })
+        .map(
+            |(msg, is_merge)| match engine.classify_sync(msg, *is_merge) {
+                Some(v) => format!(
+                    "{}|{}|{:.4}|{:?}|{:?}\n",
+                    v.category,
+                    v.method.as_str(),
+                    v.confidence,
+                    v.top_level,
+                    v.ticket_id
+                ),
+                None => "none\n".to_string(),
+            },
+        )
         .collect()
 }
 
@@ -113,7 +115,9 @@ fn extend_defaults_false_turns_the_weighted_sum_tier_off() {
 fn explicit_enabled_true_opts_a_custom_only_ruleset_back_in() {
     let rules = rules_file(CUSTOM_ONLY);
     let on = with_rules(&rules, "weighted_sum:\n  enabled: true\n");
-    let v = on.classify_sync(FEATURE, false).expect("weighted-sum verdict");
+    let v = on
+        .classify_sync(FEATURE, false)
+        .expect("weighted-sum verdict");
     assert_eq!(v.method, ClassificationMethod::WeightedSum);
     assert_eq!(v.category, "Feature");
 
@@ -185,13 +189,21 @@ fn default_and_extend_defaults_true_verdicts_are_unchanged() {
             engine("weighted_sum:\n  enabled: true\n"),
             BUILTIN_GOLDEN,
         ),
-        ("layered, key unset", with_rules(&layered, ""), LAYERED_GOLDEN),
+        (
+            "layered, key unset",
+            with_rules(&layered, ""),
+            LAYERED_GOLDEN,
+        ),
         (
             "layered, enabled: true",
             with_rules(&layered, "weighted_sum:\n  enabled: true\n"),
             LAYERED_GOLDEN,
         ),
-        ("direct, extend_defaults: true", direct_engine(), DIRECT_GOLDEN),
+        (
+            "direct, extend_defaults: true",
+            direct_engine(),
+            DIRECT_GOLDEN,
+        ),
     ];
     let diffs: Vec<String> = cases
         .into_iter()
@@ -201,4 +213,27 @@ fn default_and_extend_defaults_true_verdicts_are_unchanged() {
         })
         .collect();
     assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+}
+
+/// Why (#131): an absent `enabled` must stay distinguishable from an
+/// explicit one, and a YAML `null` must not read as absent.
+/// What: absent is `None` and follows `extend_defaults`; `true` and `false`
+/// win either way; `null` is an error.
+/// Test: this test.
+#[test]
+fn weighted_sum_enabled_is_tri_state() {
+    use crate::classify::tiers::weighted_sum::WeightedSumConfig;
+    let parse = |yaml: &str| serde_yaml::from_str::<WeightedSumConfig>(yaml);
+
+    let unset = parse("min_confidence: 0.55").expect("unset");
+    assert_eq!(unset.enabled, None);
+    assert!(unset.is_enabled(true));
+    assert!(!unset.is_enabled(false));
+
+    let on = parse("enabled: true").expect("on");
+    assert!(on.is_enabled(true) && on.is_enabled(false));
+    let off = parse("enabled: false").expect("off");
+    assert!(!off.is_enabled(true) && !off.is_enabled(false));
+
+    assert!(parse("enabled: null").is_err());
 }

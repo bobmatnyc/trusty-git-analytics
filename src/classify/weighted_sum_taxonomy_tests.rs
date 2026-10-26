@@ -9,6 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::classify::tiers::llm::LlmClassifier;
+use crate::classify::tiers::weighted_sum::WeightedSumConfig;
 use crate::core::config::{ClassificationConfig, Config, LlmFallbackScope};
 use crate::core::db::Database;
 use crate::core::models::ClassificationMethod;
@@ -39,12 +40,17 @@ fn rules_file(yaml: &str) -> tempfile::NamedTempFile {
     f
 }
 
-/// The weighted-sum tier is on (the default).
+/// The weighted-sum tier is opted in: under `extend_defaults: false` it is
+/// off unless `enabled: true` is set (#131).
 fn pipeline(rules: &std::path::Path) -> ClassificationPipeline {
     ClassificationPipeline::new(Config {
         classification: Some(ClassificationConfig {
             rules_files: vec![rules.to_path_buf()],
             llm_fallback_scope: LlmFallbackScope::Unanswered,
+            weighted_sum: WeightedSumConfig {
+                enabled: Some(true),
+                ..WeightedSumConfig::default()
+            },
             ..ClassificationConfig::default()
         }),
         ..Config::default()
