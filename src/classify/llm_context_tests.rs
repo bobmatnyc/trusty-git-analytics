@@ -58,7 +58,7 @@ fn config(rules: &std::path::Path, llm: LlmConfig) -> Config {
         classification: Some(ClassificationConfig {
             rules_files: vec![rules.to_path_buf()],
             weighted_sum: WeightedSumConfig {
-                enabled: false,
+                enabled: Some(false),
                 ..WeightedSumConfig::default()
             },
             ..ClassificationConfig::default()

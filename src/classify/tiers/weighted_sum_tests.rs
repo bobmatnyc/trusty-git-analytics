@@ -281,7 +281,7 @@ fn argmax_tie_does_not_emit_verdict() {
 #[test]
 fn disabled_classifier_always_returns_none() {
     let clf = WeightedSumClassifier::new(WeightedSumConfig {
-        enabled: false,
+        enabled: Some(false),
         ..WeightedSumConfig::default()
     });
     let result = clf.classify("fix: handle null pointer — critical bug", false, &[]);

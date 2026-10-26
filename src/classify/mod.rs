@@ -69,6 +69,10 @@ mod pipeline_repo_map_floor_tests;
 #[cfg(test)]
 mod weighted_sum_taxonomy_tests;
 
+// #131: `extend_defaults: false` turns the weighted-sum tier off.
+#[cfg(test)]
+mod extend_defaults_weighted_sum_tests;
+
 // #175: `use_llm: false` builds no LLM client and sends nothing.
 #[cfg(test)]
 mod use_llm_off_tests;

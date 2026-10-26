@@ -70,7 +70,7 @@ fn config(rules: &std::path::Path, map: &[(&str, &str)], repo_map: RepoMapConfig
             // Keep the signal-voting tier out so an unmatched message stays
             // unanswered and is LLM-eligible.
             weighted_sum: WeightedSumConfig {
-                enabled: false,
+                enabled: Some(false),
                 ..WeightedSumConfig::default()
             },
             ..ClassificationConfig::default()
@@ -844,7 +844,7 @@ fn built_in_floor(repo_map: RepoMapConfig) -> Config {
             repo_map,
             llm_fallback_scope: LlmFallbackScope::LowConfidence,
             weighted_sum: WeightedSumConfig {
-                enabled: false,
+                enabled: Some(false),
                 ..WeightedSumConfig::default()
             },
             ..ClassificationConfig::default()

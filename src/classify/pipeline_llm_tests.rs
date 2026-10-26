@@ -42,7 +42,7 @@ fn config(rules: &std::path::Path, scope: LlmFallbackScope) -> Config {
             // Keep the signal-voting tier out so an unmatched message stays
             // unanswered.
             weighted_sum: WeightedSumConfig {
-                enabled: false,
+                enabled: Some(false),
                 ..WeightedSumConfig::default()
             },
             ..ClassificationConfig::default()

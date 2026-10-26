@@ -57,7 +57,7 @@ fn config(rules: &std::path::Path, map: &[(&str, &str)]) -> Config {
             // Keep the signal-voting tier out so an unmatched message stays
             // unanswered and is LLM-eligible.
             weighted_sum: WeightedSumConfig {
-                enabled: false,
+                enabled: Some(false),
                 ..WeightedSumConfig::default()
             },
             ..ClassificationConfig::default()

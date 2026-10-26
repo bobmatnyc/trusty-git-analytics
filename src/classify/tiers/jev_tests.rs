@@ -548,7 +548,7 @@ pub(super) async fn run_pipeline_cfg(
         classification: Some(ClassificationConfig {
             rules_files: vec![rules.path().to_path_buf()],
             weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig {
-                enabled: false,
+                enabled: Some(false),
                 ..Default::default()
             },
             ..ClassificationConfig::default()

@@ -98,8 +98,9 @@ pub struct ClassificationEngine {
     issue_type: IssueTypeTier,
     regex: RegexMatcher,
     jira_project: JiraProjectTier,
-    /// Tier 2.5: weighted-sum classifier (always enabled by default; see
-    /// [`WeightedSumConfig::enabled`] for the per-instance toggle).
+    /// Tier 2.5: weighted-sum classifier. On by default with the built-in
+    /// rules, off by default under `extend_defaults: false` (#131); see
+    /// [`crate::classify::tiers::weighted_sum::WeightedSumConfig::is_enabled`].
     ///
     /// The tier votes among eight built-in categories (`feature`, `bugfix`,
     /// `chore`, `integration`, `platform`, `docs`, `refactor`, `merge`); see
@@ -285,10 +286,14 @@ impl ClassificationEngine {
         let regex = RegexMatcher::new(&ruleset.rules)?;
         // Tier 2.5: weighted-sum classifier. The per-instance `enabled`
         // flag in WeightedSumConfig lets operators opt out.
-        let weighted_sum = WeightedSumClassifier::new(config.weighted_sum.clone());
-        // #165: a custom-only ruleset (`extend_defaults: false`) limits the
-        // tier to its own category set, the same set the LLM tier is
-        // restricted to, whether or not it declares `categories:`.
+        // #131: an unset `enabled` follows `extend_defaults`, so a custom-only
+        // ruleset runs the tier only when the operator opts in.
+        let mut weighted_sum_config = config.weighted_sum.clone();
+        weighted_sum_config.enabled = Some(weighted_sum_config.is_enabled(ruleset.extend_defaults));
+        let weighted_sum = WeightedSumClassifier::new(weighted_sum_config);
+        // #165: a custom-only ruleset that opts the tier in limits it to its
+        // own category set, the same set the LLM tier is restricted to,
+        // whether or not it declares `categories:`.
         let custom_only = !ruleset.extend_defaults;
         let weighted_sum_categories = custom_only.then(|| {
             super::pipeline::configured_categories(ruleset.clone())
@@ -538,7 +543,8 @@ impl ClassificationEngine {
         // Tier 2.5: weighted-sum classifier.
         //
         // Sits between the regex tier (Tier 2) and the fuzzy tier (Tier 3).
-        // Disabled per-instance via `WeightedSumConfig { enabled: false }`.
+        // Disabled per-instance via `WeightedSumConfig { enabled: Some(false) }`,
+        // and by default under `extend_defaults: false` (#131).
         //
         // File paths are not available in the synchronous path (they would
         // require a DB join); pass an empty slice so the signal contributes

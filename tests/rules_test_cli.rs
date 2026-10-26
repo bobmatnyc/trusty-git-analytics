@@ -9,7 +9,8 @@ const MSG: &str = "chore(deps): bump openssl for CVE-2026-1234";
 
 /// A rules file whose one rule never matches. Its category is `chore`, so
 /// the weighted-sum verdict for [`MSG`] is inside the active category set
-/// and only `weighted_sum.enabled` decides whether the tier fires.
+/// and only `weighted_sum.enabled` decides whether the tier fires. The file
+/// is custom-only, so the tier is off unless `enabled: true` is set (#131).
 fn rules(dir: &Path) -> std::path::PathBuf {
     let path = dir.join("rules.yaml");
     fs::write(
@@ -61,11 +62,32 @@ fn rules_test_honours_weighted_sum_enabled_false() {
     let dir = tempfile::tempdir().expect("tempdir");
     let rules = rules(dir.path());
 
-    let on = rules_test(dir.path(), &rules, "");
+    // #131: the control run opts in; unset is off for a custom-only file.
+    let on = rules_test(dir.path(), &rules, "  weighted_sum:\n    enabled: true\n");
     assert!(on.contains("method      : weighted_sum"), "control: {on}");
     assert!(on.contains("category    : chore"), "control: {on}");
 
     let off = rules_test(dir.path(), &rules, "  weighted_sum:\n    enabled: false\n");
     assert!(!off.contains("weighted_sum"), "tier is off: {off}");
     assert!(off.contains("No tier matched"), "tier is off: {off}");
+}
+
+/// Why (#131): `extend_defaults: false` turns the weighted-sum tier off
+/// unless `weighted_sum.enabled: true` opts back in.
+/// What: the rules file is custom-only and its `chore` category holds the
+/// tier's vote. With the key unset, `rules test` reports no verdict; with
+/// `enabled: true` it reports `weighted_sum` / `chore`.
+/// Test: this test.
+#[test]
+fn rules_test_custom_only_turns_weighted_sum_off_unless_enabled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rules = rules(dir.path());
+
+    let unset = rules_test(dir.path(), &rules, "");
+    assert!(!unset.contains("weighted_sum"), "tier is off: {unset}");
+    assert!(unset.contains("No tier matched"), "tier is off: {unset}");
+
+    let on = rules_test(dir.path(), &rules, "  weighted_sum:\n    enabled: true\n");
+    assert!(on.contains("method      : weighted_sum"), "opted in: {on}");
+    assert!(on.contains("category    : chore"), "opted in: {on}");
 }

@@ -450,18 +450,26 @@ fn has_jira_style_prefix(message: &str) -> bool {
 /// What: `enabled` gates the tier entirely; `min_confidence` is the argmax
 /// floor below which the tier falls through to the fuzzy tier instead of
 /// emitting a verdict.
-/// Test: passing `WeightedSumConfig { enabled: false, .. }` to
+/// Test: passing `WeightedSumConfig { enabled: Some(false), .. }` to
 /// `WeightedSumClassifier::classify` must always return `None`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct WeightedSumConfig {
-    /// Whether the weighted-sum tier is active.
+    /// Whether the weighted-sum tier is active; `None` when the key is absent.
     ///
-    /// Defaults to `true`. Set to `false` to revert Tier 2.5 behaviour to
-    /// pre-1.3.0 fall-through (fuzzy tier handles everything after regex).
-    #[serde(default = "default_weighted_sum_enabled")]
-    pub enabled: bool,
+    /// `Some(false)` turns the tier off and `Some(true)` turns it on. `None`
+    /// follows the rules: on with the built-in rules (`extend_defaults:
+    /// true`), off when the rules define the whole category set
+    /// (`extend_defaults: false`, #131). Read through [`Self::is_enabled`].
+    /// A YAML `null` is an error, not an absent key.
+    // #131: `Option` so an explicit `true` can opt a custom-only ruleset in.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_enabled",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enabled: Option<bool>,
 
     /// Minimum argmax score required to emit a verdict.
     ///
@@ -480,8 +488,12 @@ pub struct WeightedSumConfig {
     pub min_confidence: f32,
 }
 
-fn default_weighted_sum_enabled() -> bool {
-    true
+/// `enabled` present in the YAML: a bool, never `null` (#131).
+fn deserialize_enabled<'de, D>(deserializer: D) -> std::result::Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <bool as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 fn default_weighted_sum_min_confidence() -> f32 {
@@ -491,9 +503,22 @@ fn default_weighted_sum_min_confidence() -> f32 {
 impl Default for WeightedSumConfig {
     fn default() -> Self {
         Self {
-            enabled: default_weighted_sum_enabled(),
+            enabled: None,
             min_confidence: default_weighted_sum_min_confidence(),
         }
+    }
+}
+
+impl WeightedSumConfig {
+    /// Whether the tier runs under a ruleset with this `extend_defaults`.
+    ///
+    /// Why (#131): `extend_defaults: false` means the rules define all
+    /// classification, so a tier that votes among built-in names must stay
+    /// off unless the operator opts in, as the fuzzy tier already does.
+    /// What: the explicit `enabled` value when set, else `extend_defaults`.
+    /// Test: `classify::extend_defaults_weighted_sum_tests`.
+    pub fn is_enabled(&self, extend_defaults: bool) -> bool {
+        self.enabled.unwrap_or(extend_defaults)
     }
 }
 
@@ -565,7 +590,9 @@ impl WeightedSumClassifier {
         is_merge: bool,
         paths: &[String],
     ) -> Option<(ClassificationResult, &'static str)> {
-        if !self.config.enabled {
+        // #131: unset means on here; the engine resolves it against the
+        // ruleset's `extend_defaults` before building this classifier.
+        if self.config.enabled == Some(false) {
             return None;
         }
 

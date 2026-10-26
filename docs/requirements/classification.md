@@ -134,6 +134,32 @@ built-in ruleset. It may also carry the consumer's bucket map under a
 top-level `buckets:` key (#111). `classification.custom_categories` adds or overrides
 taxonomy entries. tga hardcodes no deployment's category list.
 
+### `extend_defaults: false` turns off the built-in tiers (#131)
+
+Two tiers vote among built-in category names (`feature`, `bugfix`, `chore`,
+`integration`, `platform`, `docs`, `refactor`, `merge`): the weighted-sum tier
+(Tier 2.5, after regex) and the fuzzy tier (after weighted sum). When the rules
+set `extend_defaults: false` (with several rules files, the last file's value
+applies), the rules define all classification:
+
+| Tier | `extend_defaults: true` (or no rules file) | `extend_defaults: false` |
+|------|--------------------------------------------|--------------------------|
+| Exact, regex, issue type, JIRA project, LLM | on | on, unchanged |
+| Weighted sum | on unless `classification.weighted_sum.enabled: false` | off unless `classification.weighted_sum.enabled: true` |
+| Fuzzy | on | off |
+
+- `classification.weighted_sum.enabled` unset follows `extend_defaults`. An
+  explicit `true` or `false` wins either way. A YAML `null` is an error.
+- An opted-in weighted-sum tier under `extend_defaults: false` answers only
+  inside the rules' category set: rule categories plus any `categories:`
+  entries, matched case-insensitively and stored in the set's spelling. A
+  vote outside the set falls through to the next tier (#165).
+- A commit no tier answers is stored as `uncategorized`, or goes to the LLM
+  when the LLM tier is on.
+- Before #131 the weighted-sum tier ran under `extend_defaults: false` unless
+  `enabled: false` was set. A config that relied on that now gets fewer
+  `weighted_sum` verdicts; set `enabled: true` to keep them.
+
 ### Eval scheme v2 (#111)
 
 The #111 precision eval uses scheme v2 through the cto-reports rules file:
