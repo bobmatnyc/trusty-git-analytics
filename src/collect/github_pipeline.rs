@@ -104,9 +104,7 @@ pub(super) async fn run_github_org_discovery(
 /// Test: `crate::collect::github_pipeline::discovery_tests`.
 pub(super) fn org_discovery_enabled(gh_cfg: &GithubConfig) -> bool {
     // #188: discovery is opt-in; `org`/`orgs` alone only name repo owners.
-    gh_cfg.fetch_prs
-        && gh_cfg.discover_orgs
-        && (!gh_cfg.orgs.is_empty() || gh_cfg.org.is_some())
+    gh_cfg.fetch_prs && gh_cfg.discover_orgs && (!gh_cfg.orgs.is_empty() || gh_cfg.org.is_some())
 }
 
 /// Bounded-concurrency reviewer-ingestion pass for all stored GitHub PRs.
