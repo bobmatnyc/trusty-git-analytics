@@ -72,6 +72,7 @@ github:
   token: test-token-value
   org: acme
   orgs: [acme, acme-labs]
+  discover_orgs: true
   fetch_prs: true
   fetch_pr_reviews: false
   review_fetch_concurrency: 2
@@ -190,6 +191,7 @@ fn full_config_every_section_deserializes() {
     let github = cfg.github.as_ref().expect("github");
     assert_eq!(github.token.as_deref(), Some("test-token-value"));
     assert_eq!(github.orgs, ["acme", "acme-labs"]);
+    assert!(github.discover_orgs);
     assert!(github.fetch_prs);
     assert!(!github.fetch_pr_reviews);
     assert_eq!(github.review_fetch_concurrency, 2);

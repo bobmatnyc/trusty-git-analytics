@@ -44,7 +44,11 @@ use crate::collect::collector::CollectionStats;
 pub(super) async fn run_github_org_discovery(
     gh_cfg: &GithubConfig,
     budget: &RunBudget,
+    api_base: &str,
 ) -> Vec<(String, String)> {
+    if !org_discovery_enabled(gh_cfg) {
+        return Vec::new();
+    }
     let orgs = effective_orgs(gh_cfg.org.as_deref(), &gh_cfg.orgs);
     if orgs.is_empty() {
         return Vec::new();
@@ -70,7 +74,7 @@ pub(super) async fn run_github_org_discovery(
     let mut seen = std::collections::HashSet::new();
     for org in &orgs {
         info!(org = %org, "discovering repositories for GitHub org");
-        match discover_org_repos_within(&http, org, budget).await {
+        match discover_org_repos_within(&http, api_base, org, budget).await {
             Ok(repos) => {
                 info!(org = %org, count = repos.len(), "org discovery complete");
                 for p in repos {
@@ -89,6 +93,18 @@ pub(super) async fn run_github_org_discovery(
         }
     }
     all
+}
+
+/// Whether `collect` runs org-wide repository discovery for `gh_cfg`.
+///
+/// Why (#188): with `github.org` set, discovery ran whatever `repositories:`
+/// listed, so a 3-repo config scanned about 590 repos.
+/// What: `true` only when PR fetching is on, `github.discover_orgs` is set,
+/// and an org is configured.
+/// Test: `crate::collect::github_pipeline::discovery_tests`.
+pub(super) fn org_discovery_enabled(gh_cfg: &GithubConfig) -> bool {
+    // #188: discovery is opt-in; `org`/`orgs` alone only name repo owners.
+    gh_cfg.fetch_prs && gh_cfg.discover_orgs && (!gh_cfg.orgs.is_empty() || gh_cfg.org.is_some())
 }
 
 /// Bounded-concurrency reviewer-ingestion pass for all stored GitHub PRs.
@@ -362,6 +378,10 @@ const REVIEWER_WORDING: FaultWording<'static> = FaultWording {
 };
 
 #[cfg(test)]
+#[path = "github_pipeline_discovery_tests.rs"]
+mod discovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::collect::github::types::{GhUser, GitHubReview};
@@ -400,6 +420,7 @@ mod tests {
             token: None,
             org: None,
             orgs: vec![],
+            discover_orgs: false,
             repo: None,
             fetch_prs: true,
             fetch_pr_reviews: true,

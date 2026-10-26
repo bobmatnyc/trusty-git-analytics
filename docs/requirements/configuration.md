@@ -756,9 +756,11 @@ In floor mode:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `token` | string | env `GITHUB_TOKEN` | GitHub Personal Access Token |
-| `owner` | string | None | Repository owner / org |
-| `organization` | string | None | If set, discover all repos from this org |
+| `token` | string | env `GITHUB_TOKEN` | GitHub Personal Access Token. A non-blank `token` (after `${VAR}` expansion) wins; otherwise the `GITHUB_TOKEN` environment variable is used for every GitHub call, PR fetches included (#188). With neither, PR fetches run unauthenticated and `collect` warns. |
+| `org` | string | None | Default owner for `repositories[]` entries without their own `org:`. Discovers repos only when `discover_orgs: true` |
+| `orgs` | list | `[]` | Further org slugs for discovery, merged with `org`. Used only when `discover_orgs: true` |
+| `discover_orgs` | bool | `false` | When `true`, `collect` lists every non-archived repo in `org`/`orgs` (`GET /orgs/{org}/repos`) and fetches PRs for all of them. When `false`, PRs are fetched only for `repo` or the repos in `repositories[]`. Default changed in #188: before it, setting `org`/`orgs` always ran discovery |
+| `repo` | string | None | Single repository slug (`owner/name`) |
 | `base_url` | url | `https://api.github.com` | API base URL (GHE support) |
 | `max_retries` | u32 | 3 | Retry count on transient failures |
 | `backoff_factor` | f64 | 2.0 | Exponential backoff multiplier |
@@ -1106,7 +1108,8 @@ repositories:
 
 github:
   token: ${GITHUB_TOKEN}
-  organization: acme
+  org: acme              # owner of the repositories above
+  fetch_prs: true
   fetch_pr_reviews: true
 
 jira:

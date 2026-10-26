@@ -1155,15 +1155,25 @@ pub struct GithubConfig {
 
     /// Multi-org list for org-wide PR discovery (issue #742).
     ///
-    /// Each entry is an org slug (e.g. `duettoresearch`). The collection
-    /// pipeline calls `GET /orgs/{org}/repos` for every entry and unions the
-    /// discovered repos with those resolved from `repositories[]`. Merged
-    /// with the singular `org` field (duplicate-free, `orgs` order
-    /// preserved) before discovery runs.
+    /// Each entry is an org slug (e.g. `duettoresearch`). When
+    /// [`Self::discover_orgs`] is `true`, the collection pipeline calls
+    /// `GET /orgs/{org}/repos` for every entry and unions the discovered repos
+    /// with those resolved from `repositories[]`. Merged with the singular
+    /// `org` field (duplicate-free, `orgs` order preserved) before discovery
+    /// runs.
     ///
     /// Leave empty (the default) to keep single-org / per-repo behaviour.
     #[serde(default)]
     pub orgs: Vec<String>,
+
+    /// Whether `collect` discovers every repository in `org` / `orgs` and
+    /// fetches PRs for all of them (#188).
+    ///
+    /// Defaults to `false`: PRs are fetched only for the repositories that
+    /// `repo` or `repositories[]` name, and `org` only supplies their owner.
+    /// Set `true` for org-wide discovery; archived repositories are skipped.
+    #[serde(default)]
+    pub discover_orgs: bool,
 
     /// Single-repository slug (`owner/name`).
     #[serde(default)]

@@ -10,7 +10,9 @@ use crate::collect::errors::{CollectError, Result};
 use crate::collect::fault::CollectionFault;
 use crate::collect::github::budget::{RunBudget, MAX_PAGES};
 use crate::collect::github::fetch_faults::{http_status, FaultWording, FetchFaults};
-use crate::collect::github::repo_resolver::{build_http_client, parse_slug};
+use crate::collect::github::repo_resolver::{
+    build_http_client_with_token, parse_slug, resolve_github_token,
+};
 use crate::collect::github::retry::retry_get;
 use crate::collect::github::types::{ApiPull, GitHubIssue, GitHubPrCommit, GitHubReview};
 use crate::collect::pr_provider::PrProvider;
@@ -106,14 +108,23 @@ impl GitHubClient {
             .as_ref()
             .ok_or_else(|| CollectError::Config("github.repo is required (owner/name)".into()))?;
         let (owner, repo) = parse_slug(repo_slug)?;
-        let http = build_http_client(config)?;
+        Self::assemble(resolve_github_token(config), vec![(owner, repo)])
+    }
 
+    /// Build a client for `repos` that authenticates with `token`.
+    ///
+    /// Why (#188): every constructor funnels here so the token in the
+    /// `Authorization` header and the one [`Self::has_token`] reports are the
+    /// same resolved value. The first pair, if any, is the primary repo.
+    fn assemble(token: Option<String>, repos: Vec<(String, String)>) -> Result<Self> {
+        let http = build_http_client_with_token(token.as_deref())?;
+        let (owner, repo) = repos.first().cloned().unwrap_or_default();
         Ok(Self {
             client: http,
-            token: config.token.clone(),
-            owner: owner.clone(),
-            repo: repo.clone(),
-            repos: vec![(owner, repo)],
+            token,
+            owner,
+            repo,
+            repos,
             api_base: GITHUB_API_BASE.to_string(),
             repo_visible: tokio::sync::OnceCell::new(),
             budget: RunBudget::new(),
@@ -139,25 +150,25 @@ impl GitHubClient {
     /// - [`crate::collect::errors::CollectError::Http`] if the underlying `reqwest::Client`
     ///   cannot be built.
     pub fn new_for_prs(config: &GithubConfig, repos: Vec<(String, String)>) -> Result<Self> {
-        use crate::collect::errors::CollectError;
+        // #188: the token comes from the shared resolver, not `config.token`.
+        Self::new_for_prs_with_token(repos, resolve_github_token(config))
+    }
+
+    /// [`Self::new_for_prs`] with an already-resolved token (#188 test seam).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::new_for_prs`].
+    pub(crate) fn new_for_prs_with_token(
+        repos: Vec<(String, String)>,
+        token: Option<String>,
+    ) -> Result<Self> {
         if repos.is_empty() {
-            return Err(CollectError::Config(
+            return Err(crate::collect::errors::CollectError::Config(
                 "GitHubClient::new_for_prs requires at least one (owner, repo)".into(),
             ));
         }
-        let (primary_owner, primary_repo) = repos[0].clone();
-        let http = build_http_client(config)?;
-        Ok(Self {
-            client: http,
-            token: config.token.clone(),
-            owner: primary_owner,
-            repo: primary_repo,
-            repos,
-            api_base: GITHUB_API_BASE.to_string(),
-            repo_visible: tokio::sync::OnceCell::new(),
-            budget: RunBudget::new(),
-            pr_list_faults: std::sync::Mutex::new(Vec::new()),
-        })
+        Self::assemble(token, repos)
     }
 
     /// Construct a minimal authenticated client for fetching PR reviews only.
@@ -175,18 +186,7 @@ impl GitHubClient {
     /// Returns [`crate::collect::errors::CollectError::Http`] if the `reqwest::Client`
     /// cannot be built.
     pub fn new_for_reviews(config: &GithubConfig) -> Result<Self> {
-        let http = build_http_client(config)?;
-        Ok(Self {
-            client: http,
-            token: config.token.clone(),
-            owner: String::new(),
-            repo: String::new(),
-            repos: Vec::new(),
-            api_base: GITHUB_API_BASE.to_string(),
-            repo_visible: tokio::sync::OnceCell::new(),
-            budget: RunBudget::new(),
-            pr_list_faults: std::sync::Mutex::new(Vec::new()),
-        })
+        Self::assemble(resolve_github_token(config), Vec::new())
     }
 
     /// Charge this client's calls against `budget` instead of its own.

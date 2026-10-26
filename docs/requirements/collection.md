@@ -15,8 +15,10 @@ external systems (GitHub PRs, JIRA tickets, identity resolution). All data is pe
 ### Repository Discovery
 
 1. **Explicit**: `repositories[].path` in config (always used)
-2. **Org discovery**: when `github.organization` is set, the GitHub Search API enumerates
-   all matching repos and they are added to the working set (cloned to cache dir if missing)
+2. **Org discovery** (opt-in): when `github.discover_orgs: true` and `github.org` or
+   `github.orgs` is set, `GET /orgs/{org}/repos` lists each org's non-archived repos and
+   they are added to the PR fetch set. With the default `discover_orgs: false`, PRs are
+   fetched only for the configured repositories (#188)
 
 ### Branch Selection Strategies
 

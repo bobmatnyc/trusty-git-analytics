@@ -644,7 +644,10 @@ impl CollectionPipeline {
                         "GitHub PR fetch skipped: no github.repo, no per-repo org, \
                          no github.org/orgs resolvable from repositories[] or org discovery"
                     );
-                } else if gh_cfg.token.is_none() && std::env::var("GITHUB_TOKEN").ok().is_none() {
+                } else if crate::collect::github::repo_resolver::resolve_github_token(gh_cfg)
+                    .is_none()
+                {
+                    // #188: same resolver the client authenticates with.
                     // Issue #211: surface the token misconfiguration loudly.
                     // Without a PAT, GitHub limits anonymous traffic to 60
                     // requests/hour, which silently truncates org-wide PR
@@ -756,14 +759,17 @@ impl CollectionPipeline {
     async fn fetch_and_store_prs(&self, db: &mut Database, stats: &mut CollectionStats) {
         // Phase 1: async org-discovery so build_pr_providers has the full
         // repo set before constructing the GitHub client.
-        let org_discovered = if let Some(gh_cfg) = &self.config.github {
-            if gh_cfg.fetch_prs && (!gh_cfg.orgs.is_empty() || gh_cfg.org.is_some()) {
-                super::github_pipeline::run_github_org_discovery(gh_cfg, &self.github_budget).await
-            } else {
-                Vec::new()
+        // #188: the discovery gate lives in `org_discovery_enabled`.
+        let org_discovered = match &self.config.github {
+            Some(gh_cfg) => {
+                super::github_pipeline::run_github_org_discovery(
+                    gh_cfg,
+                    &self.github_budget,
+                    crate::collect::github::client::GITHUB_API_BASE,
+                )
+                .await
             }
-        } else {
-            Vec::new()
+            None => Vec::new(),
         };
 
         // #5220: Bitbucket workspace discovery, same phase and same shape as
