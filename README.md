@@ -890,7 +890,7 @@ Tier-0 manual overrides and exact-keyword conventional-commit prefixes (e.g. `fi
 
 **Tier 2 — Regex**: applies pre-compiled regex patterns from the rule set. Handles anchored conventional-commit patterns (`^feat(\([^)]*\))?!?:`) and JIRA ticket IDs (`\b[A-Z][A-Z0-9]+-\d+\b`).
 
-**Tier 2.5 — Weighted Sum** (new in 1.3.0): composes five independent signals into per-category scores and emits a verdict when the argmax score meets the minimum confidence threshold (default 0.55). With `extend_defaults: false` it answers only with a category the rules files define. See [Weighted-Sum Tier](#weighted-sum-tier-250-new-in-130).
+**Tier 2.5 — Weighted Sum** (new in 1.3.0): composes five independent signals into per-category scores and emits a verdict when the argmax score meets the minimum confidence threshold (default 0.55). With `extend_defaults: false` it is off unless `classification.weighted_sum.enabled: true` is set, and then answers only with a category the rules files define. See [Weighted-Sum Tier](#weighted-sum-tier-250-new-in-130).
 
 **Tier 3 — Fuzzy heuristics**: detects merge commits (via `is_merge` flag or `Merge pull request` prefix) and reverts (via `Revert` prefix). No external dependencies. Suppressed when `extend_defaults: false`.
 
@@ -1005,7 +1005,7 @@ The tier votes among built-in category names (`feature`, `bugfix`, `chore`, `int
 ```yaml
 classification:
   weighted_sum:
-    enabled: true         # default: true. Set false to disable this tier entirely.
+    enabled: true         # default: follows extend_defaults (on with built-in rules, off with extend_defaults: false). Set false to disable in every mode.
     min_confidence: 0.55  # default: 0.55. Minimum score to emit a verdict.
 ```
 
@@ -1051,7 +1051,7 @@ Custom rule files also default to **standalone** mode (`extend_defaults: false`)
 
 **Fuzzy-tier gating (1.2.2)**: the fuzzy heuristic tier (which emits the built-in category strings `merge`, `feature`, `chore`) is suppressed when `extend_defaults: false`. This aligns with the principle that `extend_defaults: false` means "no built-in hardcoded classification." If you see `method=fuzzy_match` rows for a config with `extend_defaults: false`, upgrade to 1.2.2.
 
-**Weighted-sum tier and extend_defaults**: unlike the fuzzy tier, the weighted-sum tier (Tier 2.5) stays on with `extend_defaults: false`, but answers only with a category the rules files define (rule categories plus any `categories:` entries); any other vote is dropped (#165). Disabling it requires `classification.weighted_sum.enabled: false`.
+**Weighted-sum tier and extend_defaults**: unlike the fuzzy tier, the weighted-sum tier (Tier 2.5) follows `extend_defaults` unless `classification.weighted_sum.enabled` is set (#131). Unset, it is on with the built-in rules and off with `extend_defaults: false`. `enabled: true` opts a custom-only ruleset back in; the tier then answers only with a category the rules files define (rule categories plus any `categories:` entries), and any other vote is dropped (#165). `enabled: false` disables it in every mode.
 
 ```yaml
 # my-rules.yaml — standalone by default (no built-in rules loaded)
