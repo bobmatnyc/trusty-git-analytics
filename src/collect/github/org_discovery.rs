@@ -112,10 +112,12 @@ pub async fn discover_org_repos_at(
 /// once the shared budget is exhausted.
 pub(crate) async fn discover_org_repos_within(
     client: &reqwest::Client,
+    api_base: &str,
     org: &str,
     budget: &FetchBudget,
 ) -> Result<Vec<(String, String)>> {
-    discover_org_repos_inner(client, GITHUB_API_BASE, org, budget).await
+    // #188: the REST root is passed in so the collect-path gate is testable.
+    discover_org_repos_inner(client, api_base.trim_end_matches('/'), org, budget).await
 }
 
 /// The single page walk every `discover_org_repos*` wrapper funnels into.

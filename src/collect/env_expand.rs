@@ -31,7 +31,7 @@ pub fn expand_env_var(raw: &str) -> String {
 /// What: identical to [`expand_env_var`] except that `lookup` replaces the
 /// `std::env::var` call; a `None` lookup result yields the empty string.
 /// Test: the four `expand_env_var_*` tests below.
-fn expand_env_var_with(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+pub(crate) fn expand_env_var_with(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
     if raw.starts_with("${") && raw.ends_with('}') && raw.len() > 3 {
         let var = &raw[2..raw.len() - 1];
         if !var.is_empty() {

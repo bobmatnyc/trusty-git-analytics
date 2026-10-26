@@ -10,6 +10,9 @@ pub(crate) mod retry;
 pub mod reviewer_store;
 pub mod types;
 
+#[cfg(test)]
+mod token_tests;
+
 pub use client::GitHubClient;
 pub use issue_writer::{
     find_thread_by_marker, issue_search_query, thread_marker_anchor, IssueUpsert,

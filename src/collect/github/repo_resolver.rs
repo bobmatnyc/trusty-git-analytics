@@ -16,7 +16,7 @@ use crate::core::config::{GithubConfig, RepositoryConfig};
 
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 
-use crate::collect::env_expand::expand_env_var;
+use crate::collect::env_expand::expand_env_var_with;
 
 /// Parse an `owner/name` slug, returning a [`CollectError::Config`] on
 /// malformed input. Extracted so both [`super::client::GitHubClient::new`] and
@@ -38,23 +38,62 @@ pub fn parse_slug(slug: &str) -> Result<(String, String)> {
     Ok((owner.to_string(), repo.to_string()))
 }
 
+/// The token every GitHub client built from `config` authenticates with.
+///
+/// Reads the process environment; see [`resolve_github_token_with`].
+pub(crate) fn resolve_github_token(config: &GithubConfig) -> Option<String> {
+    resolve_github_token_with(config, |name| std::env::var(name).ok())
+}
+
+/// [`resolve_github_token`], with the environment lookup supplied by the caller.
+///
+/// Why (#188): the PR client read only `github.token`, while validation also
+/// accepted `GITHUB_TOKEN`, so a run that passed validation sent its PR calls
+/// unauthenticated. One resolver for every GitHub client ends that split. The
+/// lookup is injected, as in #5313, so tests never set a process env var.
+/// What: `github.token`, with a `${VAR}` placeholder expanded through
+/// `lookup`.
+/// Test: `crate::collect::github::token_tests`.
+pub(crate) fn resolve_github_token_with(
+    config: &GithubConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    config
+        .token
+        .as_deref()
+        .map(|raw| expand_env_var_with(raw, &lookup))
+}
+
 /// Build the shared authenticated `reqwest::Client` for all GitHub HTTP traffic.
 ///
 /// Why: org-discovery, reviewer-ingestion, and the PR client all need the same
 /// authed client; `pub(crate)` visibility avoids duplicating header-build logic
 /// without widening the public API surface.
-/// What: builds a `reqwest::Client` with `Authorization: Bearer <token>` (when
-/// a token is configured), the GitHub `Accept` header, and a 30-second timeout.
+/// What: [`build_http_client_with_token`] with the token from
+/// [`resolve_github_token`].
 /// Test: used by all GitHub call sites — covered indirectly by their tests.
 pub(crate) fn build_http_client(config: &GithubConfig) -> Result<reqwest::Client> {
+    build_http_client_with_token(resolve_github_token(config).as_deref())
+}
+
+/// Build the GitHub `reqwest::Client` for an already-resolved token.
+///
+/// What: sets `Authorization: Bearer <token>` when `token` is `Some`, the
+/// GitHub `Accept` header, and a 30-second timeout.
+///
+/// # Errors
+///
+/// [`CollectError::Config`] when the token is not a valid header value. The
+/// message never contains the token.
+pub(crate) fn build_http_client_with_token(token: Option<&str>) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
     headers.insert(
         ACCEPT,
         HeaderValue::from_static("application/vnd.github+json"),
     );
-    if let Some(raw) = &config.token {
-        let val = HeaderValue::from_str(&format!("Bearer {}", expand_env_var(raw)))
+    if let Some(token) = token {
+        let val = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|e| CollectError::Config(format!("invalid token header: {e}")))?;
         headers.insert(AUTHORIZATION, val);
     }
