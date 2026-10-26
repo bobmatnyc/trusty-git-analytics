@@ -306,7 +306,7 @@ csv = "1.4.0"
 # Template engine (for markdown reports)
 tera = "1.20.1"
 # Async trait
-async-trait = "0.1.89"
+async-trait = "0.1.92"
 # Async stream combinators (for bounded-concurrency LLM fallback)
 futures = "0.3.32"
 

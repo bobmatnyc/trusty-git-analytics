@@ -102,7 +102,7 @@ fn resolve_auth(config: &BitbucketConfig, env: impl Fn(&str) -> Option<String>) 
     let token = config
         .token
         .as_deref()
-        .map(&expand)
+        .map(expand)
         .and_then(clean)
         .or_else(|| env("BITBUCKET_TOKEN").and_then(clean));
 
@@ -129,7 +129,7 @@ fn resolve_auth(config: &BitbucketConfig, env: impl Fn(&str) -> Option<String>) 
     let password = config
         .app_password
         .as_deref()
-        .map(&expand)
+        .map(expand)
         .and_then(clean)
         .or_else(|| env("BITBUCKET_APP_PASSWORD").and_then(clean))
         .ok_or_else(|| {
