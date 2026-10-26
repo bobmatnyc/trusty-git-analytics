@@ -32,6 +32,9 @@ use crate::core::config::{GithubConfig, RepositoryConfig};
 struct ApiOrgRepo {
     /// Full `owner/name` slug (e.g. `"acme/widget"`).
     full_name: String,
+    /// Whether the repository is archived (#188: archived repos are skipped).
+    #[serde(default)]
+    archived: bool,
 }
 
 /// Discover all visible repositories for a single GitHub org by paginating
@@ -167,7 +170,8 @@ async fn discover_org_repos_inner(
         })?;
 
         let n = repos.len();
-        for r in repos {
+        // #188: an archived repo gets no new PRs; skip it.
+        for r in repos.into_iter().filter(|r| !r.archived) {
             match r.full_name.split_once('/') {
                 Some((owner, repo)) if !owner.is_empty() && !repo.is_empty() => {
                     out.push((owner.to_string(), repo.to_string()));
@@ -342,6 +346,7 @@ mod tests {
             token: None,
             org: Some("acme".to_string()),
             orgs: vec![],
+            discover_orgs: false,
             repo: None,
             fetch_prs: true,
             fetch_pr_reviews: true,

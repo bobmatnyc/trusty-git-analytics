@@ -52,16 +52,24 @@ pub(crate) fn resolve_github_token(config: &GithubConfig) -> Option<String> {
 /// unauthenticated. One resolver for every GitHub client ends that split. The
 /// lookup is injected, as in #5313, so tests never set a process env var.
 /// What: `github.token`, with a `${VAR}` placeholder expanded through
-/// `lookup`.
+/// `lookup`, when it is non-blank; otherwise `GITHUB_TOKEN` from `lookup` when
+/// that is non-blank; otherwise `None`. The result is trimmed and never empty,
+/// so an unset placeholder cannot read as a credential.
 /// Test: `crate::collect::github::token_tests`.
 pub(crate) fn resolve_github_token_with(
     config: &GithubConfig,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
+    let usable = |v: String| {
+        let v = v.trim();
+        (!v.is_empty()).then(|| v.to_string())
+    };
     config
         .token
         .as_deref()
-        .map(|raw| expand_env_var_with(raw, &lookup))
+        .and_then(|raw| usable(expand_env_var_with(raw, &lookup)))
+        // #188: env fallback, the same precedence validation applies.
+        .or_else(|| lookup(trusty_common::env_vars::ENV_GITHUB_TOKEN).and_then(usable))
 }
 
 /// Build the shared authenticated `reqwest::Client` for all GitHub HTTP traffic.

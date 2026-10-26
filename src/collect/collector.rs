@@ -644,7 +644,10 @@ impl CollectionPipeline {
                         "GitHub PR fetch skipped: no github.repo, no per-repo org, \
                          no github.org/orgs resolvable from repositories[] or org discovery"
                     );
-                } else if gh_cfg.token.is_none() && std::env::var("GITHUB_TOKEN").ok().is_none() {
+                } else if crate::collect::github::repo_resolver::resolve_github_token(gh_cfg)
+                    .is_none()
+                {
+                    // #188: same resolver the client authenticates with.
                     // Issue #211: surface the token misconfiguration loudly.
                     // Without a PAT, GitHub limits anonymous traffic to 60
                     // requests/hour, which silently truncates org-wide PR

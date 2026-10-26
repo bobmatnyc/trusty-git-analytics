@@ -214,8 +214,10 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `classification.confidence_threshold` | float | `0.7` | Minimum acceptance confidence |
 | `classification.llm_fallback_threshold` | float | `0.65` | Commits with confidence above this value skip the LLM tier. Raised from `0.0` in 1.3.0; see [LLM fallback threshold](#llm-fallback-threshold-migration). |
 | `classification.llm_fallback_concurrency` | uint | `8` | Max concurrent LLM requests during fallback |
-| `github.token` | string | `$GITHUB_TOKEN` | GitHub PAT for PR fetch. Required scopes: `public_repo` for public repos, `repo` for private repos. Without a token, GitHub rate-limits anonymous traffic to 60 requests/hour and most PRs will be missed. |
-| `github.org` | string | — | Org slug for org-wide PR queries |
+| `github.token` | string | `$GITHUB_TOKEN` | GitHub PAT for PR fetch. A non-blank `github.token` wins; otherwise the `GITHUB_TOKEN` environment variable authenticates every GitHub call, PR fetches included. Required scopes: `public_repo` for public repos, `repo` for private repos. Without a token, GitHub rate-limits anonymous traffic to 60 requests/hour and most PRs will be missed. |
+| `github.org` | string | — | Owner for `repositories[]` entries without their own `org:`; also an org to discover when `github.discover_orgs` is `true` |
+| `github.orgs` | list | `[]` | More orgs to discover when `github.discover_orgs` is `true` |
+| `github.discover_orgs` | bool | `false` | `true` fetches PRs for every non-archived repo in `github.org`/`github.orgs`. `false` fetches PRs only for the configured repositories. Before #188, setting `org`/`orgs` always ran discovery |
 | `github.repo` | string | — | Single repo slug (`owner/name`) |
 | `github.fetch_prs` | bool | `false` | Fetch pull request metadata. **Must be `true` for `tga pr-metrics` to return data** — when left at the default, `tga collect` writes zero rows to `pull_requests` (issue #211). |
 | `github.ticket_regex` | string | — | Override regex for detecting GitHub ticket refs in commit messages |

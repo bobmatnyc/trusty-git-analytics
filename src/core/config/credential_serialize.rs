@@ -91,6 +91,7 @@ impl Serialize for GithubConfig {
             token,
             org,
             orgs,
+            discover_orgs,
             repo,
             fetch_prs,
             fetch_pr_reviews,
@@ -99,10 +100,11 @@ impl Serialize for GithubConfig {
             fetch_on_reference,
             work_items_unavailable,
         } = self;
-        let mut s = serializer.serialize_struct("GithubConfig", 10)?;
+        let mut s = serializer.serialize_struct("GithubConfig", 11)?;
         s.serialize_field("token", &mask(token.as_ref()))?;
         s.serialize_field("org", org)?;
         s.serialize_field("orgs", orgs)?;
+        s.serialize_field("discover_orgs", discover_orgs)?;
         s.serialize_field("repo", repo)?;
         s.serialize_field("fetch_prs", fetch_prs)?;
         s.serialize_field("fetch_pr_reviews", fetch_pr_reviews)?;

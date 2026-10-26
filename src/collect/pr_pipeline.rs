@@ -219,6 +219,7 @@ mod tests {
             token: None,
             org: None,
             orgs: vec![],
+            discover_orgs: false,
             repo: None,
             fetch_prs: true,
             fetch_pr_reviews: false,

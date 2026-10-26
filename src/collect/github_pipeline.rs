@@ -99,10 +99,14 @@ pub(super) async fn run_github_org_discovery(
 ///
 /// Why (#188): with `github.org` set, discovery ran whatever `repositories:`
 /// listed, so a 3-repo config scanned about 590 repos.
-/// What: `true` when PR fetching is on and an org is configured.
+/// What: `true` only when PR fetching is on, `github.discover_orgs` is set,
+/// and an org is configured.
 /// Test: `crate::collect::github_pipeline::discovery_tests`.
 pub(super) fn org_discovery_enabled(gh_cfg: &GithubConfig) -> bool {
-    gh_cfg.fetch_prs && (!gh_cfg.orgs.is_empty() || gh_cfg.org.is_some())
+    // #188: discovery is opt-in; `org`/`orgs` alone only name repo owners.
+    gh_cfg.fetch_prs
+        && gh_cfg.discover_orgs
+        && (!gh_cfg.orgs.is_empty() || gh_cfg.org.is_some())
 }
 
 /// Bounded-concurrency reviewer-ingestion pass for all stored GitHub PRs.
@@ -418,6 +422,7 @@ mod tests {
             token: None,
             org: None,
             orgs: vec![],
+            discover_orgs: false,
             repo: None,
             fetch_prs: true,
             fetch_pr_reviews: true,

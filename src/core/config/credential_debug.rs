@@ -98,6 +98,7 @@ impl fmt::Debug for GithubConfig {
             token,
             org,
             orgs,
+            discover_orgs,
             repo,
             fetch_prs,
             fetch_pr_reviews,
@@ -110,6 +111,7 @@ impl fmt::Debug for GithubConfig {
             .field("token", &mask(token.as_ref()))
             .field("org", org)
             .field("orgs", orgs)
+            .field("discover_orgs", discover_orgs)
             .field("repo", repo)
             .field("fetch_prs", fetch_prs)
             .field("fetch_pr_reviews", fetch_pr_reviews)

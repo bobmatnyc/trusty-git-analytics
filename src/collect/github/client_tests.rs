@@ -41,6 +41,7 @@ fn gh(repo: Option<&str>, org: Option<&str>) -> GithubConfig {
         token: None,
         org: org.map(str::to_string),
         orgs: vec![],
+        discover_orgs: false,
         repo: repo.map(str::to_string),
         fetch_prs: true,
         fetch_pr_reviews: true,

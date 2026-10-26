@@ -73,7 +73,8 @@ output:
 #   - `repo`        for private repositories
 #
 # The token can be inlined here (not recommended) or sourced from the
-# `GITHUB_TOKEN` env var by leaving `token` unset.
+# `GITHUB_TOKEN` env var by leaving `token` unset. A non-blank `token` wins;
+# otherwise every GitHub call, PR fetches included, uses `GITHUB_TOKEN`.
 github:
   token: "${GITHUB_TOKEN}"
   # Either single-repo mode:
@@ -81,10 +82,13 @@ github:
   # Or single-org mode (drives PR fetch from the entries in `repositories[]`):
   # org: "my-org"
   #
-  # Multi-org mode (issue #742): collect PRs across multiple GitHub orgs.
-  # For each org, tga calls GET /orgs/{org}/repos (paginated) to discover
-  # all repos, then unions them with the repos listed in `repositories[]`.
+  # Org discovery (issue #742) is opt-in (issue #188): with
+  # `discover_orgs: true`, tga calls GET /orgs/{org}/repos (paginated) for
+  # each org, skips archived repos, and unions the rest with the repos listed
+  # in `repositories[]`. With the default `discover_orgs: false`, PRs are
+  # fetched only for the listed repos and `org` only names their owner.
   # `org` (singular) and `orgs` coexist — both are merged, duplicates removed.
+  # discover_orgs: false
   # orgs:
   #   - duettoresearch
   #   - hotstats
