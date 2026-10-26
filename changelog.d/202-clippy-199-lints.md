@@ -1,2 +1,0 @@
-Fixed
-- **Clippy 1.99 lints** — `cargo clippy --all-targets -- -D warnings` is clean again under Rust 1.99.0. Two closures passed by reference to `Option::map` are now passed by value (`needless_borrows_for_generic_args`), and `async-trait` moves to 0.1.92, which no longer adds a bare `#[must_use]` to async trait methods that already return a must-use future (`double_must_use`). No behaviour or public signature changes (#202).
