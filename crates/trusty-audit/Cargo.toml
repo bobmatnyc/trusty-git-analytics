@@ -131,9 +131,11 @@ rpassword = "7.5.4"
 # common-entry-point rule makes a second implementation here a defect. It also
 # supplies the HTTP client (`download::http_client`), which is why `reqwest` is
 # deliberately absent from this manifest.
-# Published release, never path or git (split plan). 0.13.7 is the newest
-# release on crates.io and the floor this crate is built and tested against.
-trusty-installer = "0.13.7"
+# Published release, never path or git (split plan). #208: 0.14.0 is the
+# floor, the first release that resolves `tga` from
+# bobmatnyc/trusty-git-analytics and reads releases with `per_page=100`.
+# It requires trusty-common ^0.58.
+trusty-installer = "0.14.0"
 # #5487: the workspace's single `gh` entry point (#5475). Discovery shells out
 # to `gh repo list`, and CLAUDE.md's common-entry-point rule makes a second
 # `Command::new("gh")` here a defect — so this crate never spells one.

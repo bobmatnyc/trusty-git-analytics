@@ -6737,9 +6737,9 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.52.7"
+version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cac7869528a851e8880af21dcb08e24d868abd1c92b7db2297638033ff5c412"
+checksum = "c556a50dd0bb201c5dc1e4ef7725ff80051eab88210823e2cc304a160d9b6b46"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6765,6 +6765,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "strsim",
  "sysinfo",
  "thiserror 1.0.69",
@@ -6777,9 +6778,9 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.13.7"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d93535588505abc2798e9801ddf796ff0d05bbe492395d72023675f74585da44"
+checksum = "fa8414a3f81e19607e243d81995eae07c29714b4502581b10b97b80bbcfe854a"
 dependencies = [
  "anyhow",
  "clap",
@@ -6791,7 +6792,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2 0.10.9",
  "tar",
  "tempfile",
  "thiserror 1.0.69",
