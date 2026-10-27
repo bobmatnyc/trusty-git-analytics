@@ -1,0 +1,3 @@
+Fixed
+- An engagement pinned to tga 10.x now installs. trusty-audit moved from trusty-installer 0.13.7 to 0.14.0 and from trusty-common 0.52 to 0.58 ([#208](https://github.com/bobmatnyc/trusty-git-analytics/issues/208)). 0.13.7 looked for tga only in bobmatnyc/trusty-tools releases, which stop at v8.0.0, so every tga 10.x pin failed with `PinnedError::VersionNotPublished`. 0.14.0 resolves tga from bobmatnyc/trusty-git-analytics.
+- trusty-installer 0.14.0 also reads 100 releases per page instead of GitHub's default 30, so older pins such as trusty-analyze 0.12.7 no longer drop out of the release list as newer releases are published ([#208](https://github.com/bobmatnyc/trusty-git-analytics/issues/208)).

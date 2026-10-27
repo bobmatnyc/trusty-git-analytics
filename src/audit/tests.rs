@@ -1458,20 +1458,6 @@ fn stale_renderer_is_rejected_before_the_sweep() {
 // #5670 — the analyze daemon the audit's report is built from
 // ---------------------------------------------------------------------------
 
-/// A localhost port nothing is listening on.
-///
-/// Binds port 0 so the OS picks a free one, then releases it — hard-coding a
-/// high port instead can collide with something already bound on a busy host.
-pub(super) fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    let port = listener
-        .local_addr()
-        .expect("read the bound address")
-        .port();
-    drop(listener);
-    port
-}
-
 /// An executable stub at `dir/name` running `script`, standing in for a
 /// `trusty-analyze` binary without needing one on the machine.
 #[cfg(unix)]
@@ -2342,27 +2328,98 @@ fn search_guard_on(socket: std::path::PathBuf, binary: &str) -> SearchGuard {
 /// asserts the binary comes from the one resolver `repo_index` already owns, so
 /// the daemon this starts and the binary that indexes into it are the same
 /// install.
+///
+/// #208: the expected path is `search_rpc::search_socket()`, the resolver the
+/// daemon and trusty-analyze share. `#[serial]` keeps this read off the env
+/// writes in `a_trusty_data_dir_moves_the_search_socket_with_the_daemon`.
 #[test]
+#[serial_test::serial]
 fn the_search_guard_derives_the_socket_the_daemon_binds() {
     let guard = SearchGuard::from_env();
     assert_eq!(
         guard.socket,
-        trusty_common::daemon_socket_path("trusty-search").unwrap_or_default()
+        trusty_common::search_rpc::search_socket().unwrap_or_default()
     );
     assert_eq!(guard.binary, crate::audit::resolve_search_binary());
     assert_eq!(guard.startup_timeout, crate::audit::SEARCH_STARTUP_TIMEOUT);
 }
 
 /// The socket override, asserted without touching the process environment.
+///
+/// #208: `#[serial]` for the same reason as the test above.
 #[test]
+#[serial_test::serial]
 fn an_absent_or_empty_search_override_falls_back_to_the_derived_socket() {
     use crate::audit::search_daemon::ENV_SEARCH_SOCKET;
 
     assert_eq!(ENV_SEARCH_SOCKET, "TRUSTY_SEARCH_SOCKET");
     assert_eq!(
         SearchGuard::from_env().socket,
-        trusty_common::daemon_socket_path("trusty-search").unwrap_or_default(),
+        trusty_common::search_rpc::search_socket().unwrap_or_default(),
         "with the variable unset in this process, the default is the derived path"
+    );
+}
+
+/// #208: with `TRUSTY_DATA_DIR` set, the guard probes the socket the daemon
+/// binds there.
+///
+/// Why: trusty-common 0.58's `search_rpc::search_socket` and the trusty-search
+/// daemon both move the socket under `TRUSTY_DATA_DIR` (trusty-tools #9214). A
+/// guard that ignored it probed the shared default, spawned a daemon that bound
+/// elsewhere, timed out, refused the audit and left that daemon running.
+/// What: sets `TRUSTY_DATA_DIR` to a temp dir with no socket override, asserts
+/// the guard's socket equals `search_rpc::search_socket()` and sits under that
+/// dir, then asserts an explicit `TRUSTY_SEARCH_SOCKET` still wins. The prior
+/// values are restored before any assertion runs.
+/// Test: this test itself. `#[serial]` because it mutates the environment.
+#[test]
+#[serial_test::serial]
+fn a_trusty_data_dir_moves_the_search_socket_with_the_daemon() {
+    use crate::audit::search_daemon::ENV_SEARCH_SOCKET;
+    use trusty_common::search_rpc::TRUSTY_SEARCH_DATA_DIR_ENV;
+
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let pinned = dir.path().join("pinned.sock");
+    let saved_dir = std::env::var_os(TRUSTY_SEARCH_DATA_DIR_ENV);
+    let saved_socket = std::env::var_os(ENV_SEARCH_SOCKET);
+
+    // SAFETY: `#[serial]` keeps every env-mutating test in this crate off other
+    // threads for the duration, which is what `set_var`/`remove_var` require.
+    unsafe {
+        std::env::set_var(TRUSTY_SEARCH_DATA_DIR_ENV, dir.path());
+        std::env::remove_var(ENV_SEARCH_SOCKET);
+    }
+    let derived = SearchGuard::from_env().socket;
+    let shared = trusty_common::search_rpc::search_socket();
+    unsafe {
+        std::env::set_var(ENV_SEARCH_SOCKET, &pinned);
+    }
+    let overridden = SearchGuard::from_env().socket;
+    unsafe {
+        match saved_dir {
+            Some(v) => std::env::set_var(TRUSTY_SEARCH_DATA_DIR_ENV, v),
+            None => std::env::remove_var(TRUSTY_SEARCH_DATA_DIR_ENV),
+        }
+        match saved_socket {
+            Some(v) => std::env::set_var(ENV_SEARCH_SOCKET, v),
+            None => std::env::remove_var(ENV_SEARCH_SOCKET),
+        }
+    }
+
+    let shared = shared.expect("resolve the shared trusty-search socket");
+    assert_eq!(
+        derived, shared,
+        "the guard must probe the socket trusty-common resolves under TRUSTY_DATA_DIR"
+    );
+    assert!(
+        derived.starts_with(dir.path()),
+        "{} is not under TRUSTY_DATA_DIR={}",
+        derived.display(),
+        dir.path().display()
+    );
+    assert_eq!(
+        overridden, pinned,
+        "an explicit TRUSTY_SEARCH_SOCKET still wins"
     );
 }
 

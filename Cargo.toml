@@ -27,7 +27,8 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 [workspace.dependencies]
 # Published crates.io releases, never path or git (split plan). Each crate adds
 # its own feature list.
-trusty-common = "0.52"
+# #208: ^0.58 is what trusty-installer 0.14 (trusty-audit) requires.
+trusty-common = "0.58"
 trusty-progress = "0.3.2"
 anyhow = "1.0.102"
 chrono = { version = "0.4.44", features = ["serde"] }
