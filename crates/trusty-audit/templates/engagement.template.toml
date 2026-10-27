@@ -47,10 +47,10 @@ engagement = "2026-Q3"
 #
 # Replace these with the versions your auditor pinned for this engagement.
 [tools]
-tga = "10.3.0"
-trusty-search = "0.54.2"
-trusty-analyze = "0.12.6"
-trusty-review = "0.36.0"
+tga = "10.4.0"
+trusty-search = "0.61.1"
+trusty-analyze = "0.12.7"
+trusty-review = "0.38.5"
 
 # A pin may name the artifact's digest as well as its version, in which case a
 # download whose bytes do not match is refused:
