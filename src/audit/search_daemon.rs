@@ -137,7 +137,7 @@ impl SearchGuard {
     /// The guard this process runs with, resolved from the environment.
     ///
     /// #6285: the socket is DERIVED, not discovered. The daemon binds
-    /// `trusty_common::daemon_socket_path("trusty-search")`
+    /// `trusty_common::search_rpc::search_socket_under(TRUSTY_DATA_DIR)` (#208)
     /// (`trusty_search::service::socket::socket_path`) and this guard computes
     /// the identical path, so there is nothing published between them for a
     /// stale write to contradict — which is what the `http_addr` discovery file
@@ -150,7 +150,8 @@ impl SearchGuard {
     /// the same resolver [`super::ensure_repositories_indexed`] uses, so the
     /// daemon this starts and the binary that indexes into it are never two
     /// different installs.
-    /// Test: `super::tests::the_search_guard_derives_the_socket_the_daemon_binds`.
+    /// Test: `super::tests::the_search_guard_derives_the_socket_the_daemon_binds`,
+    /// `super::tests::a_trusty_data_dir_moves_the_search_socket_with_the_daemon`.
     pub fn from_env() -> Self {
         Self {
             socket: search_socket(),
@@ -183,9 +184,13 @@ pub fn search_socket() -> PathBuf {
 /// process environment — `set_var` is `unsafe` in edition 2024 and unsound under
 /// the parallel harness.
 fn socket_from_override(value: Option<&str>) -> PathBuf {
+    use trusty_common::search_rpc::{search_socket_under, TRUSTY_SEARCH_DATA_DIR_ENV};
+
     match value.filter(|s| !s.is_empty()) {
         Some(p) => PathBuf::from(p),
-        None => trusty_common::daemon_socket_path("trusty-search").unwrap_or_default(),
+        // #208: follow TRUSTY_DATA_DIR as the daemon and `search_rpc::search_socket` do (trusty-tools #9214).
+        None => search_socket_under(std::env::var_os(TRUSTY_SEARCH_DATA_DIR_ENV).as_deref())
+            .unwrap_or_default(),
     }
 }
 
