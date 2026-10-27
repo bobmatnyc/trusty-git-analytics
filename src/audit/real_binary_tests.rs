@@ -29,8 +29,8 @@
 //! Nothing here touches the operator's analyze daemon or data: a wrapper script
 //! points the child's facts store and data directory at a temp directory, and
 //! the success arm kills the daemon it started. trusty-search is read-only to
-//! these tests — one `GET /health`, plus whatever the daemon asks it during
-//! boot. That wrapper is a `#!/bin/sh` script, so this module is Unix-only.
+//! these tests — one `search.health` call on its socket, plus whatever the
+//! daemon asks it during boot. That wrapper is a `#!/bin/sh` script, so this module is Unix-only.
 //! Test: this module.
 //!
 //! # Spec References
@@ -74,31 +74,34 @@ fn real_analyze_binary() -> PathBuf {
     candidate
 }
 
-/// A reachable trusty-search address, or a panic naming what to start.
+/// The socket of a running trusty-search, or a panic naming what to start.
 ///
-/// This one dependency cannot be stubbed. `TrustySearchClient` builds its
-/// reqwest client with `http2_prior_knowledge()`
-/// (`crates/trusty-analyze/src/core/client.rs`), so it opens h2c and never
-/// negotiates down — a one-line HTTP/1.1 listener, which is what every other
-/// test here uses for a daemon, is refused as unreachable and the binary exits
-/// before it binds anything. Standing up an h2c server by hand to avoid the
-/// prerequisite would be testing the stub.
+/// #208: trusty-search left `127.0.0.1:7878` for a Unix socket (ADR-0032), and
+/// trusty-analyze followed (it reads `TRUSTY_SEARCH_SOCKET` or the standard
+/// path). The probe is therefore the same `search.health` call the audit's own
+/// preflight makes, on the socket [`super::SearchGuard::from_env`]
+/// derives. An unspawnable binary keeps the probe read-only: a daemon that is
+/// not already up fails the spawn instead of being started.
 ///
-/// So the success arm runs against the real trusty-search, which is also the
-/// more honest end of the chain: real search → real analyze → the guard.
-async fn reachable_trusty_search() -> String {
-    let url =
-        std::env::var("TRUSTY_SEARCH_URL").unwrap_or_else(|_| "http://127.0.0.1:7878".to_string());
-    let reachable =
-        trusty_common::daemon_guard::probe_once(&format!("{}/health", url.trim_end_matches('/')))
-            .await;
+/// This one dependency cannot be stubbed: the success arm checks real search →
+/// real analyze → the guard, and a hand-built framed-socket server would be
+/// testing the stub.
+async fn reachable_trusty_search() -> PathBuf {
+    let probe = crate::audit::SearchGuard {
+        binary: "/nonexistent/trusty-search".to_string(),
+        startup_timeout: Duration::from_millis(1),
+        poll_interval: Duration::from_millis(1),
+        ..crate::audit::SearchGuard::from_env()
+    };
+    let reachable = crate::audit::ensure_search_daemon_with(&probe).await;
     assert!(
-        reachable,
-        "trusty-search is not answering at {url} — start it (`trusty-search start`) before \
-         `cargo test -p tga -- --include-ignored`, or point TRUSTY_SEARCH_URL at a running one. \
-         It cannot be stubbed: trusty-analyze speaks h2c to it with prior knowledge."
+        reachable.is_ok(),
+        "trusty-search is not answering on {} — start it (`trusty-search start`) before \
+         `cargo test -p tga -- --include-ignored`, or point {} at a running one's socket.",
+        probe.socket.display(),
+        super::search_daemon::ENV_SEARCH_SOCKET,
     );
-    url
+    probe.socket
 }
 
 /// A wrapper that gives the real binary a private environment, then `exec`s it.
@@ -111,17 +114,22 @@ async fn reachable_trusty_search() -> String {
 ///
 /// `exec` keeps the PID, so the `$$` recorded before it is the daemon's own PID
 /// and the success arm can kill exactly what it started.
-fn wrapper_for(dir: &Path, binary: &Path, search_url: &str, pid_file: &Path) -> String {
+///
+/// #208: the search socket is exported explicitly. Under
+/// `TRUSTY_DATA_DIR_OVERRIDE` the child's standard socket path would land inside
+/// `dir`, where no trusty-search runs.
+fn wrapper_for(dir: &Path, binary: &Path, search_socket: &Path, pid_file: &Path) -> String {
     use std::os::unix::fs::PermissionsExt as _;
 
     let script = format!(
         "#!/bin/sh\n\
          echo $$ > {pid_file}\n\
-         export TRUSTY_SEARCH_URL={search_url}\n\
+         export TRUSTY_SEARCH_SOCKET={search_socket}\n\
          export TRUSTY_ANALYZER_FACTS={dir}/facts.redb\n\
          export TRUSTY_DATA_DIR_OVERRIDE={dir}\n\
          exec {binary} \"$@\" > {dir}/analyze.log 2>&1\n",
         pid_file = pid_file.display(),
+        search_socket = search_socket.display(),
         dir = dir.display(),
         binary = binary.display(),
     );
@@ -187,9 +195,9 @@ async fn the_real_analyze_binary_refuses_the_audit_when_trusty_search_is_down() 
     let dir = tempfile::tempdir().expect("create a temp dir");
     let pid_file = dir.path().join("analyze.pid");
     let _reaper = KillOnDrop(pid_file.clone());
-    // A trusty-search port with nothing behind it: the dependency is genuinely
+    // A trusty-search socket with nothing behind it: the dependency is genuinely
     // absent rather than merely slow.
-    let dead_search = format!("http://127.0.0.1:{}", super::tests::free_port());
+    let dead_search = dir.path().join("no-trusty-search.sock");
     let wrapper = wrapper_for(dir.path(), &binary, &dead_search, &pid_file);
 
     let guard = AnalyzeGuard {
