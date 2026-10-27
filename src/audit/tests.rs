@@ -1458,20 +1458,6 @@ fn stale_renderer_is_rejected_before_the_sweep() {
 // #5670 — the analyze daemon the audit's report is built from
 // ---------------------------------------------------------------------------
 
-/// A localhost port nothing is listening on.
-///
-/// Binds port 0 so the OS picks a free one, then releases it — hard-coding a
-/// high port instead can collide with something already bound on a busy host.
-pub(super) fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    let port = listener
-        .local_addr()
-        .expect("read the bound address")
-        .port();
-    drop(listener);
-    port
-}
-
 /// An executable stub at `dir/name` running `script`, standing in for a
 /// `trusty-analyze` binary without needing one on the machine.
 #[cfg(unix)]
