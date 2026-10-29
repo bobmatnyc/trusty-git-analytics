@@ -234,14 +234,17 @@ impl GitHubClient {
     /// 119 HTTP 404s and every 403 report a clean run (#146).
     /// What: walks every configured repository. A repository whose fetch
     /// fails is recorded and the walk moves on; pages it fetched before the
-    /// error are kept. A rate limit stays a warning log line, as before (#6553
-    /// handles it run-wide). At the end the recorded failures replace
+    /// error are kept. A rate limit is not a fault (#6553 handles it
+    /// run-wide), but one that stops a walk past page 1 records a PARTIAL
+    /// truncation notice for that repository (#200), so the short listing
+    /// reaches [`Self::fetch_notices`]. At the end the recorded failures replace
     /// [`PrProvider::fetch_faults`]: 404s as one counted warning, every other
     /// failure (403, 5xx after retries, transport) as one stage failure.
     /// Test: `crate::collect::pr_pipeline::tests::a_pr_list_404_is_a_counted_warning_not_a_stage_failure`,
     /// `crate::collect::pr_pipeline::tests::a_pr_list_403_fails_the_stage_once`,
     /// `crate::collect::pr_pipeline::tests::a_page_2_404_keeps_page_1_and_is_a_counted_warning`,
-    /// `crate::collect::pr_pipeline::tests::a_page_2_403_keeps_page_1_and_fails_the_stage_once`.
+    /// `crate::collect::pr_pipeline::tests::a_page_2_403_keeps_page_1_and_fails_the_stage_once`,
+    /// `client_tests::a_pulls_listing_rate_limited_mid_walk_keeps_its_rows_and_says_partial`.
     ///
     /// # Errors
     ///
@@ -254,6 +257,7 @@ impl GitHubClient {
             let (mut prs, stopped) = self.fetch_pull_requests_for_repo(owner, repo).await;
             // #146: pages fetched before an error are kept and stored, exactly
             // as a full fetch would store them.
+            let prs_kept = prs.len();
             out.append(&mut prs);
             let Some((page, e)) = stopped else { continue };
             warn!(
@@ -265,7 +269,16 @@ impl GitHubClient {
             );
             // #146: count it unless it is a rate limit (#6553), naming the
             // pages lost when earlier ones were kept.
-            if !matches!(e, CollectError::Throttled { .. }) {
+            if matches!(e, CollectError::Throttled { .. }) {
+                // #200: a rate limit past page 1 leaves a short listing that
+                // reads as complete; record it PARTIAL via the notice path.
+                if page > 1 {
+                    self.budget.shared().note_truncation(format!(
+                        "GitHub pulls listing for {owner}/{repo} stopped at page {page} \
+                         on a rate limit ({prs_kept} items kept); these results are PARTIAL"
+                    ));
+                }
+            } else {
                 let item = if page > 1 {
                     format!(
                         "{owner}/{repo} (pull requests after page {} not collected)",

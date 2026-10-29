@@ -665,7 +665,7 @@ mod fetch_issue_tests {
 // ─── Bounded pagination and rate-limit termination (#6084) ────────────────────
 
 mod bounded_fetch_tests {
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -709,13 +709,15 @@ mod bounded_fetch_tests {
         serde_json::Value::Array(items)
     }
 
-    /// A short (final) `/pulls` page: fewer than [`PAGE_SIZE`] items, so a
-    /// post-cap walk terminates on it instead of running to the ceiling.
-    fn pulls_page_101() -> serde_json::Value {
-        let items: Vec<serde_json::Value> = (0..50)
+    /// `rows` pull requests for `/pulls` page `page`, numbered
+    /// `(page-1)*PAGE_SIZE + i` for `i` in `1..=rows`, so every row in a walk
+    /// carries a distinct PR number and a duplicated or skipped page shows up
+    /// in the collected set.
+    fn pulls_page(page: u32, rows: u32) -> serde_json::Value {
+        let items: Vec<serde_json::Value> = (1..=rows)
             .map(|i| {
                 serde_json::json!({
-                    "number": 10000 + i + 1,
+                    "number": (page - 1) * PAGE_SIZE + i,
                     "title": "t",
                     "state": "open",
                     "created_at": "2026-01-01T00:00:00Z",
@@ -723,6 +725,66 @@ mod bounded_fetch_tests {
             })
             .collect();
         serde_json::Value::Array(items)
+    }
+
+    /// A `/pulls` listing whose pages `1..=full_pages` are full
+    /// ([`pulls_page`]) and whose every later page answers `tail`.
+    struct PagedPulls {
+        full_pages: u32,
+        tail: ResponseTemplate,
+    }
+
+    impl wiremock::Respond for PagedPulls {
+        fn respond(&self, req: &wiremock::Request) -> ResponseTemplate {
+            let page = req
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == "page")
+                .and_then(|(_, v)| v.parse::<u32>().ok())
+                .unwrap_or(1);
+            if page <= self.full_pages {
+                ResponseTemplate::new(200).set_body_json(pulls_page(page, PAGE_SIZE))
+            } else {
+                self.tail.clone()
+            }
+        }
+    }
+
+    /// Why (#200): the raised pulls cap lets a walk run for 150+ pages, so a
+    /// rate limit that lands mid-walk is now the likely way a large listing
+    /// ends early. Before this fix that arm only logged a warning, so the run
+    /// stored a short listing that read exactly like a complete one.
+    /// What: pages 1–150 are full; page 151 answers 429 with a `Retry-After`
+    /// longer than a 1 s run budget, so the walk stops there. The 15,000 rows
+    /// fetched are kept and exactly one PARTIAL notice names the shortfall.
+    #[tokio::test]
+    async fn a_pulls_listing_rate_limited_mid_walk_keeps_its_rows_and_says_partial() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls"))
+            .respond_with(PagedPulls {
+                full_pages: 150,
+                tail: ResponseTemplate::new(429).insert_header("retry-after", "30"),
+            })
+            .mount(&server)
+            .await;
+
+        let client = client_at(&server.uri()).with_run_budget(
+            &crate::collect::github::budget::RunBudget::with_sleep_budget(
+                std::time::Duration::from_secs(1),
+            ),
+        );
+        let prs = client.fetch_pull_requests().await.expect("walk returns");
+
+        assert_eq!(prs.len(), 15_000, "pages 1-150 must be kept");
+        let notices = client.fetch_notices();
+        assert_eq!(
+            notices.len(),
+            1,
+            "a rate-limited pulls walk must be reported, got: {notices:?}"
+        );
+        assert!(notices[0].contains("PARTIAL"), "got: {}", notices[0]);
+        assert!(notices[0].contains("acme/widgets"), "got: {}", notices[0]);
     }
 
     /// Why: every listing here looped until the server returned a short page,
@@ -765,25 +827,21 @@ mod bounded_fetch_tests {
     /// 10,000-PR bound. A listing whose first 100 pages are all full — i.e. a
     /// repository with more than 10,000 PRs — must keep walking past the shared
     /// cap and collect the remainder, not truncate at page 100.
-    /// What: page 101 answers short (the real end of the list); every other page
-    /// is full. The walk must fetch all 101 pages and return all rows.
+    /// What: pages 1–100 are full and page 101 answers short (the real end of
+    /// the list); every page carries distinct PR numbers. The walk must fetch
+    /// all 101 pages and collect exactly PRs 1..=10,050, so a duplicated or
+    /// skipped page at the 100→101 boundary fails it.
     /// Test: itself — the pre-fix walk stops at 100 requests and returns only
     /// 10,000 rows, so this assertion fails before the fix.
     #[tokio::test]
     async fn a_pulls_listing_pages_past_the_shared_cap_and_collects_fully() {
         let server = MockServer::start().await;
-        // First-mounted wins on a query match, so the short page 101 is mounted
-        // before the full-page catch-all: page 101 is the genuine end of the
-        // list, every earlier page is full.
         Mock::given(method("GET"))
             .and(path("/repos/acme/widgets/pulls"))
-            .and(query_param("page", "101"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pulls_page_101()))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/repos/acme/widgets/pulls"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(full_pulls_page()))
+            .respond_with(PagedPulls {
+                full_pages: MAX_PAGES,
+                tail: ResponseTemplate::new(200).set_body_json(pulls_page(MAX_PAGES + 1, 50)),
+            })
             .mount(&server)
             .await;
 
@@ -798,6 +856,13 @@ mod bounded_fetch_tests {
             prs.len(),
             ((MAX_PAGES * PAGE_SIZE) + 50) as usize,
             "a repository past the shared cap must collect fully, not truncate"
+        );
+        // #200: every PR exactly once — no duplicate or gap across 100→101.
+        let numbers: std::collections::BTreeSet<u64> = prs.iter().map(|p| p.pr_number).collect();
+        let expected: std::collections::BTreeSet<u64> = (1..=10_050).collect();
+        assert_eq!(
+            numbers, expected,
+            "the walk must collect exactly PRs 1..=10,050"
         );
         let requests = server
             .received_requests()
