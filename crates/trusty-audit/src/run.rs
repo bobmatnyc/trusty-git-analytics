@@ -392,8 +392,9 @@ where
     // resolved here is only the operator's half — the `gh` login is folded in
     // after `resolve_github_access`, which is where it is read.
     let declared_credential = git_credentials::GitCredential::of_environment(&operator);
-    let inference =
-        inference::resolve(!config.openrouter_key.is_empty(), &config.models, operator)?;
+    // #210: a Bedrock engagement carries no OpenRouter key and still selects.
+    let ready = inference::credential_ready(config, &operator);
+    let inference = inference::resolve(ready, &config.models, operator)?;
     // #6247: resolved ONCE for the sweep, for the same reason the inference
     // selection above is — the budget is a property of the engagement, not of a
     // repository. Every child is handed this value and every manifest records

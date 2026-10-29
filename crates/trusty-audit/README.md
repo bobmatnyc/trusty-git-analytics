@@ -738,6 +738,12 @@ The same values still go to the child as `TRUSTY_REVIEW_*` environment
 variables. The manifest is authoritative when present; the variables remain for
 a renderer too old to read the section.
 
+Only `provider = "openrouter"` reads the engagement's `openrouter_key`. With
+`[models] provider = "bedrock"` and all three role models named, leave the key
+blank or omit it: `run` and `audit` neither prompt for it nor refuse without
+it, and the reviewer authenticates through the operator's AWS credentials
+([#210](https://github.com/bobmatnyc/trusty-git-analytics/issues/210)).
+
 The section carries **identity, never a credential** — the same boundary as
 Credentials above. The key travels in the environment and nowhere else, and a
 render whose declared provider has no credential stops with the provider named.

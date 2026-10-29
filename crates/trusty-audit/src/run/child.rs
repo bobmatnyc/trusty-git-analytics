@@ -120,7 +120,6 @@ pub(super) async fn spawn_tga(
         .arg("--output")
         .arg(output)
         .current_dir(cwd)
-        .env(ENV_INFERENCE_CREDENTIAL, config.openrouter_key.expose())
         // #5823: ask the child to write its per-stage events where this process
         // can read them. A child too old to know the variable ignores it, and
         // the sweep shows the coarse per-repository progress it derives itself.
@@ -140,6 +139,11 @@ pub(super) async fn spawn_tga(
         // the pumps below from ever seeing EOF, and a 200 ms budget took 600 s.
         .process_group(0)
         .kill_on_drop(true);
+    // #210: a Bedrock engagement has no OpenRouter key. A blank variable would
+    // read as "set" to a child that probes it, so it is passed only when set.
+    if !config.openrouter_key.is_empty() {
+        command.env(ENV_INFERENCE_CREDENTIAL, config.openrouter_key.expose());
+    }
     // #5671: the credential alone never reached OpenRouter — trusty-review
     // defaults to Bedrock, so the provider and the three role models must be
     // named too. Resolved by `sweep_with_env`: either all four or none, never a
