@@ -1109,31 +1109,50 @@ impl Session {
     /// and it performs no pin check: the verb runs at whatever version the
     /// renderer is (owner ruling on #6080).
     /// What: resolves the key — the front end's, else the config's — refuses a
-    /// run that has neither, resolves the model selection through the same
-    /// `crate::inference` rule the sweep uses, and hands both to
+    /// run that has neither when the selected provider is `openrouter` (#220;
+    /// any other provider renders with no key), resolves the model selection
+    /// through the same `crate::inference` rule the sweep uses, and hands both to
     /// [`crate::rerender::rerender`] along with this session's cwd and config
     /// path, which are what a `--from`-less run renders from (#6080). The
     /// config path goes over for its DIRECTORY as much as its contents: an
     /// engagement's own work root sits beside it, and that is the rung between
     /// the cwd and the tool's default work dir.
     /// Test: `crate::session::session_tests::a_re_render_with_no_credential_anywhere_is_refused`,
-    /// `crate::session::session_tests::a_re_render_defaults_to_the_directory_it_was_run_in`.
+    /// `crate::session::session_tests::a_re_render_defaults_to_the_directory_it_was_run_in`,
+    /// `crate::session::session_tests::a_bedrock_re_render_with_no_key_passes_the_credential_check`,
+    /// `crate::session::session_tests::an_openrouter_re_render_with_a_blank_key_is_still_refused`.
     ///
     /// # Errors
     ///
-    /// [`AuditError::NoCredentialSource`] when no key was exported and none is
-    /// configured, plus whatever [`crate::rerender::rerender`] refuses with.
+    /// [`AuditError::NoCredentialSource`] when the provider is `openrouter`, no
+    /// key was exported and none is configured, plus whatever
+    /// [`crate::rerender::rerender`] refuses with.
     async fn rerender(&self, options: &RerenderOptions) -> Result<RerenderReport, AuditError> {
         let config = EngagementConfig::load_if_present(&self.config_path)?;
+        let models = config
+            .as_ref()
+            .map(|c| c.models.clone())
+            .unwrap_or_default();
+        let operator = |name: &str| std::env::var(name).ok();
         let key = self
             .credential
             .clone()
             .or_else(|| config.as_ref().map(|c| c.openrouter_key.clone()))
-            .filter(|key| !key.is_empty())
-            .ok_or_else(|| AuditError::NoCredentialSource {
-                env: run::ENV_INFERENCE_CREDENTIAL,
-                config: self.config_path.clone(),
-            })?;
+            .filter(|key| !key.is_empty());
+        // #220: only the openrouter provider reads this key. Any other provider
+        // renders with a blank one, which `rerender` never hands to the child.
+        let key = match key {
+            Some(key) => key,
+            None if !crate::inference::requires_openrouter_key(&models, operator) => {
+                SecretKey::new(String::new())
+            }
+            None => {
+                return Err(AuditError::NoCredentialSource {
+                    env: run::ENV_INFERENCE_CREDENTIAL,
+                    config: self.config_path.clone(),
+                });
+            }
+        };
         // #6173: `render` drives the engagement's own `tools/trusty-review`,
         // so it owes the same pin reconciliation `run` performs. The pin is
         // read here, where the config is already loaded, and is `None` when no
@@ -1150,10 +1169,10 @@ impl Session {
             .as_ref()
             .map(|c| c.report.clone())
             .unwrap_or_default();
-        let models = config.map(|c| c.models).unwrap_or_default();
         // #6135: both halves — the pairs the child inherits, and the identity
-        // the index states when no manifest declares its own.
-        let inference = crate::inference::resolve(true, &models, |name| std::env::var(name).ok())?;
+        // the index states when no manifest declares its own. #220: the
+        // credential is ready here — a key is set, or the provider needs none.
+        let inference = crate::inference::resolve(true, &models, operator)?;
         rerender::rerender(
             &self.work,
             &self.cwd,
@@ -1383,6 +1402,54 @@ path = "/work/repos/acme-api"
             matches!(refusal, AuditError::NothingToRerender { .. }),
             "{refusal}"
         );
+    }
+
+    /// 🔴 #220: a Bedrock engagement re-renders with no OpenRouter key, from
+    /// the front end or the config. Before the fix every provider was refused
+    /// with `NoCredentialSource`.
+    #[tokio::test]
+    async fn a_bedrock_re_render_with_no_key_passes_the_credential_check() {
+        for key_line in ["openrouter_key = \"\"", ""] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let session = session_with_config(tmp.path(), &models_config(key_line, "bedrock"))
+                .with_cwd(tmp.path());
+
+            let refusal = session
+                .execute(Command::Rerender(RerenderOptions::default()))
+                .await
+                .expect_err("an empty working directory carries no report");
+
+            // Past the credential check, stopped by the missing report.
+            assert!(
+                matches!(refusal, AuditError::NothingToRerender { .. }),
+                "{key_line:?}: {refusal}"
+            );
+        }
+    }
+
+    /// #220: an openrouter engagement with a blank key and none exported is
+    /// still refused before any renderer starts.
+    #[tokio::test]
+    async fn an_openrouter_re_render_with_a_blank_key_is_still_refused() {
+        for key_line in ["openrouter_key = \"\"", ""] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let session = session_with_config(tmp.path(), &models_config(key_line, "openrouter"))
+                .with_cwd(tmp.path());
+
+            let refusal = session
+                .execute(Command::Rerender(RerenderOptions::default()))
+                .await
+                .expect_err("openrouter reads this key");
+
+            assert!(
+                matches!(refusal, AuditError::NoCredentialSource { .. }),
+                "{key_line:?}: {refusal}"
+            );
+            assert!(
+                refusal.to_string().contains(run::ENV_INFERENCE_CREDENTIAL),
+                "{refusal}"
+            );
+        }
     }
 
     /// 🔴 #6080: `render` with no `--from` renders where the front end was run,

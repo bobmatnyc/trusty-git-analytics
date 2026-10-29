@@ -1277,6 +1277,82 @@ fn present_credential_passes_the_precheck() {
     assert!(!msg.contains("sk-or"), "no key-shaped text: {msg}");
 }
 
+/// An environment lookup over `pairs`, standing in for the process environment
+/// the `taudit audit` child receives.
+fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
+    let owned: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    move |name| {
+        owned
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    }
+}
+
+/// The four `TRUSTY_REVIEW_*` pairs `taudit` sets for `provider`.
+fn selection_for(provider: &'static str) -> Vec<(&'static str, &'static str)> {
+    let [p, r, v, s] = super::review::INFERENCE_SELECTION_ENV;
+    vec![
+        (p, provider),
+        (r, "us.anthropic.claude-sonnet-4-6"),
+        (v, "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+        (s, "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+    ]
+}
+
+/// 🔴 #210: the check follows the provider the `TRUSTY_REVIEW_*` environment
+/// selects. Bedrock (any case, any non-OpenRouter name) passes with no key; a
+/// key still passes under every provider.
+#[test]
+fn the_credential_check_follows_the_selected_provider_210() {
+    use super::review::{inference_credential_check, requires_openrouter_key};
+
+    for provider in ["bedrock", "Bedrock", " bedrock ", "fireworks", "local"] {
+        let env = env_of(&selection_for(provider));
+        assert!(!requires_openrouter_key(&env), "{provider:?}");
+        inference_credential_check(env)
+            .unwrap_or_else(|e| panic!("{provider:?} needs no OpenRouter key: {e}"));
+    }
+
+    let mut with_key = selection_for("openrouter");
+    with_key.push(("OPENROUTER_API_KEY", "sk-or-v1-not-a-real-key"));
+    inference_credential_check(env_of(&with_key)).expect("a set key passes");
+}
+
+/// #210 error arm: an OpenRouter selection, a blank provider, a partly set
+/// selection and no selection at all each need the key, and refuse without it
+/// with the unchanged message.
+#[test]
+fn an_openrouter_selection_with_no_key_is_still_refused_210() {
+    use super::review::{inference_credential_check, requires_openrouter_key};
+
+    let [provider, ..] = super::review::INFERENCE_SELECTION_ENV;
+    let partial: Vec<(&str, &str)> = vec![(provider, "bedrock")];
+    let mut blank_key = selection_for("openrouter");
+    blank_key.push(("OPENROUTER_API_KEY", "  "));
+    let cases: [(&str, Vec<(&str, &str)>); 6] = [
+        ("openrouter", selection_for("openrouter")),
+        ("OpenRouter", selection_for("OpenRouter")),
+        ("blank provider", selection_for("  ")),
+        ("partial selection", partial),
+        ("no selection", Vec::new()),
+        ("blank key", blank_key),
+    ];
+    for (label, pairs) in cases {
+        let env = env_of(&pairs);
+        assert!(requires_openrouter_key(&env), "{label}");
+        let err = inference_credential_check(env).expect_err(label);
+        assert_eq!(
+            err.to_string(),
+            crate::audit::MissingInferenceCredential.to_string(),
+            "{label}"
+        );
+    }
+}
+
 // ─── #5454 review: exit 0 is not evidence of a synthesis pass ────────────────
 
 /// A `ReviewRun` shaped like a clean render: the child exited 0 and printed both

@@ -331,9 +331,10 @@ pub const ENV_INFERENCE_CREDENTIAL: &str = trusty_common::env_vars::ENV_OPENROUT
 /// check goes: a sweep can run for many minutes over an org, and discovering an
 /// unset key at the render step — the last thing it does — throws all of it away
 /// for a fault that was knowable before stage 1.
-/// What: a typed error naming the variable and how to set it. Only OpenRouter is
-/// checked, per the #5454 owner decision that it is the audit's only inference
-/// path. The value is tested for emptiness and never read into a message.
+/// What: a typed error naming the variable and how to set it. It is raised only
+/// when the selected provider is OpenRouter (#210; see
+/// [`inference_credential_check`]). The value is tested for emptiness and never
+/// read into a message.
 /// Test: `super::tests::{absent_credential_is_a_named_actionable_error,
 /// present_credential_passes_the_precheck}`.
 #[derive(Debug, thiserror::Error)]
@@ -349,22 +350,93 @@ pub struct MissingInferenceCredential;
 
 /// Check that the inference credential is present, before the sweep starts.
 ///
-/// Why/What: reads [`ENV_INFERENCE_CREDENTIAL`] and applies
-/// [`credential_is_present`]. Reading the variable is all this does; the rule
-/// lives in that pure function so tests never call `std::env::set_var`, which is
-/// `unsafe` in edition 2024 and unsound under parallel tests (#5308 review).
+/// Why/What: hands the process environment to
+/// [`inference_credential_check`]. Reading the environment is all this does;
+/// the rule lives in that function so tests never call `std::env::set_var`,
+/// which is `unsafe` in edition 2024 and unsound under parallel tests (#5308
+/// review).
 ///
 /// # Errors
 ///
-/// [`MissingInferenceCredential`] when the variable is unset or blank.
+/// [`MissingInferenceCredential`] when the selected provider is OpenRouter and
+/// [`ENV_INFERENCE_CREDENTIAL`] is unset or blank.
 ///
-/// Test: `super::tests::absent_credential_is_a_named_actionable_error`.
+/// Test: `super::tests::absent_credential_is_a_named_actionable_error`;
+/// end to end through the binary in
+/// `tests/audit_inference_credential.rs`.
 pub fn require_inference_credential() -> Result<(), MissingInferenceCredential> {
-    if credential_is_present(std::env::var(ENV_INFERENCE_CREDENTIAL).ok().as_deref()) {
+    inference_credential_check(|name| std::env::var(name).ok())
+}
+
+/// The four `TRUSTY_REVIEW_*` variables that select the renderer's inference.
+///
+/// Why: #210 — `trusty-audit` sets all four on its `tga audit` child, and
+/// `trusty-review` reads them as its environment layer. They are one
+/// selection: a provider means nothing without the model ids in its namespace.
+pub(super) const INFERENCE_SELECTION_ENV: [&str; 4] = [
+    "TRUSTY_REVIEW_PROVIDER",
+    "TRUSTY_REVIEW_REVIEWER_MODEL",
+    "TRUSTY_REVIEW_VERIFIER_MODEL",
+    "TRUSTY_REVIEW_SUMMARIZER_MODEL",
+];
+
+/// The provider name that authenticates with [`ENV_INFERENCE_CREDENTIAL`].
+pub(super) const PROVIDER_OPENROUTER: &str = "openrouter";
+
+/// The credential check itself, over an environment lookup.
+///
+/// Why: #210 — the OpenRouter key is OpenRouter's credential only. `taudit`
+/// under `provider = "bedrock"` hands this process the Bedrock selection and no
+/// key, and refusing here stopped the audit before any Bedrock call. Bedrock's
+/// AWS credentials are left to the AWS SDK inside `trusty-review`.
+/// What: `Ok` when [`requires_openrouter_key`] says the selected provider does
+/// not read the key, or when the key is present per [`credential_is_present`].
+/// Otherwise the unchanged [`MissingInferenceCredential`].
+/// Test: `super::tests::the_credential_check_follows_the_selected_provider_210`,
+/// `super::tests::an_openrouter_selection_with_no_key_is_still_refused_210`.
+///
+/// # Errors
+///
+/// [`MissingInferenceCredential`] when the key is required and absent.
+pub(super) fn inference_credential_check<F>(env: F) -> Result<(), MissingInferenceCredential>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    // #210: only the openrouter provider reads this key.
+    if !requires_openrouter_key(&env)
+        || credential_is_present(env(ENV_INFERENCE_CREDENTIAL).as_deref())
+    {
         Ok(())
     } else {
         Err(MissingInferenceCredential)
     }
+}
+
+/// Whether the provider the renderer will use reads the OpenRouter key.
+///
+/// Why: #210 — the same layer order as `trusty_audit::inference::resolve`, so
+/// `taudit` and its `tga audit` child cannot disagree about the provider. `tga`
+/// has no engagement config, so its layers are the environment, then the
+/// built-in OpenRouter default.
+/// What: when all four [`INFERENCE_SELECTION_ENV`] variables are set, the
+/// provider is `TRUSTY_REVIEW_PROVIDER`; otherwise it is OpenRouter. Answers
+/// `true` for OpenRouter (case-insensitively) or a blank provider, `false` for
+/// any other name. A partly set selection reads as OpenRouter, so it fails
+/// closed on a missing key.
+/// Test: `super::tests::the_credential_check_follows_the_selected_provider_210`.
+pub(super) fn requires_openrouter_key<F>(env: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let selection = INFERENCE_SELECTION_ENV.map(env);
+    if !selection.iter().all(Option::is_some) {
+        return true;
+    }
+    selection[0]
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .is_none_or(|name| name.eq_ignore_ascii_case(PROVIDER_OPENROUTER))
 }
 
 /// The presence rule itself: set, and not only whitespace.
