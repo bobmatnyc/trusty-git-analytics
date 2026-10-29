@@ -787,6 +787,64 @@ mod bounded_fetch_tests {
         assert!(notices[0].contains("acme/widgets"), "got: {}", notices[0]);
     }
 
+    /// Why (#200): the rate-limit breaker stays tripped once it trips, so every
+    /// repository after a throttled one fails on page 1. A page-1 throttle
+    /// recorded nothing, and those repositories read as having no PRs.
+    /// What: repo A trips the breaker at page 3; repo B is then throttled on
+    /// page 1. Both get a PARTIAL notice, and repo A's rows are kept.
+    #[tokio::test]
+    async fn a_page_1_throttle_after_the_breaker_trips_is_reported_partial() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls"))
+            .respond_with(PagedPulls {
+                full_pages: 2,
+                tail: ResponseTemplate::new(429).insert_header("retry-after", "30"),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/gadgets/pulls"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
+            .mount(&server)
+            .await;
+
+        let mut client = client_at(&server.uri()).with_run_budget(
+            &crate::collect::github::budget::RunBudget::with_sleep_budget(
+                std::time::Duration::from_secs(1),
+            ),
+        );
+        client.repos = vec![
+            ("acme".to_string(), "widgets".to_string()),
+            ("acme".to_string(), "gadgets".to_string()),
+        ];
+        let prs = client.fetch_pull_requests().await.expect("walk returns");
+
+        assert_eq!(
+            prs.len(),
+            2 * PAGE_SIZE as usize,
+            "repo A's rows must be kept"
+        );
+        let notices = client.fetch_notices();
+        assert_eq!(
+            notices.len(),
+            2,
+            "both throttled repos must be reported, got: {notices:?}"
+        );
+        assert!(
+            notices.iter().all(|n| n.contains("PARTIAL")),
+            "got: {notices:?}"
+        );
+        assert!(
+            notices.iter().any(|n| n.contains("acme/widgets")),
+            "got: {notices:?}"
+        );
+        assert!(
+            notices.iter().any(|n| n.contains("acme/gadgets")),
+            "got: {notices:?}"
+        );
+    }
+
     /// Why: every listing here looped until the server returned a short page,
     /// which trusts the server to end the walk. A server that always answers
     /// with a full page never does — this test does not terminate against the
