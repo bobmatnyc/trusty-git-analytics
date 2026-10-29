@@ -1,0 +1,2 @@
+Fixed
+- `tga audit` starts trusty-search with `start --foreground --socket <path>`, where `<path>` is the socket its preflight polls. Before, it started a bare `start --foreground`, so with `TRUSTY_SEARCH_SOCKET` set the daemon bound `<TRUSTY_DATA_DIR>/trusty-search.sock` while the preflight polled the override; the audit was refused after the 60-second startup timeout and the daemon was left running ([#211](https://github.com/bobmatnyc/trusty-git-analytics/issues/211)).

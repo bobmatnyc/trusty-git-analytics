@@ -1649,14 +1649,30 @@ async fn an_unspawnable_analyze_binary_refuses_the_audit() {
 /// spawning anything — the same pure-function split `report_args` uses on the
 /// renderer side.
 ///
-/// #6287: a bare `serve`, with no `--socket`. The daemon derives its socket path
-/// from the data directory, so passing one would start a daemon on a path the
-/// renderer does not dial.
+/// #212: `serve --socket <path>`, so the daemon binds the socket the guard
+/// polls. A bare `serve` bound the derived default whatever the override said.
 #[test]
-fn the_spawn_arguments_are_a_bare_serve() {
+fn the_spawn_arguments_bind_the_polled_socket() {
     use crate::audit::analyze::serve_args;
 
-    assert_eq!(serve_args(), vec!["serve"]);
+    assert_eq!(
+        serve_args("/tmp/pinned/a.sock"),
+        vec!["serve", "--socket", "/tmp/pinned/a.sock"]
+    );
+}
+
+/// #212: the precedence rule between the two analyze-socket variables, asserted
+/// without touching the process environment. An empty value is not a setting.
+#[test]
+fn analyze_socket_override_precedence_212() {
+    use crate::audit::analyze::pick_socket_override;
+
+    assert_eq!(pick_socket_override(Some("/p"), Some("/l")), Some("/p"));
+    assert_eq!(pick_socket_override(None, Some("/l")), Some("/l"));
+    assert_eq!(pick_socket_override(Some(""), Some("/l")), Some("/l"));
+    assert_eq!(pick_socket_override(Some("/p"), None), Some("/p"));
+    assert_eq!(pick_socket_override(None, None), None);
+    assert_eq!(pick_socket_override(Some(""), Some("")), None);
 }
 
 /// #5670, the readiness arm: a spawn that succeeds is not a daemon.
@@ -1812,11 +1828,13 @@ async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
         2,
         "each call spawns for its own missed probe; got {spawned:?}"
     );
+    // #212: every spawn binds the socket the guard polls.
+    let expected_spawn = format!("serve --socket {}", expected_socket.display());
     for line in &spawned {
         assert_eq!(
             line.trim(),
-            "serve",
-            "#6287: every spawn is a bare `serve` — the daemon derives its own socket"
+            expected_spawn,
+            "every spawn binds the polled socket"
         );
     }
 }
@@ -2426,13 +2444,16 @@ fn a_trusty_data_dir_moves_the_search_socket_with_the_daemon() {
 /// The argument vector is the tga→trusty-search contract, asserted without
 /// spawning anything.
 ///
-/// `--foreground` is the load-bearing half: it is what trusty-search's own guard
-/// passes (`crates/trusty-search/src/commands/daemon_guard.rs`'s
-/// `spawn_daemon_with_device`), and without it `start` re-spawns itself as a
-/// background daemon and the child we detached exits immediately.
+/// `--foreground` keeps the detached child from re-spawning itself as a
+/// background daemon (trusty-search's own guard passes it, in
+/// `crates/trusty-search/src/commands/daemon_guard.rs`). #211: `--socket` makes
+/// the daemon bind the path the guard polls.
 #[test]
 fn the_search_spawn_arguments_are_start_in_the_foreground() {
-    assert_eq!(start_args(), vec!["start", "--foreground"]);
+    assert_eq!(
+        start_args("/tmp/pinned/s.sock"),
+        vec!["start", "--foreground", "--socket", "/tmp/pinned/s.sock"]
+    );
 }
 
 /// A daemon that is already up is left alone.
@@ -2695,5 +2716,280 @@ fn the_audit_command_runs_the_search_guard_before_the_analyze_guard() {
     assert!(
         search < analyze,
         "trusty-analyze cannot boot without trusty-search, so its guard must run second"
+    );
+}
+
+// ─── #211 / #212: the socket a guard spawns on is the socket it polls ─────────
+
+/// An executable stub that appends its argument vector to `log` and exits 0,
+/// so a guard's spawn is recorded and its readiness poll then times out.
+#[cfg(unix)]
+fn argv_recording_stub(dir: &std::path::Path, name: &str, log: &std::path::Path) -> String {
+    let script = format!("#!/bin/sh\necho \"$@\" >> {}\nexit 0\n", log.display());
+    stub_binary(dir, name, &script)
+}
+
+/// Waits up to two seconds for the detached stub to write its log.
+#[cfg(unix)]
+async fn first_recorded_argv(log: &std::path::Path) -> Vec<String> {
+    for _ in 0..40 {
+        let lines = stub_log(log);
+        if !lines.is_empty() {
+            return lines;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    stub_log(log)
+}
+
+/// #211: the search guard starts trusty-search on the socket it then polls.
+///
+/// trusty-search binds `<TRUSTY_DATA_DIR>/trusty-search.sock` unless it is given
+/// `--socket`, and never reads `TRUSTY_SEARCH_SOCKET`. A guard that polls an
+/// overridden socket without passing it waits out the startup budget on a path
+/// nothing binds. The stub records the spawn and binds nothing, so the guard
+/// refuses; the recorded argv is the assertion.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_search_guard_spawns_the_daemon_on_the_socket_it_polls_211() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let log = dir.path().join("argv.log");
+    let stub = argv_recording_stub(dir.path(), "trusty-search-argv", &log);
+    let socket = dir.path().join("pinned").join("s.sock");
+    let guard = search_guard_on(socket.clone(), &stub);
+
+    ensure_search_daemon_with(&guard)
+        .await
+        .expect_err("a stub that binds nothing must not satisfy the preflight");
+
+    assert_eq!(
+        first_recorded_argv(&log).await,
+        vec![format!("start --foreground --socket {}", socket.display())],
+        "trusty-search must be started on the exact socket the guard polls"
+    );
+}
+
+/// #212: the analyze guard starts trusty-analyze on the socket it then polls.
+///
+/// A bare `trusty-analyze serve` binds the default socket, so an overridden
+/// socket was never bound by the daemon the guard started.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_analyze_guard_spawns_the_daemon_on_the_socket_it_polls_212() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let log = dir.path().join("argv.log");
+    let stub = argv_recording_stub(dir.path(), "trusty-analyze-argv", &log);
+    let socket = dir.path().join("pinned").join("a.sock");
+    let guard = guard_on(socket.clone(), &stub);
+
+    crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a stub that binds nothing must not satisfy the preflight");
+
+    assert_eq!(
+        first_recorded_argv(&log).await,
+        vec![format!("serve --socket {}", socket.display())],
+        "trusty-analyze must be started on the exact socket the guard polls"
+    );
+}
+
+/// A socket path in `dir` whose file name is not valid UTF-8.
+#[cfg(unix)]
+fn non_utf8_socket(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    dir.join(std::ffi::OsString::from_vec(b"\xff.sock".to_vec()))
+}
+
+/// #211: the search guard refuses a non-UTF-8 socket before it spawns.
+///
+/// `--socket` takes a `&str`, so a lossy conversion would start the daemon on a
+/// path other than the one the guard polls. The refusal names the problem and
+/// the argv recorder stays empty.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_search_guard_refuses_a_non_utf8_socket_without_spawning_211() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let log = dir.path().join("argv.log");
+    let stub = argv_recording_stub(dir.path(), "trusty-search-argv", &log);
+    let guard = search_guard_on(non_utf8_socket(dir.path()), &stub);
+
+    let err = ensure_search_daemon_with(&guard)
+        .await
+        .expect_err("a non-UTF-8 socket must be refused");
+
+    let msg = err.to_string();
+    assert!(msg.contains("not valid UTF-8"), "unnamed refusal: {msg}");
+    assert!(
+        settled_spawn_log(&log).await.is_empty(),
+        "nothing may be spawned for a socket the daemon cannot be told"
+    );
+}
+
+/// #212: the analyze guard refuses a non-UTF-8 socket before it spawns.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_analyze_guard_refuses_a_non_utf8_socket_without_spawning_212() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let log = dir.path().join("argv.log");
+    let stub = argv_recording_stub(dir.path(), "trusty-analyze-argv", &log);
+    let guard = guard_on(non_utf8_socket(dir.path()), &stub);
+
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a non-UTF-8 socket must be refused");
+
+    let msg = err.to_string();
+    assert!(msg.contains("not valid UTF-8"), "unnamed refusal: {msg}");
+    assert!(
+        settled_spawn_log(&log).await.is_empty(),
+        "nothing may be spawned for a socket the daemon cannot be told"
+    );
+}
+
+/// The two analyze-socket variables, saved before a test writes them and put
+/// back afterwards. Literal names, so the test reads the documented contract
+/// rather than whatever a constant says.
+struct AnalyzeSocketEnv {
+    primary: Option<std::ffi::OsString>,
+    legacy: Option<std::ffi::OsString>,
+}
+
+impl AnalyzeSocketEnv {
+    const PRIMARY: &'static str = "TRUSTY_ANALYZE_SOCKET";
+    const LEGACY: &'static str = "PR_INTELLIGENCE_ANALYZER_SOCKET";
+
+    fn save() -> Self {
+        Self {
+            primary: std::env::var_os(Self::PRIMARY),
+            legacy: std::env::var_os(Self::LEGACY),
+        }
+    }
+
+    /// Sets (`Some`) or clears (`None`) both variables.
+    ///
+    /// SAFETY contract for callers: only from a `#[serial_test::serial]` test,
+    /// which keeps every env-mutating test in this crate off other threads.
+    fn set(primary: Option<&std::path::Path>, legacy: Option<&std::path::Path>) {
+        // SAFETY: see the doc comment; every caller is `#[serial]`.
+        unsafe {
+            match primary {
+                Some(v) => std::env::set_var(Self::PRIMARY, v),
+                None => std::env::remove_var(Self::PRIMARY),
+            }
+            match legacy {
+                Some(v) => std::env::set_var(Self::LEGACY, v),
+                None => std::env::remove_var(Self::LEGACY),
+            }
+        }
+    }
+
+    /// Puts the saved values back; dropping the guard does the same, so a
+    /// panicking test cannot leak env state.
+    fn restore(self) {
+        drop(self);
+    }
+}
+
+impl Drop for AnalyzeSocketEnv {
+    fn drop(&mut self) {
+        // SAFETY: as `set`.
+        unsafe {
+            match self.primary.take() {
+                Some(v) => std::env::set_var(Self::PRIMARY, v),
+                None => std::env::remove_var(Self::PRIMARY),
+            }
+            match self.legacy.take() {
+                Some(v) => std::env::set_var(Self::LEGACY, v),
+                None => std::env::remove_var(Self::LEGACY),
+            }
+        }
+    }
+}
+
+/// #212: `TRUSTY_ANALYZE_SOCKET` sets the socket the analyze guard dials.
+///
+/// It is the name trusty-analyze, taudit and their docs use. tga read only
+/// `PR_INTELLIGENCE_ANALYZER_SOCKET`, so the documented override was ignored and
+/// the audit dialled, and started a daemon on, the operator's default socket.
+#[test]
+#[serial_test::serial]
+fn trusty_analyze_socket_sets_the_analyze_socket_212() {
+    let pinned = std::path::PathBuf::from("/tmp/t212-pinned/a.sock");
+    let saved = AnalyzeSocketEnv::save();
+    AnalyzeSocketEnv::set(Some(&pinned), None);
+    let resolved = crate::audit::AnalyzeGuard::from_env().map(|g| g.socket);
+    saved.restore();
+
+    assert_eq!(resolved.expect("an override cannot fail"), pinned);
+}
+
+/// #212: precedence. `TRUSTY_ANALYZE_SOCKET` beats the legacy
+/// `PR_INTELLIGENCE_ANALYZER_SOCKET`, the legacy name still works alone, and
+/// with neither set the guard dials the derived default.
+#[test]
+#[serial_test::serial]
+fn the_analyze_socket_prefers_trusty_analyze_socket_then_the_legacy_name_212() {
+    let primary = std::path::PathBuf::from("/tmp/t212-primary/a.sock");
+    let legacy = std::path::PathBuf::from("/tmp/t212-legacy/a.sock");
+    let socket = || crate::audit::AnalyzeGuard::from_env().map(|g| g.socket);
+
+    let saved = AnalyzeSocketEnv::save();
+    AnalyzeSocketEnv::set(Some(&primary), Some(&legacy));
+    let both = socket();
+    AnalyzeSocketEnv::set(None, Some(&legacy));
+    let legacy_only = socket();
+    AnalyzeSocketEnv::set(None, None);
+    let neither = socket();
+    saved.restore();
+
+    assert_eq!(
+        both.expect("override"),
+        primary,
+        "TRUSTY_ANALYZE_SOCKET wins"
+    );
+    assert_eq!(
+        legacy_only.expect("override"),
+        legacy,
+        "the legacy name is still read when it is the only one set"
+    );
+    assert_eq!(
+        neither.expect("fallback"),
+        crate::audit::default_analyze_socket().expect("resolve the default socket"),
+        "with neither set, the guard dials the derived default"
+    );
+}
+
+/// #212: the renderer dials the socket the guard ensured.
+///
+/// trusty-review reads only `PR_INTELLIGENCE_ANALYZER_SOCKET`. With the operator
+/// setting `TRUSTY_ANALYZE_SOCKET`, tga hands the resolved path to the
+/// `trusty-review report` child under the name it reads; otherwise the guard
+/// would ensure one daemon and the report would query another.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial]
+async fn the_renderer_is_handed_the_trusty_analyze_socket_212() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let stub = stub_binary(
+        dir.path(),
+        "trusty-review-env",
+        "#!/bin/sh\n\
+         case \"$1\" in --version) echo 'trusty-review 0.40.0' ;; \
+         *) echo \"analyzer-socket=$PR_INTELLIGENCE_ANALYZER_SOCKET\" ;; esac\n",
+    );
+    let manifest = dir.path().join("manifest.toml");
+    let pinned = dir.path().join("pinned").join("a.sock");
+
+    let saved = AnalyzeSocketEnv::save();
+    AnalyzeSocketEnv::set(Some(&pinned), None);
+    let run = super::review::run_review_report_with(stub, &manifest, dir.path()).await;
+    saved.restore();
+
+    let run = run.expect("the stub renderer starts");
+    assert!(
+        run.stdout
+            .contains(&format!("analyzer-socket={}", pinned.display())),
+        "the renderer must dial the socket TRUSTY_ANALYZE_SOCKET names: {}",
+        run.stdout
     );
 }
