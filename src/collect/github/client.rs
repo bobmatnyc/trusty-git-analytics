@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::fault::CollectionFault;
-use crate::collect::github::budget::{RunBudget, MAX_PAGES};
+use crate::collect::github::budget::{RunBudget, MAX_PAGES, PULLS_MAX_PAGES};
 use crate::collect::github::fetch_faults::{http_status, FaultWording, FetchFaults};
 use crate::collect::github::repo_resolver::{
     build_http_client_with_token, parse_slug, resolve_github_token,
@@ -234,14 +234,18 @@ impl GitHubClient {
     /// 119 HTTP 404s and every 403 report a clean run (#146).
     /// What: walks every configured repository. A repository whose fetch
     /// fails is recorded and the walk moves on; pages it fetched before the
-    /// error are kept. A rate limit stays a warning log line, as before (#6553
-    /// handles it run-wide). At the end the recorded failures replace
+    /// error are kept. A rate limit is not a fault (#6553 handles it
+    /// run-wide), but one that stops a walk, on any page, records a PARTIAL
+    /// truncation notice for that repository (#200), so the short listing
+    /// reaches [`Self::fetch_notices`]. At the end the recorded failures replace
     /// [`PrProvider::fetch_faults`]: 404s as one counted warning, every other
     /// failure (403, 5xx after retries, transport) as one stage failure.
     /// Test: `crate::collect::pr_pipeline::tests::a_pr_list_404_is_a_counted_warning_not_a_stage_failure`,
     /// `crate::collect::pr_pipeline::tests::a_pr_list_403_fails_the_stage_once`,
     /// `crate::collect::pr_pipeline::tests::a_page_2_404_keeps_page_1_and_is_a_counted_warning`,
-    /// `crate::collect::pr_pipeline::tests::a_page_2_403_keeps_page_1_and_fails_the_stage_once`.
+    /// `crate::collect::pr_pipeline::tests::a_page_2_403_keeps_page_1_and_fails_the_stage_once`,
+    /// `client_tests::a_pulls_listing_rate_limited_mid_walk_keeps_its_rows_and_says_partial`,
+    /// `client_tests::a_page_1_throttle_after_the_breaker_trips_is_reported_partial`.
     ///
     /// # Errors
     ///
@@ -254,6 +258,7 @@ impl GitHubClient {
             let (mut prs, stopped) = self.fetch_pull_requests_for_repo(owner, repo).await;
             // #146: pages fetched before an error are kept and stored, exactly
             // as a full fetch would store them.
+            let prs_kept = prs.len();
             out.append(&mut prs);
             let Some((page, e)) = stopped else { continue };
             warn!(
@@ -265,7 +270,24 @@ impl GitHubClient {
             );
             // #146: count it unless it is a rate limit (#6553), naming the
             // pages lost when earlier ones were kept.
-            if !matches!(e, CollectError::Throttled { .. }) {
+            if matches!(e, CollectError::Throttled { .. }) {
+                // #200: a rate-limited walk leaves a short listing that reads
+                // as complete; record it PARTIAL via the notice path. The
+                // breaker stays tripped, so later repos stop on page 1 and
+                // would otherwise read as having no PRs.
+                let notice = if page > 1 {
+                    format!(
+                        "GitHub pulls listing for {owner}/{repo} stopped at page {page} \
+                         on a rate limit ({prs_kept} items kept); these results are PARTIAL"
+                    )
+                } else {
+                    format!(
+                        "GitHub pulls listing for {owner}/{repo} was not collected: \
+                         rate limited on page 1; these results are PARTIAL"
+                    )
+                };
+                self.budget.shared().note_truncation(notice);
+            } else {
                 let item = if page > 1 {
                     format!(
                         "{owner}/{repo} (pull requests after page {} not collected)",
@@ -551,30 +573,44 @@ impl GitHubClient {
         retry_get(&self.client, url, self.budget.shared()).await
     }
 
-    /// Whether a paginated walk has reached [`MAX_PAGES`] and must stop.
+    /// Whether a paginated walk has reached its page cap and must stop.
     ///
     /// Why (#6084): every listing here looped until GitHub returned a short
     /// page, which trusts the server to eventually end the walk. A cap makes
     /// each walk finite; recording the stop is what keeps the shortened result
     /// from reading downstream exactly like a complete one.
-    /// What: returns `false` below the cap. At the cap, warns, appends a
-    /// truncation notice to the budget, and returns `true` for the caller to
-    /// break on.
-    /// Test: `client_tests::a_listing_that_never_ends_stops_at_the_page_cap_and_says_so`.
+    ///
+    /// Why (#200): the cap is per-endpoint. The bulk pull-request listing
+    /// scales with a repository's entire PR history and can exceed the shared
+    /// [`MAX_PAGES`] bound (10,000 PRs) in real repositories, so it alone gets
+    /// the larger [`PULLS_MAX_PAGES`] bound. The per-PR walks (reviews, commits)
+    /// and the issues/org walks keep [`MAX_PAGES`] — none of them scales with
+    /// repository size, so raising their bound would only let a misbehaving
+    /// listing run longer for no coverage gain.
+    /// What: returns `false` below the cap for this endpoint. At the cap,
+    /// warns, appends a truncation notice to the budget, and returns `true`
+    /// for the caller to break on.
+    /// Test: `client_tests::a_listing_that_never_ends_stops_at_the_page_cap_and_says_so`,
+    /// `client_tests::a_pulls_listing_pages_past_the_shared_cap_and_collects_fully`.
     fn page_cap_reached(&self, endpoint: &str, scope: &str, page: u32) -> bool {
-        if page <= MAX_PAGES {
+        let cap = if endpoint == "pulls" {
+            PULLS_MAX_PAGES
+        } else {
+            MAX_PAGES
+        };
+        if page <= cap {
             return false;
         }
         warn!(
             endpoint,
             scope,
-            pages = MAX_PAGES,
+            pages = cap,
             "GitHub listing hit the page cap; results for this scope are partial"
         );
         self.budget.shared().note_truncation(format!(
-            "GitHub {endpoint} listing for {scope} stopped at the {MAX_PAGES}-page cap \
+            "GitHub {endpoint} listing for {scope} stopped at the {cap}-page cap \
              ({} items); these results are PARTIAL",
-            MAX_PAGES * PAGE_SIZE
+            cap * PAGE_SIZE
         ));
         true
     }

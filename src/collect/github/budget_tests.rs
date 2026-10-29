@@ -146,6 +146,7 @@ fn truncation_notices_are_recorded_in_order() {
 #[test]
 fn the_shipped_bounds_are_the_documented_ones() {
     assert_eq!(MAX_PAGES, 100);
+    assert_eq!(PULLS_MAX_PAGES, 2000);
     assert_eq!(MAX_REFERENCE_LOOKUPS, 500);
     assert_eq!(RATE_LIMIT_SLEEP_BUDGET, Duration::from_secs(120));
     assert_eq!(MAX_RETRY_AFTER, Duration::from_secs(60));
