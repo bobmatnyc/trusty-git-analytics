@@ -1051,9 +1051,13 @@ impl Session {
     /// The check lives on `Session` rather than in the CLI prompt because the
     /// Tauri shell reaches this same code and must not be able to skip it.
     /// What: loads the config, overwrites `openrouter_key` when this session
-    /// carries a resolved credential, then refuses a blank result.
+    /// carries a resolved credential, then refuses a blank result when the
+    /// selected provider is `openrouter` — the only one that reads it (#210).
     /// Test: `super::session_tests::a_supplied_credential_beats_the_configs_own`,
-    /// `super::session_tests::a_blank_configured_key_refuses_before_the_sweep`.
+    /// `super::session_tests::a_blank_configured_key_refuses_before_the_sweep`,
+    /// `super::session_tests::a_bedrock_engagement_runs_without_an_openrouter_key`,
+    /// `super::session_tests::an_openrouter_engagement_with_a_blank_key_is_still_refused`,
+    /// `super::session_tests::a_bedrock_engagement_with_a_key_is_still_accepted`.
     ///
     /// # Errors
     ///
@@ -1064,7 +1068,10 @@ impl Session {
         if let Some(credential) = &self.credential {
             config.openrouter_key = credential.clone();
         }
-        if config.openrouter_key.is_empty() {
+        // #210: only the openrouter provider reads this key; Bedrock and the
+        // rest authenticate elsewhere, so a blank key is refused only there.
+        let operator = |name: &str| std::env::var(name).ok();
+        if !crate::inference::credential_ready(&config, operator) {
             return Err(AuditError::BlankCredential {
                 config: self.config_path.clone(),
                 env: run::ENV_INFERENCE_CREDENTIAL,
@@ -1839,6 +1846,62 @@ trusty-review = "0.0.0-never-published"
             .engagement_config()
             .expect("a supplied key makes the same config usable");
         assert_eq!(config.openrouter_key.expose(), "sk-or-v1-resolved");
+    }
+
+    /// #210's engagement: Bedrock, with all three role models named. The key
+    /// line is a parameter so each test states what it carries.
+    fn models_config(key_line: &str, provider: &str) -> String {
+        format!(
+            "{key_line}\ninstructions = \"Assess the last 52 weeks.\"\n\n[tools]\n\
+             tga = \"0.0.0-never-published\"\ntrusty-search = \"0.0.0-never-published\"\n\
+             trusty-analyze = \"0.0.0-never-published\"\n\
+             trusty-review = \"0.0.0-never-published\"\n\n[models]\n\
+             provider = \"{provider}\"\nreviewer = \"us.anthropic.claude-sonnet-4-6\"\n\
+             verifier = \"us.anthropic.claude-haiku-4-5-20251001-v1:0\"\n\
+             summarizer = \"us.anthropic.claude-haiku-4-5-20251001-v1:0\"\n"
+        )
+    }
+
+    /// #210: Bedrock authenticates through AWS, so an empty or absent
+    /// `openrouter_key` passes the pre-sweep key check. Before the fix the
+    /// empty key was `BlankCredential` and the absent one a parse error.
+    #[test]
+    fn a_bedrock_engagement_runs_without_an_openrouter_key() {
+        for key_line in ["openrouter_key = \"\"", ""] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let config = session_with_config(tmp.path(), &models_config(key_line, "bedrock"))
+                .engagement_config()
+                .unwrap_or_else(|err| panic!("{key_line:?}: {err:?}"));
+            assert!(config.openrouter_key.is_empty());
+            assert_eq!(config.models.provider.as_deref(), Some("bedrock"));
+        }
+    }
+
+    /// #210: naming `openrouter` keeps the #5868 refusal exactly as it was.
+    #[test]
+    fn an_openrouter_engagement_with_a_blank_key_is_still_refused() {
+        for key_line in ["openrouter_key = \"\"", ""] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let text = models_config(key_line, "openrouter");
+            let err = session_with_config(tmp.path(), &text)
+                .engagement_config()
+                .expect_err("openrouter reads this key");
+            assert!(matches!(err, AuditError::BlankCredential { .. }), "{err:?}");
+            let message = err.to_string();
+            assert!(message.contains(run::ENV_INFERENCE_CREDENTIAL), "{message}");
+            assert!(message.contains("openrouter_key"), "{message}");
+        }
+    }
+
+    /// #210: a key that is set does not stop a Bedrock engagement either.
+    #[test]
+    fn a_bedrock_engagement_with_a_key_is_still_accepted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let text = models_config("openrouter_key = \"sk-or-v1-not-a-real-key\"", "bedrock");
+        let config = session_with_config(tmp.path(), &text)
+            .engagement_config()
+            .expect("a set key is never a refusal");
+        assert_eq!(config.openrouter_key.expose(), "sk-or-v1-not-a-real-key");
     }
 
     /// The check lives on `Session`, not in the CLI prompt, so a front end that

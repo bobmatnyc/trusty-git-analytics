@@ -1,0 +1,2 @@
+Fixed
+- `taudit run` and `taudit audit` no longer refuse a blank or absent `openrouter_key` when `[models] provider = "bedrock"`. The key is required, prompted for and passed to the `tga audit` child only when the selected provider is `openrouter`; any other provider authenticates on its own, so operators no longer put a placeholder key in `engagement.toml` ([#210](https://github.com/bobmatnyc/trusty-git-analytics/issues/210)).

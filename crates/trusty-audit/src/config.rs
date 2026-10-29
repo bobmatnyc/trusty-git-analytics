@@ -48,7 +48,7 @@ pub use engagement_identity::{
 /// requires calling [`SecretKey::expose`], which is greppable.
 /// What: a newtype over `String` with hand-written formatting impls.
 /// Test: `super::config_tests::the_key_is_redacted_in_debug_and_display`.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(transparent)]
 pub struct SecretKey(String);
 
@@ -592,6 +592,10 @@ impl ExcerptSettings {
 #[non_exhaustive]
 pub struct EngagementConfig {
     /// Spend-capped OpenRouter key, minted per engagement out of band (#5473).
+    ///
+    /// #210: optional, and absent reads as blank. Only the `openrouter`
+    /// provider uses it; see [`crate::inference::requires_openrouter_key`].
+    #[serde(default)]
     pub openrouter_key: SecretKey,
     /// What this engagement is asked to assess, in prose.
     pub instructions: String,
@@ -1997,12 +2001,15 @@ trusty-review = "0.15.1"
         assert_eq!(display, "<redacted>");
     }
 
+    /// #210: a Bedrock engagement has no key line at all, so an absent key
+    /// loads as blank. An `openrouter` engagement still refuses that blank key
+    /// before the sweep — `Session::engagement_config` owns that check.
     #[test]
-    fn a_missing_key_is_a_parse_error_not_a_blank_default() {
+    fn a_missing_key_loads_as_blank() {
         let text = SAMPLE.replace("openrouter_key = \"sk-or-v1-not-a-real-key\"\n", "");
-        let err = EngagementConfig::from_toml(&text, Path::new("engagement.toml"))
-            .expect_err("openrouter_key is required");
-        assert!(matches!(err, AuditError::Parse { .. }));
+        let cfg = EngagementConfig::from_toml(&text, Path::new("engagement.toml"))
+            .expect("an absent key is not a parse error");
+        assert!(cfg.openrouter_key.is_empty());
     }
 
     #[test]

@@ -144,6 +144,51 @@ pub fn known_host(provider: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether this run's provider authenticates with the engagement's OpenRouter key.
+///
+/// Why: #210 — the key is OpenRouter's credential and nothing else's. Bedrock
+/// authenticates through the operator's AWS credential chain, and a `local`
+/// provider needs no credential at all, so refusing a blank key for those made
+/// an operator write a placeholder key that nothing ever reads.
+/// What: picks the provider by the same layer order [`resolve`] uses — the
+/// operator's environment when it names all four variables, else a non-blank
+/// `[models] provider`, else the built-in [`PROVIDER_OPENROUTER`] — and answers
+/// `true` only for OpenRouter (case-insensitively). Every other name answers
+/// `false`, including one this crate does not know: the engagement carries no
+/// credential for it either way. A half-named operator environment falls
+/// through to the config here; [`resolve`] refuses it before any child runs.
+/// Test: `super::inference_tests::only_the_openrouter_provider_needs_the_key`.
+pub fn requires_openrouter_key<F>(models: &ModelPins, operator: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let from_operator = SELECTION.map(&operator);
+    let provider = if from_operator.iter().all(Option::is_some) {
+        from_operator[0].clone()
+    } else {
+        models.provider.clone()
+    };
+    provider
+        .filter(|name| !name.trim().is_empty())
+        .is_none_or(|name| name.trim().eq_ignore_ascii_case(PROVIDER_OPENROUTER))
+}
+
+/// Whether `config` has the credential its selected provider needs.
+///
+/// Why: #210 — [`resolve`] treats "no credential" as "select nothing". That
+/// holds for OpenRouter, whose blank key is a refusal upstream, but a Bedrock
+/// engagement has no key by design and still needs its `[models]` selection
+/// handed to the child.
+/// What: `true` when the key is set, or when [`requires_openrouter_key`] says
+/// the provider does not use it.
+/// Test: `super::inference_tests::a_bedrock_selection_resolves_without_a_key`.
+pub fn credential_ready<F>(config: &EngagementConfig, operator: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    !config.openrouter_key.is_empty() || !requires_openrouter_key(&config.models, operator)
+}
+
 /// The four variables in the order they are reported, so an error message and
 /// the emitted pairs list read the same way.
 const SELECTION: [&str; 4] = [
@@ -220,7 +265,9 @@ pub fn inference_env<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    selection_env(!config.openrouter_key.is_empty(), &config.models, operator)
+    // #210: a provider that does not use the OpenRouter key still selects.
+    let ready = credential_ready(config, &operator);
+    selection_env(ready, &config.models, operator)
 }
 
 /// [`inference_env`], for a caller that has a key but may have no config.
@@ -487,6 +534,64 @@ trusty-review = "0.15.1"
             .expect("an untouched operator environment resolves")
             .into_iter()
             .collect()
+    }
+
+    /// #210: only OpenRouter reads the engagement key. The provider comes from
+    /// the same layers `resolve` uses, so an operator environment naming all
+    /// four wins over the config, and a blank or absent provider is the
+    /// built-in OpenRouter default.
+    #[test]
+    fn only_the_openrouter_provider_needs_the_key() {
+        let pins = |provider: Option<&str>| ModelPins {
+            provider: provider.map(str::to_owned),
+            ..ModelPins::default()
+        };
+        assert!(requires_openrouter_key(&pins(None), nothing_set));
+        assert!(requires_openrouter_key(&pins(Some("  ")), nothing_set));
+        assert!(requires_openrouter_key(
+            &pins(Some("OpenRouter")),
+            nothing_set
+        ));
+        for other in ["bedrock", "local", "fireworks"] {
+            assert!(
+                !requires_openrouter_key(&pins(Some(other)), nothing_set),
+                "{other}"
+            );
+        }
+
+        let all_four = |provider: &'static str| {
+            move |name: &str| {
+                SELECTION
+                    .contains(&name)
+                    .then(|| if name == ENV_PROVIDER { provider } else { "m" }.to_owned())
+            }
+        };
+        assert!(requires_openrouter_key(
+            &pins(Some("bedrock")),
+            all_four("openrouter")
+        ));
+        assert!(!requires_openrouter_key(&pins(None), all_four("bedrock")));
+        // A half-named environment is not a selection; the config decides.
+        let provider_only = |name: &str| (name == ENV_PROVIDER).then(|| "openrouter".to_owned());
+        assert!(!requires_openrouter_key(
+            &pins(Some("bedrock")),
+            provider_only
+        ));
+    }
+
+    /// #210: a Bedrock engagement with no key still hands its `[models]`
+    /// selection to the child; before, a blank key selected nothing.
+    #[test]
+    fn a_bedrock_selection_resolves_without_a_key() {
+        let config = config_from(
+            "instructions = \"x\"\n[tools]\ntga = \"2.9.4\"\ntrusty-search = \"0.47.0\"\n\
+             trusty-analyze = \"0.9.2\"\ntrusty-review = \"0.15.1\"\n[models]\n\
+             provider = \"bedrock\"\nreviewer = \"r\"\nverifier = \"v\"\nsummarizer = \"s\"\n",
+        );
+        assert!(credential_ready(&config, nothing_set));
+        let env = pairs(&config);
+        assert_eq!(env.get(ENV_PROVIDER).map(String::as_str), Some("bedrock"));
+        assert_eq!(env.get(ENV_REVIEWER_MODEL).map(String::as_str), Some("r"));
     }
 
     /// #6080: the re-render runs where there is no `engagement.toml` at all, so

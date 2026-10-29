@@ -23,6 +23,11 @@
 #
 # `OPENROUTER_API_KEY` in the environment beats this field and skips the
 # prompt, which is what a scripted or CI run uses.
+#
+# Only the `openrouter` provider reads this key. With `[models] provider =
+# "bedrock"` (see "Inference identity" below), leave it blank or delete the
+# line: Bedrock authenticates through your AWS credentials, and the client
+# neither asks for this key nor refuses to run without it.
 openrouter_key = ""
 
 # What this engagement is asked to assess, in prose. Free-form; it steers the
@@ -192,6 +197,10 @@ code_only = true
 #
 # An unknown key in this table is a parse error, deliberately: a typo silently
 # falling back to a default is exactly what naming the models is meant to stop.
+#
+# `provider = "bedrock"` runs on your AWS account: name Bedrock model ids
+# (for example `us.anthropic.claude-sonnet-4-6`) for all three roles, and
+# `openrouter_key` above may stay blank.
 [models]
 provider = "openrouter"
 reviewer = "anthropic/claude-opus-4.8"

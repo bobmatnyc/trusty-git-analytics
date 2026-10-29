@@ -339,8 +339,9 @@ impl Tty for DevTty {
 /// variable, which file, which terminal — is decided once and in the library
 /// where it is readable, rather than accumulating in the binary shim.
 /// What: reads `OPENROUTER_API_KEY`, loads the engagement config when the
-/// command needs more than the environment, opens `/dev/tty` if there is one,
-/// and delegates the decision to [`resolve`]. A key that came from the prompt
+/// command needs more than the environment, opens `/dev/tty` if there is one
+/// and the config's provider reads the key, and delegates the decision to
+/// [`resolve_configured`]. A key that came from the prompt
 /// is written back to the config through [`persist`] before returning, so the
 /// next run does not ask again.
 ///
@@ -353,8 +354,9 @@ impl Tty for DevTty {
 ///
 /// # Errors
 ///
-/// [`AuditError::NoCredentialSource`] when nothing supplies a key and there is
-/// no terminal; the prompt errors from [`resolve`]; and read, parse or write
+/// [`AuditError::NoCredentialSource`] when the provider is `openrouter`,
+/// nothing supplies a key and there is no terminal; the prompt errors from
+/// [`resolve`]; and read, parse or write
 /// failures on the engagement config.
 pub fn resolve_for(command: &Command, config_path: &Path) -> Result<Option<Resolved>, AuditError> {
     let need = command.credential_need();
@@ -374,18 +376,63 @@ pub fn resolve_for(command: &Command, config_path: &Path) -> Result<Option<Resol
         return Ok(None);
     };
 
-    let mut tty = DevTty::open().ok();
-    let resolved = resolve(
+    // #210: the key is asked for only when the selected provider reads it; a
+    // Bedrock engagement must neither prompt nor refuse over a blank key.
+    let key_required = crate::inference::requires_openrouter_key(&config.models, |name: &str| {
+        std::env::var(name).ok()
+    });
+    let mut tty = if key_required {
+        DevTty::open().ok()
+    } else {
+        None
+    };
+    let resolved = resolve_configured(
         env,
-        Some(&config.openrouter_key),
+        &config,
         config_path,
         tty.as_mut().map(|t| t as &mut dyn Tty),
+        key_required,
     )?;
 
-    if resolved.source == CredentialSource::Prompt {
+    if let Some(resolved) = &resolved
+        && resolved.source == CredentialSource::Prompt
+    {
         persist(config_path, &resolved.key)?;
     }
-    Ok(Some(resolved))
+    Ok(resolved)
+}
+
+/// [`resolve`] over a loaded engagement config, honouring its provider.
+///
+/// Why: #210 — `[models] provider = "bedrock"` authenticates through AWS, so a
+/// blank `openrouter_key` there is not missing anything. Refusing it made
+/// operators put a placeholder key in the config.
+/// What: with `key_required`, exactly [`resolve`] and its refusal. Without it,
+/// a set key is still passed through (environment first, then config), and no
+/// key is `Ok(None)` — never a prompt and never
+/// [`AuditError::NoCredentialSource`].
+/// Test: `super::credential_tests::a_bedrock_engagement_needs_no_key`,
+/// `super::credential_tests::an_openrouter_engagement_still_refuses_a_blank_key`.
+///
+/// # Errors
+///
+/// [`resolve`]'s, and only when `key_required`.
+pub fn resolve_configured(
+    env: Option<String>,
+    config: &EngagementConfig,
+    config_path: &Path,
+    tty: Option<&mut dyn Tty>,
+    key_required: bool,
+) -> Result<Option<Resolved>, AuditError> {
+    let configured = Some(&config.openrouter_key);
+    if key_required {
+        return resolve(env, configured, config_path, tty).map(Some);
+    }
+    match resolve(env, configured, config_path, None) {
+        Ok(resolved) => Ok(Some(resolved)),
+        Err(AuditError::NoCredentialSource { .. }) => Ok(None),
+        Err(other) => Err(other),
+    }
 }
 
 /// The environment tier on its own, for commands that use no other source.
@@ -824,6 +871,62 @@ trusty-review = "0.15.1"
         assert!(text.contains(ENV_INFERENCE_CREDENTIAL), "{text}");
         assert!(text.contains("openrouter_key"), "{text}");
         assert!(text.contains("engagement.toml"), "{text}");
+    }
+
+    /// The engagement config of #210's repro: Bedrock, all three role models,
+    /// and no `openrouter_key` line at all.
+    const BEDROCK_CONFIG: &str = r#"
+instructions = "Assess the last 52 weeks."
+
+[tools]
+tga = "2.9.4"
+trusty-search = "0.47.0"
+trusty-analyze = "0.9.2"
+trusty-review = "0.15.1"
+
+[models]
+provider = "bedrock"
+reviewer = "us.anthropic.claude-sonnet-4-6"
+verifier = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+summarizer = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+"#;
+
+    /// #210: Bedrock does not read the OpenRouter key, so a blank or absent
+    /// one neither prompts nor refuses — and a key that IS set still passes
+    /// through, since a run may still need it for something else.
+    #[test]
+    fn a_bedrock_engagement_needs_no_key() {
+        let config = EngagementConfig::from_toml(BEDROCK_CONFIG, config_path()).expect("parses");
+        assert!(config.openrouter_key.is_empty(), "absent reads as blank");
+
+        let resolved = resolve_configured(None, &config, config_path(), None, false)
+            .expect("bedrock has no key to refuse over");
+        assert!(resolved.is_none(), "{resolved:?}");
+
+        let exported = resolve_configured(
+            Some("sk-or-v1-exported".to_owned()),
+            &config,
+            config_path(),
+            None,
+            false,
+        )
+        .expect("a set key is still accepted")
+        .expect("and passed through");
+        assert_eq!(exported.source(), CredentialSource::Environment);
+    }
+
+    /// #210: the openrouter path is unchanged — a blank key with no terminal
+    /// is the same `NoCredentialSource` refusal, naming both sources.
+    #[test]
+    fn an_openrouter_engagement_still_refuses_a_blank_key() {
+        let config = EngagementConfig::from_toml(BLANK_KEY_CONFIG, config_path()).expect("parses");
+        let err = resolve_configured(None, &config, config_path(), None, true)
+            .expect_err("openrouter needs its key");
+        assert!(
+            matches!(err, AuditError::NoCredentialSource { .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("openrouter_key"), "{err}");
     }
 
     /// A terminal that is present but fails is a different problem from an
