@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.5.0] — 2026-10-29
+
+### Breaking
+
+- `github.discover_orgs` is new and defaults to `false`. `tga collect` now fetches PRs only for `github.repo` or the repos in `repositories[]`; `github.org` and `github.orgs` no longer trigger org-wide discovery on their own. A config that relied on discovery must add `discover_orgs: true`. Before, setting `org` discovered and fetched every repo in the org whatever `repositories[]` listed — a 3-repo config scanned about 590 repos (#188).
+- With rules that set `extend_defaults: false`, the weighted-sum tier is now off unless `classification.weighted_sum.enabled: true` is set, the same way the fuzzy tier is off. Before, it ran by default and could classify a commit into any rules category that matched one of its built-in names (`feature`, `bugfix`, `chore`, `integration`, `platform`, `docs`, `refactor`, `merge`). Such commits now go to the LLM tier when it is on, or are stored as `uncategorized`. Set `enabled: true` to keep the old verdicts. Configs with `extend_defaults: true` or no rules file classify exactly as before (#131).
+- The public `WeightedSumConfig.enabled` field changes from `bool` to `Option<bool>`; `None` means the key is absent and follows `extend_defaults`. Read it through `WeightedSumConfig::is_enabled` (#131).
+
+### Fixed
+
+- The GitHub PR client, org discovery and the reviewer pass now authenticate with `GITHUB_TOKEN` when `github.token` is unset or blank. Before, only config validation read the env var, so PR calls went out unauthenticated: 404 on private repos and an exhausted rate limit. A non-blank `github.token` still wins (#188).
+- An unset `${VAR}` placeholder in `github.token` with no `GITHUB_TOKEN` now means no token. Before, it sent an empty `Authorization: Bearer` header and the client reported itself as authenticated (#188).
+- Org discovery skips archived repositories, both in `tga collect` with `github.discover_orgs: true` and in `tga install --org` (#188).
+- The `#[ignore]`d real-binary audit tests probed trusty-search at `http://127.0.0.1:7878/health`, a listener trusty-search no longer serves. They now call `search.health` on the trusty-search socket (`TRUSTY_SEARCH_SOCKET` or the standard path) and pass that socket to `trusty-analyze` as `TRUSTY_SEARCH_SOCKET` ([#208](https://github.com/bobmatnyc/trusty-git-analytics/issues/208)).
+- With `TRUSTY_DATA_DIR` set and no `TRUSTY_SEARCH_SOCKET`, the `tga audit` search preflight now probes `<TRUSTY_DATA_DIR>/trusty-search.sock`, the socket the trusty-search daemon binds there. Before, it probed the shared default path, spawned a daemon that bound elsewhere, refused the audit after the startup timeout and left that daemon running ([#208](https://github.com/bobmatnyc/trusty-git-analytics/issues/208)).
+- Moved to trusty-common 0.58, the release trusty-installer 0.14 requires ([#208](https://github.com/bobmatnyc/trusty-git-analytics/issues/208)).
+
 ## [10.4.0] — 2026-10-26
 
 ### Breaking

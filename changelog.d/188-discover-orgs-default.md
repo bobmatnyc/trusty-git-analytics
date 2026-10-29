@@ -1,2 +1,0 @@
-Breaking
-- `github.discover_orgs` is new and defaults to `false`. `tga collect` now fetches PRs only for `github.repo` or the repos in `repositories[]`; `github.org` and `github.orgs` no longer trigger org-wide discovery on their own. A config that relied on discovery must add `discover_orgs: true`. Before, setting `org` discovered and fetched every repo in the org whatever `repositories[]` listed — a 3-repo config scanned about 590 repos (#188).
