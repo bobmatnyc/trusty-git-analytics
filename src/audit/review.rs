@@ -197,28 +197,34 @@ pub(super) async fn run_review_report_with(
 /// Why: isolated so it carries no async context into the blocking pool, the
 /// same split `SubprocessAnalyzeClient` uses.
 /// What: builds the command, runs it to completion, maps `NotFound` onto the
-/// actionable error, and parses stdout.
-/// Test: exercised through [`run_review_report`].
+/// actionable error, and parses stdout. An analyze-socket override reaches the
+/// child as `PR_INTELLIGENCE_ANALYZER_SOCKET`, the name trusty-review reads.
+/// Test: exercised through [`run_review_report`];
+/// `super::tests::the_renderer_is_handed_the_trusty_analyze_socket_212`.
 fn invoke(binary: &str, manifest: &Path, out_dir: &Path) -> Result<ReviewRun, ReviewRunError> {
     // #6811: the flag vector depends on what this copy of the renderer accepts,
     // and tga resolves it from PATH rather than from a Cargo edge (DOC-67 §5).
     let version = installed_review_version(binary);
-    let output = Command::new(binary)
-        .args(report_args_for(manifest, out_dir, version))
-        .output()
-        .map_err(|source| {
-            if source.kind() == std::io::ErrorKind::NotFound {
-                ReviewRunError::BinaryNotFound {
-                    binary: binary.to_string(),
-                    manifest: manifest.to_path_buf(),
-                }
-            } else {
-                ReviewRunError::Spawn {
-                    binary: binary.to_string(),
-                    source,
-                }
+    let mut command = Command::new(binary);
+    command.args(report_args_for(manifest, out_dir, version));
+    // #212: trusty-review reads only the legacy name, so hand it the socket the
+    // analyze guard resolved; otherwise it would query the default daemon.
+    if let Some(socket) = super::analyze::socket_override_from_env() {
+        command.env(super::analyze::ENV_ANALYZE_SOCKET_LEGACY, socket);
+    }
+    let output = command.output().map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            ReviewRunError::BinaryNotFound {
+                binary: binary.to_string(),
+                manifest: manifest.to_path_buf(),
             }
-        })?;
+        } else {
+            ReviewRunError::Spawn {
+                binary: binary.to_string(),
+                source,
+            }
+        }
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

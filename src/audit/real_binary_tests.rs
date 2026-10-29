@@ -362,7 +362,7 @@ async fn the_real_search_binary_exits_non_zero_for_an_unknown_index() {
     );
 }
 
-/// `start --foreground` is still the CLI the search guard spawns.
+/// `start --foreground --socket` is still the CLI the search guard spawns.
 ///
 /// Why this cannot be checked in-crate: `super::search_daemon::start_args` is a
 /// vector a stub accepts whatever it contains, so every stub test would still
@@ -386,6 +386,11 @@ fn the_real_search_binary_still_takes_start_foreground() {
     assert!(
         help.contains("--foreground"),
         "`--foreground` is what stops the child re-spawning itself:\n{help}"
+    );
+    // #211: `--socket` is what makes the daemon bind the path the guard polls.
+    assert!(
+        help.contains("--socket"),
+        "`--socket` is what binds the daemon where the guard polls:\n{help}"
     );
 }
 

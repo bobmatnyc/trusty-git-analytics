@@ -57,16 +57,20 @@ pub const DEFAULT_ANALYZE_BIN: &str = "trusty-analyze";
 
 /// Environment variable naming the analyze daemon's socket.
 ///
-/// Why: `trusty-review` resolves the same variable for the socket it dials, so
-/// the daemon this starts and the daemon the renderer queries are the same
-/// process by construction — two spellings would let them disagree silently.
+/// Why: #212 — this is the name trusty-analyze itself, taudit
+/// (`crates/trusty-audit/src/grounding/daemons.rs`) and their docs use. tga read
+/// only [`ENV_ANALYZE_SOCKET_LEGACY`], so the documented override was ignored
+/// and an isolated audit dialled, and started a daemon on, the default socket.
+pub const ENV_ANALYZE_SOCKET: &str = "TRUSTY_ANALYZE_SOCKET";
+
+/// The analyze-socket variable tga read before #212, still honoured as a fallback.
 ///
-/// #6287 renamed it from `PR_INTELLIGENCE_ANALYZER_URL`. The value it carries
-/// changed from a URL to a filesystem path, and a variable that still said URL
-/// while holding a path would leave an operator setting `http://…` and getting
-/// a dial failure that names a socket they never configured. Both crates read
-/// the new name in the same change, so there is no window where they disagree.
-pub const ENV_ANALYZE_SOCKET: &str = "PR_INTELLIGENCE_ANALYZER_SOCKET";
+/// Why: `trusty-review` reads this name, and only this name, for the socket its
+/// `--analyze` pass dials, and tga's own refusal told operators to set it. It is
+/// read when [`ENV_ANALYZE_SOCKET`] is unset, and tga hands the resolved
+/// override to the `trusty-review report` child under this name, so the daemon
+/// the guard ensured and the daemon the renderer queries stay the same process.
+pub const ENV_ANALYZE_SOCKET_LEGACY: &str = "PR_INTELLIGENCE_ANALYZER_SOCKET";
 
 /// Default analyze daemon socket, as the daemon itself resolves it.
 ///
@@ -101,7 +105,7 @@ pub fn default_analyze_socket() -> anyhow::Result<PathBuf> {
      than as an outage. Start the stack first:\n\n    trusty-search start\n    {binary} serve\n\n\
      `trusty-analyze serve` exits immediately when trusty-search is unreachable, so trusty-search \
      goes first. Override the binary with {ENV_ANALYZE_BIN} and the socket with \
-     {ENV_ANALYZE_SOCKET}."
+     {ENV_ANALYZE_SOCKET}, which `tga` passes to the daemon it starts."
 )]
 #[non_exhaustive]
 pub struct AnalyzeDaemonUnavailable {
@@ -138,11 +142,12 @@ pub struct AnalyzeGuard {
 impl AnalyzeGuard {
     /// The guard this process runs with, resolved from the environment.
     ///
-    /// Why/What: reads [`ENV_ANALYZE_SOCKET`] and [`ENV_ANALYZE_BIN`], applying
-    /// [`socket_from_override`] and [`binary_from_override`]. Reading the two
-    /// variables is all this does; the rules live in those pure functions so the
-    /// tests never call `std::env::set_var`, which is `unsafe` in edition 2024
-    /// and unsound under parallel tests (#5308 review).
+    /// Why/What: reads [`ENV_ANALYZE_SOCKET`], then [`ENV_ANALYZE_SOCKET_LEGACY`]
+    /// (#212), and [`ENV_ANALYZE_BIN`], applying [`pick_socket_override`],
+    /// [`socket_from_override`] and [`binary_from_override`]. Reading the
+    /// variables is all this does; the rules live in those pure functions so
+    /// most tests never call `std::env::set_var`, which is `unsafe` in edition
+    /// 2024 and unsound under parallel tests (#5308 review).
     ///
     /// # Errors
     ///
@@ -151,10 +156,12 @@ impl AnalyzeGuard {
     /// literal; a derived path can fail, and guessing one would send the audit
     /// at a socket the daemon never binds.
     ///
-    /// Test: `super::tests::analyze_resolution_prefers_the_env_overrides`.
+    /// Test: `super::tests::{analyze_resolution_prefers_the_env_overrides,
+    /// trusty_analyze_socket_sets_the_analyze_socket_212,
+    /// the_analyze_socket_prefers_trusty_analyze_socket_then_the_legacy_name_212}`.
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            socket: socket_from_override(std::env::var(ENV_ANALYZE_SOCKET).ok().as_deref())?,
+            socket: socket_from_override(socket_override_from_env().as_deref())?,
             binary: binary_from_override(std::env::var(ENV_ANALYZE_BIN).ok().as_deref()),
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -171,6 +178,31 @@ pub(super) fn binary_from_override(override_value: Option<&str>) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_ANALYZE_BIN)
         .to_string()
+}
+
+/// The analyze-socket override this process was given, if any (#212).
+///
+/// Why/What: [`pick_socket_override`] over the two variables. `None` means the
+/// derived default applies, which every trusty crate computes for itself.
+/// Test: `super::tests::the_analyze_socket_prefers_trusty_analyze_socket_then_the_legacy_name_212`.
+pub(super) fn socket_override_from_env() -> Option<String> {
+    let primary = std::env::var(ENV_ANALYZE_SOCKET).ok();
+    let legacy = std::env::var(ENV_ANALYZE_SOCKET_LEGACY).ok();
+    pick_socket_override(primary.as_deref(), legacy.as_deref()).map(str::to_string)
+}
+
+/// The precedence rule between the two socket variables (#212).
+///
+/// What: the first non-empty value of [`ENV_ANALYZE_SOCKET`] then
+/// [`ENV_ANALYZE_SOCKET_LEGACY`]; `None` when neither carries one.
+/// Test: `super::tests::analyze_socket_override_precedence_212`.
+pub(super) fn pick_socket_override<'a>(
+    primary: Option<&'a str>,
+    legacy: Option<&'a str>,
+) -> Option<&'a str> {
+    primary
+        .filter(|s| !s.is_empty())
+        .or_else(|| legacy.filter(|s| !s.is_empty()))
 }
 
 /// The socket resolution rule: an override wins unless it is empty.
@@ -245,14 +277,21 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Why: this list IS the tga→trusty-analyze contract. Building it in a pure
 /// function is what lets a test assert its contents without spawning anything —
 /// the same reason [`super::review::report_args`] exists on the renderer side.
-/// What: `serve`, with no socket argument. #6287: the daemon derives its socket
-/// path from the data directory, and passing `--socket` would start a daemon on
-/// a path the renderer does not dial. An operator who moved the socket with
-/// [`ENV_ANALYZE_SOCKET`] is pointing at a daemon they started themselves; this
-/// guard's spawn only ever produces one at the default path.
-/// Test: `super::tests::the_spawn_arguments_are_a_bare_serve`.
-pub(super) fn serve_args() -> Vec<String> {
-    vec!["serve".to_string()]
+/// What: `serve --socket <socket>`, where `socket` is the path the guard polls.
+/// #212: a bare `serve` binds the derived default, so with
+/// [`ENV_ANALYZE_SOCKET`] set the guard polled a socket its own daemon never
+/// bound. With no override, `socket` IS the derived default, so the flag
+/// changes nothing; the renderer is handed the same path either way (see
+/// [`ENV_ANALYZE_SOCKET_LEGACY`]).
+/// Test: `super::tests::{the_spawn_arguments_bind_the_polled_socket,
+/// the_analyze_guard_spawns_the_daemon_on_the_socket_it_polls_212}`.
+pub(super) fn serve_args(socket: &str) -> Vec<String> {
+    // #212: bind where the guard polls, not at the derived default.
+    vec![
+        "serve".to_string(),
+        "--socket".to_string(),
+        socket.to_string(),
+    ]
 }
 
 /// Ensure the analyze daemon is up before the sweep starts.
@@ -284,9 +323,10 @@ pub async fn ensure_analyze_daemon() -> Result<(), AnalyzeDaemonUnavailable> {
 /// path against a stub executable on an ephemeral port, without touching the
 /// process environment or leaving a daemon behind.
 /// What: calls `analyze.health` on the socket; on a healthy answer, returns
-/// without spawning anything. On a miss, spawns `<binary> serve` detached and
-/// polls until it answers healthy. Neither failure is downgraded — a spawn that
-/// fails and a daemon that never answers both return `Err`.
+/// without spawning anything. On a miss, spawns `<binary> serve --socket
+/// <socket>` detached and polls until it answers healthy. Neither failure is
+/// downgraded — a spawn that fails and a daemon that never answers both return
+/// `Err`.
 ///
 /// A spawn that succeeds proves only that a process started. `trusty-analyze
 /// serve` exits 1 when trusty-search is unreachable, so the readiness poll — not
@@ -328,12 +368,18 @@ pub async fn ensure_analyze_daemon_with(
         cause,
     };
 
+    // #212: `--socket` takes a `&str`; a lossy conversion would bind a path
+    // other than the one polled, so a non-UTF-8 socket is refused instead.
+    let socket = guard
+        .socket
+        .to_str()
+        .ok_or_else(|| refuse("the socket path is not valid UTF-8".to_string()))?;
     eprintln!(
-        "[tga audit] trusty-analyze is not answering on {}; starting `{} serve`…",
-        guard.socket.display(),
+        "[tga audit] trusty-analyze is not answering on {socket}; starting `{} serve --socket \
+         {socket}`…",
         guard.binary
     );
-    let args = serve_args();
+    let args = serve_args(socket);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     spawn_detached(&guard.binary, &args).map_err(|e| refuse(e.to_string()))?;
 

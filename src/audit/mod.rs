@@ -42,7 +42,7 @@ mod real_binary_tests;
 pub use analyze::{
     default_analyze_socket, ensure_analyze_daemon, ensure_analyze_daemon_with,
     AnalyzeDaemonUnavailable, AnalyzeGuard, DEFAULT_ANALYZE_BIN, ENV_ANALYZE_BIN,
-    ENV_ANALYZE_SOCKET,
+    ENV_ANALYZE_SOCKET, ENV_ANALYZE_SOCKET_LEGACY,
 };
 /// The excerpt cap, visible to `report::dd_manifest_tests` so its
 /// boundary-straddle tests position a credential against the real value instead

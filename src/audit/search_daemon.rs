@@ -239,10 +239,25 @@ async fn search_is_healthy(socket: &Path, timeout: Duration) -> bool {
 /// second fork would only cost the guard its view of the process it started.
 /// Building the vector in a pure function is what lets a test assert its contents
 /// without spawning anything.
-/// What: `start --foreground`.
-/// Test: `super::tests::the_search_spawn_arguments_are_start_in_the_foreground`.
-pub(super) fn start_args() -> Vec<String> {
-    vec!["start".to_string(), "--foreground".to_string()]
+///
+/// `--socket` is the other half (#211). trusty-search binds
+/// `<TRUSTY_DATA_DIR>/trusty-search.sock` unless told otherwise and never reads
+/// [`ENV_SEARCH_SOCKET`], so a guard polling an overridden socket waited out
+/// [`SEARCH_STARTUP_TIMEOUT`] on a path its own daemon never bound. Passing the
+/// polled path is what trusty-search's own auto-start does
+/// (`commands/daemon_guard.rs`, trusty-tools #9214).
+/// What: `start --foreground --socket <socket>`, where `socket` is the path the
+/// guard polls.
+/// Test: `super::tests::{the_search_spawn_arguments_are_start_in_the_foreground,
+/// the_search_guard_spawns_the_daemon_on_the_socket_it_polls_211}`.
+pub(super) fn start_args(socket: &str) -> Vec<String> {
+    // #211: bind where the guard polls, not at the data-dir default.
+    vec![
+        "start".to_string(),
+        "--foreground".to_string(),
+        "--socket".to_string(),
+        socket.to_string(),
+    ]
 }
 
 /// Ensure the trusty-search daemon is up before anything else in the audit.
@@ -267,13 +282,13 @@ pub async fn ensure_search_daemon() -> Result<(), SearchDaemonUnavailable> {
 /// process environment or leaving a daemon behind.
 /// What: calls `search.health` on the guard's socket; on a result frame,
 /// returns without spawning anything. On anything else, spawns
-/// `<binary> start --foreground` detached and polls until it answers. Neither
+/// `<binary> start --foreground --socket <socket>` detached and polls that same
+/// socket until it answers. Neither
 /// failure is downgraded — a spawn that fails and a daemon that never answers
 /// both return `Err`.
 ///
-/// The socket is resolved once, before the spawn, and the poll reuses it, so a
-/// daemon this guard starts is found on the same path the daemon's own clients
-/// derive.
+/// The socket is resolved once, before the spawn; the spawn binds it and the
+/// poll reuses it, so the daemon this guard starts listens where it looks (#211).
 ///
 /// # Errors
 ///
@@ -282,7 +297,8 @@ pub async fn ensure_search_daemon() -> Result<(), SearchDaemonUnavailable> {
 /// Test: `super::tests::{a_reachable_search_daemon_is_not_restarted,
 /// an_unspawnable_search_binary_refuses_the_audit,
 /// a_search_daemon_that_never_comes_up_refuses_the_audit,
-/// the_search_guard_recovers_a_stale_degraded_analyze_daemon}`.
+/// the_search_guard_recovers_a_stale_degraded_analyze_daemon,
+/// the_search_guard_spawns_the_daemon_on_the_socket_it_polls_211}`.
 pub async fn ensure_search_daemon_with(guard: &SearchGuard) -> Result<(), SearchDaemonUnavailable> {
     if search_is_healthy(&guard.socket, PROBE_TIMEOUT).await {
         return Ok(());
@@ -294,12 +310,18 @@ pub async fn ensure_search_daemon_with(guard: &SearchGuard) -> Result<(), Search
         cause,
     };
 
+    // #211: `--socket` takes a `&str`; a lossy conversion would bind a path
+    // other than the one polled, so a non-UTF-8 socket is refused instead.
+    let socket = guard
+        .socket
+        .to_str()
+        .ok_or_else(|| refuse("the socket path is not valid UTF-8".to_string()))?;
     eprintln!(
-        "[tga audit] trusty-search is not serving {}; starting `{} start --foreground`…",
-        guard.socket.display(),
+        "[tga audit] trusty-search is not serving {socket}; starting `{} start --foreground \
+         --socket {socket}`…",
         guard.binary
     );
-    let args = start_args();
+    let args = start_args(socket);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     spawn_detached(&guard.binary, &args).map_err(|e| refuse(e.to_string()))?;
 
