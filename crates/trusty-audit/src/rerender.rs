@@ -200,8 +200,10 @@ impl RerenderReport {
 /// mutating it.
 ///
 /// # Preconditions
-/// `key` is non-blank ([`crate::session::Session`] refuses a blank one before
-/// calling), and `inference` is either empty or names all four
+/// `key` is non-blank whenever the selected provider is `openrouter`
+/// ([`crate::session::Session`] refuses a blank one there before calling). A
+/// blank key is never handed to the renderer (#220), and `inference` is either
+/// empty or names all four
 /// `TRUSTY_REVIEW_*` variables — never a subset.
 ///
 /// # Postconditions
@@ -786,13 +788,16 @@ fn spawn_review(
         .arg("--synthesize")
         .arg("--out")
         .arg(output)
-        // #5671: the key alone never reaches OpenRouter — trusty-review
-        // defaults to Bedrock unless the provider and all three role models are
-        // named too. Resolved by the caller, all four or none.
-        .env(ENV_INFERENCE_CREDENTIAL, key.expose())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // #5671: the key alone never reaches OpenRouter — trusty-review defaults to
+    // Bedrock unless the provider and all three role models are named too.
+    // Resolved by the caller, all four or none. #220: a provider that does not
+    // read the key renders with a blank one, which is not set on the child.
+    if !key.is_empty() {
+        command.env(ENV_INFERENCE_CREDENTIAL, key.expose());
+    }
     for (name, value) in inference {
         command.env(name, value);
     }
