@@ -2793,6 +2793,59 @@ async fn the_analyze_guard_spawns_the_daemon_on_the_socket_it_polls_212() {
     );
 }
 
+/// A socket path in `dir` whose file name is not valid UTF-8.
+#[cfg(unix)]
+fn non_utf8_socket(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    dir.join(std::ffi::OsString::from_vec(b"\xff.sock".to_vec()))
+}
+
+/// #211: the search guard refuses a non-UTF-8 socket before it spawns.
+///
+/// `--socket` takes a `&str`, so a lossy conversion would start the daemon on a
+/// path other than the one the guard polls. The refusal names the problem and
+/// the argv recorder stays empty.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_search_guard_refuses_a_non_utf8_socket_without_spawning_211() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let log = dir.path().join("argv.log");
+    let stub = argv_recording_stub(dir.path(), "trusty-search-argv", &log);
+    let guard = search_guard_on(non_utf8_socket(dir.path()), &stub);
+
+    let err = ensure_search_daemon_with(&guard)
+        .await
+        .expect_err("a non-UTF-8 socket must be refused");
+
+    let msg = err.to_string();
+    assert!(msg.contains("not valid UTF-8"), "unnamed refusal: {msg}");
+    assert!(
+        settled_spawn_log(&log).await.is_empty(),
+        "nothing may be spawned for a socket the daemon cannot be told"
+    );
+}
+
+/// #212: the analyze guard refuses a non-UTF-8 socket before it spawns.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_analyze_guard_refuses_a_non_utf8_socket_without_spawning_212() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let log = dir.path().join("argv.log");
+    let stub = argv_recording_stub(dir.path(), "trusty-analyze-argv", &log);
+    let guard = guard_on(non_utf8_socket(dir.path()), &stub);
+
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a non-UTF-8 socket must be refused");
+
+    let msg = err.to_string();
+    assert!(msg.contains("not valid UTF-8"), "unnamed refusal: {msg}");
+    assert!(
+        settled_spawn_log(&log).await.is_empty(),
+        "nothing may be spawned for a socket the daemon cannot be told"
+    );
+}
+
 /// The two analyze-socket variables, saved before a test writes them and put
 /// back afterwards. Literal names, so the test reads the documented contract
 /// rather than whatever a constant says.
@@ -2830,14 +2883,22 @@ impl AnalyzeSocketEnv {
         }
     }
 
+    /// Puts the saved values back; dropping the guard does the same, so a
+    /// panicking test cannot leak env state.
     fn restore(self) {
+        drop(self);
+    }
+}
+
+impl Drop for AnalyzeSocketEnv {
+    fn drop(&mut self) {
         // SAFETY: as `set`.
         unsafe {
-            match self.primary {
+            match self.primary.take() {
                 Some(v) => std::env::set_var(Self::PRIMARY, v),
                 None => std::env::remove_var(Self::PRIMARY),
             }
-            match self.legacy {
+            match self.legacy.take() {
                 Some(v) => std::env::set_var(Self::LEGACY, v),
                 None => std::env::remove_var(Self::LEGACY),
             }

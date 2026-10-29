@@ -298,7 +298,8 @@ pub async fn ensure_search_daemon() -> Result<(), SearchDaemonUnavailable> {
 /// an_unspawnable_search_binary_refuses_the_audit,
 /// a_search_daemon_that_never_comes_up_refuses_the_audit,
 /// the_search_guard_recovers_a_stale_degraded_analyze_daemon,
-/// the_search_guard_spawns_the_daemon_on_the_socket_it_polls_211}`.
+/// the_search_guard_spawns_the_daemon_on_the_socket_it_polls_211,
+/// the_search_guard_refuses_a_non_utf8_socket_without_spawning_211}`.
 pub async fn ensure_search_daemon_with(guard: &SearchGuard) -> Result<(), SearchDaemonUnavailable> {
     if search_is_healthy(&guard.socket, PROBE_TIMEOUT).await {
         return Ok(());

@@ -353,7 +353,8 @@ pub async fn ensure_analyze_daemon() -> Result<(), AnalyzeDaemonUnavailable> {
 /// an_unspawnable_analyze_binary_refuses_the_audit,
 /// an_analyze_daemon_that_never_comes_up_refuses_the_audit,
 /// a_degraded_analyze_daemon_refuses_the_audit,
-/// two_concurrent_guards_both_resolve_against_one_slow_daemon}`, and
+/// two_concurrent_guards_both_resolve_against_one_slow_daemon,
+/// the_analyze_guard_refuses_a_non_utf8_socket_without_spawning_212}`, and
 /// `super::real_binary_tests` end to end.
 pub async fn ensure_analyze_daemon_with(
     guard: &AnalyzeGuard,
