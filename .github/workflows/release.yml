@@ -299,7 +299,7 @@ jobs:
           tool: cargo-zigbuild
 
       - name: Install Rust (MSRV 1.94)
-        uses: dtolnay/rust-toolchain@1.94
+        uses: dtolnay/rust-toolchain@1.120
         with:
           targets: ${{ matrix.target }}
 
