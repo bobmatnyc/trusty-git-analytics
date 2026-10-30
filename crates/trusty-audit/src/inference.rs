@@ -162,8 +162,35 @@ pub fn requires_openrouter_key<F>(models: &ModelPins, operator: F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
+    requires_openrouter_key_declared(None, models, operator)
+}
+
+/// [`requires_openrouter_key`] for a re-render, whose manifest may name the
+/// provider itself.
+///
+/// Why: #221 — `trusty-review` resolves the provider from the manifest's
+/// `[inference]` table ahead of the operator's environment and the host
+/// config, so a re-render that asked only those two refused a Bedrock package
+/// for a key it never reads, and let an OpenRouter package through with none.
+/// What: a non-blank `declared` provider decides; a blank or absent one falls
+/// through to [`requires_openrouter_key`]'s layers unchanged.
+/// Test: `super::inference_tests::a_declared_provider_outranks_every_other_layer`.
+pub fn requires_openrouter_key_declared<F>(
+    declared: Option<&str>,
+    models: &ModelPins,
+    operator: F,
+) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    // #221: the manifest's provider is the top layer, as trusty-review ranks it.
+    let declared = declared
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned);
     let from_operator = SELECTION.map(&operator);
-    let provider = if from_operator.iter().all(Option::is_some) {
+    let provider = if declared.is_some() {
+        declared
+    } else if from_operator.iter().all(Option::is_some) {
         from_operator[0].clone()
     } else {
         models.provider.clone()
@@ -576,6 +603,46 @@ trusty-review = "0.15.1"
         assert!(!requires_openrouter_key(
             &pins(Some("bedrock")),
             provider_only
+        ));
+    }
+
+    /// #221: a manifest's non-blank provider outranks the operator's
+    /// environment and the config; a blank one falls through to them.
+    #[test]
+    fn a_declared_provider_outranks_every_other_layer() {
+        let pins = |provider: &str| ModelPins {
+            provider: Some(provider.to_owned()),
+            ..ModelPins::default()
+        };
+        let all_four = |name: &str| {
+            SELECTION.contains(&name).then(|| {
+                if name == ENV_PROVIDER {
+                    "openrouter"
+                } else {
+                    "m"
+                }
+                .to_owned()
+            })
+        };
+        assert!(!requires_openrouter_key_declared(
+            Some("bedrock"),
+            &pins("openrouter"),
+            all_four
+        ));
+        assert!(requires_openrouter_key_declared(
+            Some("openrouter"),
+            &pins("bedrock"),
+            nothing_set
+        ));
+        assert!(!requires_openrouter_key_declared(
+            Some(" "),
+            &pins("bedrock"),
+            nothing_set
+        ));
+        assert!(requires_openrouter_key_declared(
+            None,
+            &pins("bedrock"),
+            all_four
         ));
     }
 

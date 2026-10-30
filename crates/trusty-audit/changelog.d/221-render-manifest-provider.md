@@ -1,0 +1,2 @@
+Fixed
+- `taudit render` decides whether an OpenRouter key is required from the provider the delivered manifest's `[inference]` table names, ahead of the operator's `TRUSTY_REVIEW_*` variables and the engagement config's `[models]` table, which is the order `trusty-review` resolves in. A Bedrock package re-renders with no key and no engagement config; a package declaring `openrouter` with no key is refused up front with the error naming `OPENROUTER_API_KEY`, even when the local config says `bedrock` ([#221](https://github.com/bobmatnyc/trusty-git-analytics/issues/221)).
