@@ -1,0 +1,65 @@
+# Dependabot version updates: weekly, minor/patch grouped, majors ignored.
+# Majors are handled by hand. Only manifests that are built, shipped or
+# deployed are listed.
+version: 2
+updates:
+  # Cargo workspace root. Covers tga, crates/trusty-audit and
+  # crates/trusty-audit/ui/src-tauri (all workspace members, one Cargo.lock).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # website/: SvelteKit site deployed to Vercel (adapter-vercel).
+  - package-ecosystem: npm
+    directory: "/website"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      website-npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # trusty-audit UI: Svelte frontend bundled into the Tauri desktop app.
+  - package-ecosystem: npm
+    directory: "/crates/trusty-audit/ui"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      audit-ui-npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Actions used by .github/workflows/*.yml.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
