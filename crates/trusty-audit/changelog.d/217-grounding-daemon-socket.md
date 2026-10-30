@@ -1,0 +1,2 @@
+Fixed
+- Grounding now starts `trusty-search` with `start --foreground --socket <path>` and `trusty-analyze` with `serve --socket <path>`, where `<path>` is the socket it then polls. With `TRUSTY_SEARCH_SOCKET` or `TRUSTY_ANALYZE_SOCKET` set, the daemon it started bound its default socket instead, so the readiness poll timed out and the daemon was left running ([#217](https://github.com/bobmatnyc/trusty-git-analytics/issues/217)).

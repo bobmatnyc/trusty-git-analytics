@@ -302,6 +302,92 @@ async fn a_reachable_search_daemon_is_not_restarted() {
         .expect("a live daemon needs no binary");
 }
 
+/// A daemon binary that writes its argv, one per line, to `record` and exits.
+///
+/// The write goes to a temp name and is renamed, so a reader never sees a
+/// half-written record from the detached child.
+#[cfg(unix)]
+fn argv_recording_binary(at: &Path, name: &str, record: &Path) -> PathBuf {
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{rec}.tmp' && mv '{rec}.tmp' '{rec}'\nexit 1\n",
+        rec = record.display()
+    );
+    stub_binary(at, name, &script)
+}
+
+/// The argv the detached child recorded. Polls, because `spawn_detached`
+/// returns before the child runs.
+#[cfg(unix)]
+async fn recorded_argv(record: &Path) -> Vec<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(record) {
+            return text.lines().map(str::to_owned).collect();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "the stub daemon never recorded its argv at {}",
+        record.display()
+    );
+}
+
+/// #217: the spawned trusty-search binds the socket the readiness wait polls.
+/// Without `--socket` it bound its data-dir default, so with
+/// `TRUSTY_SEARCH_SOCKET` set the wait timed out on a path nothing bound.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_search_spawn_binds_the_socket_it_polls_217() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let record = tmp.path().join("search-argv");
+    let polled = dead_search_socket(tmp.path());
+    let t = tools(
+        argv_recording_binary(tmp.path(), "trusty-search", &record),
+        polled.clone(),
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        dead_socket(tmp.path()),
+    );
+    let _ = daemons::ensure_search(&t).await;
+    let argv = recorded_argv(&record).await;
+    assert_eq!(
+        argv,
+        [
+            "start".to_owned(),
+            "--foreground".to_owned(),
+            "--socket".to_owned(),
+            polled.display().to_string(),
+        ],
+        "trusty-search must be started on the socket ensure_search polls"
+    );
+}
+
+/// #217: the spawned trusty-analyze binds the socket the readiness wait polls
+/// and `hotspots::fetch` dials, not its data-dir default.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_analyze_spawn_binds_the_socket_it_polls_217() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let record = tmp.path().join("analyze-argv");
+    let polled = dead_socket(tmp.path());
+    let t = tools(
+        PathBuf::from("/nonexistent/trusty-search"),
+        dead_search_socket(tmp.path()),
+        argv_recording_binary(tmp.path(), "trusty-analyze", &record),
+        polled.clone(),
+    );
+    let _ = daemons::ensure_analyze(&t).await;
+    let argv = recorded_argv(&record).await;
+    assert_eq!(
+        argv,
+        [
+            "serve".to_owned(),
+            "--socket".to_owned(),
+            polled.display().to_string(),
+        ],
+        "trusty-analyze must be started on the socket ensure_analyze polls"
+    );
+}
+
 /// trusty-search answers but refuses the checkout. The refusal is quoted, so a
 /// recipient learns which remedy applies instead of seeing an empty section.
 #[cfg(unix)]
