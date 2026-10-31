@@ -1,0 +1,2 @@
+Fixed
+- Grounding's daemon health probe now has its own 3 s request budget instead of the 200 ms connect budget. trusty-search 0.62.1 answers `search.health` in about 1 s, so a running daemon was reported as `serving but did not report healthy within 60s` and the evidence tier degraded; the pre-spawn probe also read it as absent and started a second daemon. The readiness wait keeps its bound: a daemon that never answers is still reported unhealthy within it ([#230](https://github.com/bobmatnyc/trusty-git-analytics/issues/230)).
