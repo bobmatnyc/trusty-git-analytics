@@ -61,5 +61,7 @@ updates:
           - minor
           - patch
     ignore:
+      # Its refs are Rust toolchain versions (e.g. the 1.94 MSRV pin), not action versions.
+      - dependency-name: "dtolnay/rust-toolchain"
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
