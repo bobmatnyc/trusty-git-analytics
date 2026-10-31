@@ -97,8 +97,21 @@ pub const BIND_TIMEOUT: Duration = Duration::from_secs(3);
 ///
 /// A reachable socket answers in microseconds and an absent one is refused
 /// immediately. This bounds the third case — a daemon that accepts and then
-/// stops reading — rather than the two that matter.
+/// stops reading — rather than the two that matter. It bounds the CONNECT only;
+/// a health call gets [`HEALTH_TIMEOUT`].
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// How long one health request — connect, send, and the daemon's reply — may
+/// take.
+///
+/// Why 3 s: trusty-search 0.62.1 answers `search.health` in about 1.01 s every
+/// time, so 3 s is roughly three times the observed reply. It is the same value
+/// `tga::audit`'s search and analyze guards use for their `PROBE_TIMEOUT`, and
+/// it is small against [`STARTUP_TIMEOUT`], so the readiness wait still makes
+/// many attempts and a daemon that never replies costs the pre-spawn probe at
+/// most 3 s.
+// #230: the health call used CONNECT_TIMEOUT (200 ms), so a ~1 s reply never counted as healthy.
+pub(super) const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The trusty-search daemon's socket, as every client of it resolves one.
 ///
@@ -252,11 +265,13 @@ fn socket_arg(socket: &Path) -> Result<&str, String> {
 /// Test: `super::grounding_tests::{a_search_daemon_that_will_not_start_is_a_named_gap,
 /// a_reachable_search_daemon_is_not_restarted,
 /// a_daemon_that_binds_but_never_answers_is_a_named_gap,
-/// the_search_spawn_binds_the_socket_it_polls_217}`.
+/// the_search_spawn_binds_the_socket_it_polls_217,
+/// a_search_daemon_slow_to_answer_health_is_not_restarted_230,
+/// a_search_daemon_that_never_answers_health_is_unhealthy_within_the_bound_230}`.
 pub async fn ensure_search(tools: &Tools) -> Result<(), String> {
     let socket = &tools.search_socket;
     let at = socket.display().to_string();
-    if search_is_healthy(socket, CONNECT_TIMEOUT).await {
+    if search_is_healthy(socket, HEALTH_TIMEOUT).await {
         return Ok(());
     }
     let binary = tools.search.display().to_string();
@@ -264,7 +279,7 @@ pub async fn ensure_search(tools: &Tools) -> Result<(), String> {
     let arg = socket_arg(socket).map_err(|cause| refusal("trusty-search", &at, &binary, &cause))?;
     spawn_detached(&tools.search, &search_start_args(arg))
         .map_err(|e| refusal("trusty-search", &at, &binary, &e.to_string()))?;
-    wait_socket_ready(socket, tools, || search_is_healthy(socket, CONNECT_TIMEOUT))
+    wait_socket_ready(socket, tools, || search_is_healthy(socket, HEALTH_TIMEOUT))
         .await
         .map_err(|cause| refusal("trusty-search", &at, &binary, &cause))
 }
@@ -281,10 +296,11 @@ pub async fn ensure_search(tools: &Tools) -> Result<(), String> {
 /// since #6285.
 ///
 /// Test: `super::grounding_tests::{an_analyze_daemon_that_will_not_start_is_a_named_gap,
-/// the_analyze_spawn_binds_the_socket_it_polls_217}`.
+/// the_analyze_spawn_binds_the_socket_it_polls_217,
+/// an_analyze_daemon_slow_to_answer_health_is_not_restarted_230}`.
 pub async fn ensure_analyze(tools: &Tools) -> Result<(), String> {
     let at = tools.analyze_socket.display().to_string();
-    if analyze_is_healthy(&tools.analyze_socket, CONNECT_TIMEOUT).await {
+    if analyze_is_healthy(&tools.analyze_socket, HEALTH_TIMEOUT).await {
         return Ok(());
     }
     let binary = tools.analyze.display().to_string();
@@ -294,7 +310,7 @@ pub async fn ensure_analyze(tools: &Tools) -> Result<(), String> {
     spawn_detached(&tools.analyze, &analyze_serve_args(arg))
         .map_err(|e| refusal("trusty-analyze", &at, &binary, &e.to_string()))?;
     wait_socket_ready(&tools.analyze_socket, tools, || {
-        analyze_is_healthy(&tools.analyze_socket, CONNECT_TIMEOUT)
+        analyze_is_healthy(&tools.analyze_socket, HEALTH_TIMEOUT)
     })
     .await
     .map_err(|cause| refusal("trusty-analyze", &at, &binary, &cause))
@@ -325,7 +341,8 @@ pub async fn ensure_analyze(tools: &Tools) -> Result<(), String> {
 ///
 /// Test: `super::grounding_tests::{a_search_daemon_that_will_not_start_is_a_named_gap,
 /// a_daemon_that_binds_but_never_answers_is_a_named_gap,
-/// an_analyze_daemon_that_will_not_start_is_a_named_gap}`.
+/// an_analyze_daemon_that_will_not_start_is_a_named_gap,
+/// a_search_daemon_that_never_answers_health_is_unhealthy_within_the_bound_230}`.
 async fn wait_socket_ready<F, Fut>(socket: &Path, tools: &Tools, healthy: F) -> Result<(), String>
 where
     F: Fn() -> Fut,
@@ -333,7 +350,7 @@ where
 {
     let bound_by = Instant::now() + tools.bind_timeout;
     loop {
-        if healthy().await {
+        if within(bound_by, healthy()).await {
             return Ok(());
         }
         if trusty_common::uds::socket_is_serving(socket, CONNECT_TIMEOUT).await {
@@ -350,7 +367,7 @@ where
     let ready_by = Instant::now() + tools.startup_timeout;
     loop {
         tokio::time::sleep(tools.poll_interval).await;
-        if healthy().await {
+        if within(ready_by, healthy()).await {
             return Ok(());
         }
         if Instant::now() >= ready_by {
@@ -360,6 +377,17 @@ where
             ));
         }
     }
+}
+
+/// Run one health probe, cut short at `deadline`.
+///
+/// #230: a probe may take up to [`HEALTH_TIMEOUT`], which is longer than a test
+/// budget and can outlast what is left of a phase. Cutting it at the phase's
+/// deadline keeps each phase of [`wait_socket_ready`] within its own budget. A
+/// probe cut short counts as not healthy, the same as one that timed out.
+async fn within(deadline: Instant, probe: impl std::future::Future<Output = bool>) -> bool {
+    let left = deadline.saturating_duration_since(Instant::now());
+    tokio::time::timeout(left, probe).await.unwrap_or(false)
 }
 
 /// One unavailable daemon, rendered as one line the recipient can act on.

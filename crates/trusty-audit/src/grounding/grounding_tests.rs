@@ -82,6 +82,18 @@ fn answering_socket<F>(dir: &Path, name: &str, reply: F) -> PathBuf
 where
     F: Fn(&str) -> String + Send + Sync + 'static,
 {
+    answering_socket_after(dir, name, Duration::ZERO, reply)
+}
+
+/// [`answering_socket`], but each reply is written only after `delay`.
+///
+/// #230: a daemon that is healthy but slow to say so. A `delay` longer than
+/// any test runs is a daemon that accepts, reads, and never replies; the
+/// connection stays open while the reply task sleeps.
+fn answering_socket_after<F>(dir: &Path, name: &str, delay: Duration, reply: F) -> PathBuf
+where
+    F: Fn(&str) -> String + Send + Sync + 'static,
+{
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let socket = dir.join("sockets").join(format!("{name}-{n}.sock"));
@@ -95,6 +107,7 @@ where
                 let mut sink = Vec::new();
                 let _ = conn.read_to_end(&mut sink).await;
                 let request = String::from_utf8_lossy(&sink).into_owned();
+                tokio::time::sleep(delay).await;
                 let _ = conn.write_all(reply(&request).as_bytes()).await;
                 let _ = conn.write_all(b"\n").await;
                 let _ = conn.flush().await;
@@ -300,6 +313,81 @@ async fn a_reachable_search_daemon_is_not_restarted() {
     daemons::ensure_search(&t)
         .await
         .expect("a live daemon needs no binary");
+}
+
+/// #230: trusty-search 0.62.1 answers `search.health` in about 1 s. The probe
+/// used the 200 ms connect budget for the whole call, so a running daemon read
+/// as absent and `ensure_search` tried to start a second one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_search_daemon_slow_to_answer_health_is_not_restarted_230() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let slow = answering_socket_after(tmp.path(), "slow-search", Duration::from_secs(1), |_| {
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"0.0.0","indexes":1}}"#
+            .to_owned()
+    });
+    // The binary does not exist: reaching the spawn at all would fail the leg.
+    let t = tools(
+        PathBuf::from("/nonexistent/trusty-search"),
+        slow,
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        dead_socket(tmp.path()),
+    );
+    daemons::ensure_search(&t)
+        .await
+        .expect("a daemon that answers health in 1 s is running and healthy");
+}
+
+/// #230: the analyze probe shared the 200 ms budget, so the same slow reply
+/// must not read as an absent trusty-analyze either.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_analyze_daemon_slow_to_answer_health_is_not_restarted_230() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let slow = answering_socket_after(tmp.path(), "slow-analyze", Duration::from_secs(1), |_| {
+        r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"0.0.0","search_reachable":true}}"#
+            .to_owned()
+    });
+    let t = tools(
+        PathBuf::from("/nonexistent/trusty-search"),
+        dead_search_socket(tmp.path()),
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        slow,
+    );
+    daemons::ensure_analyze(&t)
+        .await
+        .expect("a daemon that answers health in 1 s is running and healthy");
+}
+
+/// #230: the longer health budget must not turn a silent daemon into a hang.
+/// One that accepts and never replies is reported unhealthy within the
+/// pre-spawn probe's [`daemons::HEALTH_TIMEOUT`] plus the two readiness
+/// budgets, because each in-wait probe is cut at its phase's deadline.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_search_daemon_that_never_answers_health_is_unhealthy_within_the_bound_230() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let silent = answering_socket_after(
+        tmp.path(),
+        "silent-search",
+        Duration::from_secs(3600),
+        |_| String::new(),
+    );
+    let t = tools(
+        approving_search(tmp.path()),
+        silent,
+        PathBuf::from("/nonexistent/trusty-analyze"),
+        dead_socket(tmp.path()),
+    );
+    let bound =
+        daemons::HEALTH_TIMEOUT + t.bind_timeout + t.startup_timeout + Duration::from_secs(2);
+    let started = std::time::Instant::now();
+    let err = daemons::ensure_search(&t)
+        .await
+        .expect_err("a daemon that never answers is not healthy");
+    let took = started.elapsed();
+    assert!(err.contains("did not report healthy"), "{err}");
+    assert!(took <= bound, "took {took:?}, bound {bound:?}");
 }
 
 /// A daemon binary that writes its argv, one per line, to `record` and exits.
