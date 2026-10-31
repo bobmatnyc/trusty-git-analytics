@@ -207,19 +207,38 @@ async fn search_is_healthy(socket: &Path, timeout: Duration) -> bool {
 /// exits, so the PID [`spawn_detached`] returns would describe a process that is
 /// already gone. We detach the child ourselves, so the flag is what keeps the
 /// spawned process and the daemon the same one.
-fn search_start_args() -> [&'static str; 2] {
-    ["start", "--foreground"]
+///
+/// `--socket` is the other half (#217): trusty-search binds its data-dir
+/// default unless told otherwise, so with [`ENV_SEARCH_SOCKET`] set the poll
+/// waited on a path its own daemon never bound. `socket` is the path
+/// [`ensure_search`] then polls.
+fn search_start_args(socket: &str) -> [&str; 4] {
+    // #217: bind where the readiness poll looks, not at the data-dir default.
+    ["start", "--foreground", "--socket", socket]
 }
 
 /// The argument vector `trusty-analyze` is started with.
 ///
-/// #6287: a bare `serve`. The daemon derives its socket path from the data
-/// directory, so passing one would start a daemon on a path
-/// [`hotspots::fetch`] does not dial.
+/// `serve --socket <socket>` (#217), where `socket` is the path
+/// [`ensure_analyze`] polls and [`hotspots::fetch`] dials. Without the flag a
+/// [`ENV_ANALYZE_SOCKET`] override left the daemon on its default path and the
+/// poll waiting out its timeout. With no override `socket` IS the derived
+/// default, so the flag changes nothing there.
 ///
 /// [`hotspots::fetch`]: super::hotspots::fetch
-fn analyze_serve_args() -> [&'static str; 1] {
-    ["serve"]
+fn analyze_serve_args(socket: &str) -> [&str; 3] {
+    // #217: bind where the readiness poll and `hotspots::fetch` look.
+    ["serve", "--socket", socket]
+}
+
+/// The socket as the `&str` a `--socket` argument needs (#217).
+///
+/// A lossy conversion would bind a path other than the one polled, so a
+/// non-UTF-8 path is refused before anything is spawned.
+fn socket_arg(socket: &Path) -> Result<&str, String> {
+    socket
+        .to_str()
+        .ok_or_else(|| "the socket path is not valid UTF-8".to_string())
 }
 
 /// Ensure the trusty-search daemon answers, starting it if it does not.
@@ -232,7 +251,8 @@ fn analyze_serve_args() -> [&'static str; 1] {
 ///
 /// Test: `super::grounding_tests::{a_search_daemon_that_will_not_start_is_a_named_gap,
 /// a_reachable_search_daemon_is_not_restarted,
-/// a_daemon_that_binds_but_never_answers_is_a_named_gap}`.
+/// a_daemon_that_binds_but_never_answers_is_a_named_gap,
+/// the_search_spawn_binds_the_socket_it_polls_217}`.
 pub async fn ensure_search(tools: &Tools) -> Result<(), String> {
     let socket = &tools.search_socket;
     let at = socket.display().to_string();
@@ -240,7 +260,9 @@ pub async fn ensure_search(tools: &Tools) -> Result<(), String> {
         return Ok(());
     }
     let binary = tools.search.display().to_string();
-    spawn_detached(&tools.search, &search_start_args())
+    // #217: spawn on the same socket the wait below polls.
+    let arg = socket_arg(socket).map_err(|cause| refusal("trusty-search", &at, &binary, &cause))?;
+    spawn_detached(&tools.search, &search_start_args(arg))
         .map_err(|e| refusal("trusty-search", &at, &binary, &e.to_string()))?;
     wait_socket_ready(socket, tools, || search_is_healthy(socket, CONNECT_TIMEOUT))
         .await
@@ -258,14 +280,18 @@ pub async fn ensure_search(tools: &Tools) -> Result<(), String> {
 /// The readiness wait is [`wait_socket_ready`], shared with [`ensure_search`]
 /// since #6285.
 ///
-/// Test: `super::grounding_tests::an_analyze_daemon_that_will_not_start_is_a_named_gap`.
+/// Test: `super::grounding_tests::{an_analyze_daemon_that_will_not_start_is_a_named_gap,
+/// the_analyze_spawn_binds_the_socket_it_polls_217}`.
 pub async fn ensure_analyze(tools: &Tools) -> Result<(), String> {
     let at = tools.analyze_socket.display().to_string();
     if analyze_is_healthy(&tools.analyze_socket, CONNECT_TIMEOUT).await {
         return Ok(());
     }
     let binary = tools.analyze.display().to_string();
-    spawn_detached(&tools.analyze, &analyze_serve_args())
+    // #217: spawn on the same socket the wait below polls.
+    let arg = socket_arg(&tools.analyze_socket)
+        .map_err(|cause| refusal("trusty-analyze", &at, &binary, &cause))?;
+    spawn_detached(&tools.analyze, &analyze_serve_args(arg))
         .map_err(|e| refusal("trusty-analyze", &at, &binary, &e.to_string()))?;
     wait_socket_ready(&tools.analyze_socket, tools, || {
         analyze_is_healthy(&tools.analyze_socket, CONNECT_TIMEOUT)
@@ -396,15 +422,31 @@ mod daemon_tests {
     /// the same one; a later edit dropping it would otherwise pass unnoticed.
     #[test]
     fn the_search_start_stays_in_the_foreground() {
-        assert_eq!(search_start_args(), ["start", "--foreground"]);
+        assert_eq!(
+            search_start_args("/w/s.sock"),
+            ["start", "--foreground", "--socket", "/w/s.sock"]
+        );
     }
 
-    /// #6287: a bare `serve`. The daemon derives its socket from the data
-    /// directory, so passing one would start a daemon on a path
-    /// `hotspots::fetch` does not dial.
+    /// #217: `serve --socket <polled>`, so the daemon binds the path
+    /// `ensure_analyze` polls and `hotspots::fetch` dials.
     #[test]
-    fn the_analyze_spawn_is_a_bare_serve() {
-        assert_eq!(analyze_serve_args(), ["serve"]);
+    fn the_analyze_spawn_names_the_polled_socket() {
+        assert_eq!(
+            analyze_serve_args("/w/a.sock"),
+            ["serve", "--socket", "/w/a.sock"]
+        );
+    }
+
+    /// #217: a non-UTF-8 socket is refused rather than lossily converted into
+    /// a path other than the one polled.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_socket_is_refused() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/w/\xff.sock"));
+        assert!(socket_arg(path).is_err());
+        assert_eq!(socket_arg(Path::new("/w/a.sock")), Ok("/w/a.sock"));
     }
 
     #[test]
