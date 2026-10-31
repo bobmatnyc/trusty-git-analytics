@@ -168,7 +168,7 @@ tokio = { workspace = true }
 trusty-progress = { workspace = true }
 # #5499: the return package is one zip file, because the return channel is
 # manual (#5642) and a directory cannot be attached to an email.
-zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+zip = { version = "2.6.1", default-features = false, features = ["deflate"] }
 # #5980: a non-reversible, truncated fingerprint of the `gh`-derived
 # credential a sweep resolved, persisted in the checkpoint so packaging (which
 # can run as a separate process, possibly under a different `gh` account) can
@@ -213,4 +213,4 @@ wiremock = { workspace = true }
 # reads its generated members, because what the recipient receives is the zip
 # rather than the console output that produced it. Already a dependency above,
 # so this costs no extra compilation.
-zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+zip = { version = "2.6.1", default-features = false, features = ["deflate"] }
