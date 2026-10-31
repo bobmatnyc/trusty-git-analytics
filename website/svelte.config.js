@@ -21,6 +21,7 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 export default {
 	preprocess: vitePreprocess(),
 	kit: {
-		adapter: adapter({ runtime: 'nodejs20.x' })
+		// #233: nodejs20.x is discontinued on Vercel; match the project's Node.js 24.x setting.
+		adapter: adapter({ runtime: 'nodejs24.x' })
 	}
 };
