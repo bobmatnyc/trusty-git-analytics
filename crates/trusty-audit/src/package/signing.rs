@@ -675,7 +675,10 @@ fn check_members(
     Ok(())
 }
 
-type Archive = zip::ZipArchive<std::io::BufReader<std::fs::File>>;
+// #227: zip 2.6 adds a reader generic to `ZipFile`; one alias names the
+// reader for both the archive and its members.
+type Reader = std::io::BufReader<std::fs::File>;
+type Archive = zip::ZipArchive<Reader>;
 
 /// Open the package, mapping every failure onto one path-naming variant.
 fn open(package: &Path) -> Result<Archive, SigningError> {
@@ -776,7 +779,7 @@ fn member<'a>(
     archive: &'a mut Archive,
     package: &Path,
     entry: &str,
-) -> Result<Option<zip::read::ZipFile<'a>>, SigningError> {
+) -> Result<Option<zip::read::ZipFile<'a, Reader>>, SigningError> {
     match archive.by_name(entry) {
         Ok(m) => Ok(Some(m)),
         Err(zip::result::ZipError::FileNotFound) => Ok(None),
@@ -788,7 +791,7 @@ fn member<'a>(
 }
 
 fn read_chunk(
-    member: &mut zip::read::ZipFile<'_>,
+    member: &mut zip::read::ZipFile<'_, Reader>,
     package: &Path,
     buffer: &mut [u8],
 ) -> Result<usize, SigningError> {
