@@ -287,16 +287,9 @@ pub async fn rerender(
     // resolve from — it outranks the pairs this run injects — so the index
     // states that, falling back to this run's own selection when no manifest
     // declares one.
-    let mut declared: Option<crate::index_report::InferenceRecord> = None;
+    let declared = first_declared(&manifests)
+        .map(|section| crate::index_report::InferenceRecord::declared(&section));
     for (index, manifest) in manifests.into_iter().enumerate() {
-        if declared.is_none()
-            && let Ok(Some(read)) = AuditManifest::load_if_present(&manifest)
-        {
-            declared = read
-                .inference
-                .as_ref()
-                .map(crate::index_report::InferenceRecord::declared);
-        }
         let name = unique_name(&manifest, index, &mut taken);
         progress.unit_started(Operation::Rerender, name.as_str(), index + 1, total);
         let unit_started = std::time::Instant::now();
@@ -431,6 +424,38 @@ fn engagement_work_dir(config: &Path) -> Option<PathBuf> {
         .is_file()
         .then(|| config.parent().unwrap_or(Path::new(".")))
         .map(|dir| dir.join(crate::workdir::WORK_SUBDIR))
+}
+
+/// The provider the first discovered manifest declares in its `[inference]`
+/// table, for the re-render `options` describes.
+///
+/// Why: #221 — `trusty-review` resolves the provider from that table ahead of
+/// the operator's environment and the host config, so whether a re-render
+/// needs an OpenRouter key is the manifest's call when it names a provider.
+/// What: the same source resolution and discovery [`rerender`] runs, then the
+/// manifest [`rerender`]'s index states the identity of. `None` when no
+/// manifest is found or none declares a provider. Read-only.
+/// Test: `crate::session::session_tests::a_bedrock_package_re_renders_with_no_key_and_no_config`,
+/// `crate::session::session_tests::an_openrouter_package_with_no_key_is_refused_over_a_bedrock_config`.
+pub fn declared_provider(
+    options: &RerenderOptions,
+    cwd: &Path,
+    config: &Path,
+    work_root: &Path,
+) -> Option<String> {
+    let choice = resolve_source(options.from.clone(), cwd, config, work_root);
+    let manifests = discover(&choice.source).ok()?;
+    first_declared(&manifests)?.provider
+}
+
+/// The `[inference]` table of the first manifest in `manifests` carrying one.
+fn first_declared(manifests: &[PathBuf]) -> Option<crate::manifest::InferenceSection> {
+    manifests.iter().find_map(|path| {
+        AuditManifest::load_if_present(path)
+            .ok()
+            .flatten()?
+            .inference
+    })
 }
 
 /// Whether a re-render pointed at `dir` would find a manifest to render.

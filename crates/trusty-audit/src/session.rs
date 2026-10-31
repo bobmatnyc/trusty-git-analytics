@@ -1120,7 +1120,12 @@ impl Session {
     /// Test: `crate::session::session_tests::a_re_render_with_no_credential_anywhere_is_refused`,
     /// `crate::session::session_tests::a_re_render_defaults_to_the_directory_it_was_run_in`,
     /// `crate::session::session_tests::a_bedrock_re_render_with_no_key_passes_the_credential_check`,
-    /// `crate::session::session_tests::an_openrouter_re_render_with_a_blank_key_is_still_refused`.
+    /// `crate::session::session_tests::an_openrouter_re_render_with_a_blank_key_is_still_refused`,
+    /// `crate::session::session_tests::a_bedrock_package_re_renders_with_no_key_and_no_config`,
+    /// `crate::session::session_tests::an_openrouter_package_with_no_key_is_refused_over_a_bedrock_config`.
+    ///
+    /// The provider is the first discovered manifest's `[inference]` one when
+    /// it names one (#221), else the environment's, else the config's.
     ///
     /// # Errors
     ///
@@ -1141,9 +1146,18 @@ impl Session {
             .filter(|key| !key.is_empty());
         // #220: only the openrouter provider reads this key. Any other provider
         // renders with a blank one, which `rerender` never hands to the child.
+        // #221: the delivered manifest's `[inference]` provider outranks the
+        // environment and the config, because trusty-review resolves it first.
+        let declared =
+            rerender::declared_provider(options, &self.cwd, &self.config_path, self.work.root());
         let key = match key {
             Some(key) => key,
-            None if !crate::inference::requires_openrouter_key(&models, operator) => {
+            None if !crate::inference::requires_openrouter_key_declared(
+                declared.as_deref(),
+                &models,
+                operator,
+            ) =>
+            {
                 SecretKey::new(String::new())
             }
             None => {
@@ -1450,6 +1464,77 @@ path = "/work/repos/acme-api"
                 "{refusal}"
             );
         }
+    }
+
+    /// A delivered package under `dir`: one report whose manifest declares
+    /// `provider` in its `[inference]` table, as the sweep writes it (#6135).
+    fn package_declaring(dir: &Path, provider: &str) -> PathBuf {
+        let report = dir.join("reports").join("01-acme-api");
+        std::fs::create_dir_all(&report).expect("mkdir report");
+        std::fs::write(
+            report.join("manifest.toml"),
+            format!(
+                "[report]\ntitle = \"Acme\"\n\n[inference]\nprovider = \"{provider}\"\n\
+                 reviewer = \"r\"\nverifier = \"v\"\nsummarizer = \"s\"\n\n\
+                 [[repositories]]\nname = \"acme/api\"\npath = \"/nowhere/acme-api\"\n"
+            ),
+        )
+        .expect("write manifest");
+        dir.to_path_buf()
+    }
+
+    /// Options naming a renderer that is not there, so a run that passes the
+    /// credential check stops at the spawn instead of running a host binary.
+    fn options_with_absent_renderer(dir: &Path) -> RerenderOptions {
+        RerenderOptions {
+            review: Some(dir.join("no-such-trusty-review")),
+            ..RerenderOptions::default()
+        }
+    }
+
+    /// 🔴 #221: a Bedrock package re-rendered on a recipient machine with no
+    /// engagement config and no key gets past the credential check. Before the
+    /// fix the missing `[models]` defaulted to OpenRouter and it was refused.
+    #[tokio::test]
+    async fn a_bedrock_package_re_renders_with_no_key_and_no_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = package_declaring(&tmp.path().join("acme-audit"), "bedrock");
+        let session = session_in(tmp.path()).with_cwd(&package);
+
+        let refusal = session
+            .execute(Command::Rerender(options_with_absent_renderer(tmp.path())))
+            .await
+            .expect_err("the renderer is absent");
+
+        assert!(
+            matches!(refusal, AuditError::ReviewBinaryMissing { .. }),
+            "{refusal}"
+        );
+    }
+
+    /// 🔴 #221: a package declaring openrouter is refused with no key, even
+    /// when the local config says bedrock. Before the fix it passed the check
+    /// and failed per manifest inside the renderer.
+    #[tokio::test]
+    async fn an_openrouter_package_with_no_key_is_refused_over_a_bedrock_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = package_declaring(&tmp.path().join("acme-audit"), "openrouter");
+        let session =
+            session_with_config(tmp.path(), &models_config("", "bedrock")).with_cwd(&package);
+
+        let refusal = session
+            .execute(Command::Rerender(options_with_absent_renderer(tmp.path())))
+            .await
+            .expect_err("openrouter reads this key");
+
+        assert!(
+            matches!(refusal, AuditError::NoCredentialSource { .. }),
+            "{refusal}"
+        );
+        assert!(
+            refusal.to_string().contains(run::ENV_INFERENCE_CREDENTIAL),
+            "{refusal}"
+        );
     }
 
     /// 🔴 #6080: `render` with no `--from` renders where the front end was run,
