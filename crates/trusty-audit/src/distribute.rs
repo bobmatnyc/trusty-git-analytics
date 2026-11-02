@@ -1338,6 +1338,35 @@ api_key = "lin_api_client_a"
         }
     }
 
+    /// #213: the shipped `trusty-search` pin is at least 0.62.1.
+    ///
+    /// Why: `trusty-search index add` writes `allowlist.toml`, and before 0.62.1
+    /// it resolved that file from the OS config dir whatever `TRUSTY_DATA_DIR`
+    /// said (trusty-tools#10366). A run that isolated its daemon under a scratch
+    /// data dir therefore appended its checkout to the operator's real
+    /// allowlist. A template pinning an older release re-ships that leak to
+    /// every recipient.
+    /// What: loads the shipped template and compares its `trusty-search` pin
+    /// against the first release that writes the allowlist under the data dir.
+    #[test]
+    fn the_shipped_search_pin_keeps_the_allowlist_under_the_data_dir() {
+        // #213: trusty-search 0.62.1 is the first release honouring TRUSTY_DATA_DIR for allowlist.toml.
+        let floor = semver::Version::new(0, 62, 1);
+        let loaded = EngagementConfig::from_toml(
+            instructions::ENGAGEMENT_TEMPLATE,
+            Path::new("engagement.template.toml"),
+        )
+        .expect("the shipped reference loads");
+        let pinned = semver::Version::parse(loaded.tools.trusty_search.version())
+            .expect("the trusty-search pin is a semver version");
+
+        assert!(
+            pinned >= floor,
+            "the template pins trusty-search {pinned}, which writes allowlist.toml outside \
+             TRUSTY_DATA_DIR; pin {floor} or later"
+        );
+    }
+
     /// `MAJOR.MINOR.PATCH`, with SemVer's optional `-pre` and `+build` tails.
     fn is_version_triple(version: &str) -> bool {
         let core = version.split('+').next().unwrap_or_default();

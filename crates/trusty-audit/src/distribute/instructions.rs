@@ -52,7 +52,8 @@ const README_TEMPLATE: &str = include_str!("../../templates/instructions-README.
 /// is the release-time gate.
 /// Test: `super::distribute_tests::the_shipped_config_reference_is_itself_loadable`,
 /// `super::distribute_tests::the_compiled_engagement_template_is_the_file_on_disk`,
-/// `super::distribute_tests::every_tool_pin_in_the_shipped_template_is_a_semver_triple`.
+/// `super::distribute_tests::every_tool_pin_in_the_shipped_template_is_a_semver_triple`,
+/// `super::distribute_tests::the_shipped_search_pin_keeps_the_allowlist_under_the_data_dir`.
 pub const ENGAGEMENT_TEMPLATE: &str = include_str!("../../templates/engagement.template.toml");
 
 /// What the recipient is told about obtaining the OpenRouter key.
