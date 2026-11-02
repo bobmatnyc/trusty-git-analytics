@@ -59,15 +59,47 @@ fn serve(
     (socket, calls)
 }
 
-/// A daemon that accepts the create and the reindex, and answers status with
-/// `status` once a reindex has been received.
+/// A daemon that accepts the create, the reindex and the deregister, and
+/// answers status with `status`.
 fn daemon(dir: &Path, status: fn() -> Value) -> (PathBuf, Calls) {
     serve(dir, move |method, _, _| match method {
         "search.index.create" => json!({"result": {"created": true}}),
         "search.index.reindex" => json!({"result": {"queued": true}}),
+        "search.index.delete" => json!({"result": {"deleted": true}}),
         "search.index.status" => status(),
         _ => json!({"error": {"code": -32601, "message": "method not found"}}),
     })
+}
+
+/// A `trusty-search` CLI stub under `dir` that logs to `log`. Its
+/// `index-status` exits 0 only while `registered` exists, as the real CLI exits
+/// 0 for any registered index; any `index` call exits 7.
+fn cli_stub(dir: &Path, log: &Path, registered: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = dir.join("trusty-search-stub");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> {log}\n\
+             if [ \"$1\" = index-status ]; then [ -e {registered} ] && exit 0; exit 1; fi\n\
+             exit 7\n",
+            log = log.display(),
+            registered = registered.display(),
+        ),
+    )
+    .expect("write the stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    stub.display().to_string()
+}
+
+/// One manifest entry for `path`.
+fn entry(path: &Path) -> Vec<DdRepositoryEntry> {
+    vec![DdRepositoryEntry {
+        name: "same-file".to_string(),
+        path: path.to_path_buf(),
+        authorship: None,
+    }]
 }
 
 /// A status body for a walk that started and finished now.
@@ -114,34 +146,13 @@ fn methods(calls: &Calls) -> Vec<String> {
 /// any `index` call, so a CLI spawn would show up as a failure and in its log.
 #[tokio::test]
 async fn a_temp_root_is_indexed_over_the_socket_with_the_opt_in() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let dir = tempfile::tempdir().expect("tempdir");
     let path = checkout(dir.path());
     let (socket, calls) = daemon(dir.path(), finished_now);
     let log = dir.path().join("cli-calls");
-    let stub = dir.path().join("trusty-search-stub");
-    std::fs::write(
-        &stub,
-        format!(
-            "#!/bin/sh\necho \"$@\" >> {}\n[ \"$1\" = index-status ] && exit 1\nexit 7\n",
-            log.display()
-        ),
-    )
-    .expect("write the stub");
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let entries = vec![DdRepositoryEntry {
-        name: "same-file".to_string(),
-        path: path.clone(),
-        authorship: None,
-    }];
+    let stub = cli_stub(dir.path(), &log, &dir.path().join("never-registered"));
 
-    let outcomes = ensure_repositories_routed(
-        stub.display().to_string(),
-        route(socket, dir.path()),
-        &entries,
-    )
-    .await;
+    let outcomes = ensure_repositories_routed(stub, route(socket, dir.path()), &entry(&path)).await;
 
     assert_eq!(outcomes[0].status, RepoIndexStatus::Indexed, "{outcomes:?}");
     let id = index_id_for(&path).expect("id");
@@ -206,7 +217,8 @@ async fn a_reindex_that_never_produces_chunks_is_a_gap() {
     let status = index_over_socket(&route(socket, dir.path()), &path, "same-file-1");
 
     assert!(
-        matches!(&status, RepoIndexStatus::Failed(r) if r.contains("produced no chunks")),
+        matches!(&status, RepoIndexStatus::Failed(r)
+            if r.contains("no progress") && r.contains("0 chunks")),
         "{status:?}"
     );
 }
@@ -250,18 +262,156 @@ async fn a_walk_error_is_a_gap() {
     );
 }
 
-/// CLI parity: a walk that holds chunks and stops making progress detaches as
-/// indexed, as `trusty-search index`'s foreground wait does.
+/// Error arm: a walk that holds chunks but stops making progress is a gap. In
+/// trusty-search 0.62.1 a walk can end with neither `last_indexed` nor
+/// `last_walk_error` (aborted, or promotion unsettled), leaving a partial
+/// corpus, so the chunk count proves nothing.
 // The route blocks its thread, so the stub needs a second worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stalled_walk_with_chunks_detaches_as_indexed() {
+async fn a_stalled_walk_with_chunks_is_a_gap() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = checkout(dir.path());
     let (socket, _) = daemon(dir.path(), || json!({"result": {"chunk_count": 5}}));
 
     let status = index_over_socket(&route(socket, dir.path()), &path, "same-file-1");
 
-    assert_eq!(status, RepoIndexStatus::Indexed);
+    assert!(
+        matches!(&status, RepoIndexStatus::Failed(r)
+            if r.contains("no progress") && r.contains("5 chunks")),
+        "{status:?}"
+    );
+}
+
+/// A refused reindex is the gap, quoting the daemon. No status poll follows,
+/// and the index the create registered is deregistered.
+// The route blocks its thread, so the stub needs a second worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_reindex_is_a_gap_and_polls_no_status() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = checkout(dir.path());
+    let (socket, calls) = serve(dir.path(), |method, _, _| match method {
+        "search.index.create" => json!({"result": {"created": true}}),
+        "search.index.reindex" => {
+            json!({"error": {"code": -32009, "message": "reindex_already_running"}})
+        }
+        "search.index.delete" => json!({"result": {"deleted": true}}),
+        _ => json!({"result": {"chunk_count": 1}}),
+    });
+
+    let status = index_over_socket(&route(socket, dir.path()), &path, "same-file-1");
+
+    assert!(
+        matches!(&status, RepoIndexStatus::Failed(r) if r.contains("reindex_already_running")),
+        "{status:?}"
+    );
+    assert_eq!(
+        methods(&calls),
+        vec![
+            "search.index.create",
+            "search.index.reindex",
+            "search.index.delete"
+        ]
+    );
+}
+
+/// Error arm: a failure after a successful create must not leave the index
+/// registered. `index-status` exits 0 for any registered index, so the next
+/// run would report the repository as already served and never index it.
+/// The stub's registry is a marker file the CLI probe reads: the create sets
+/// it and the deregister clears it.
+#[tokio::test]
+async fn a_failed_temp_root_index_is_retried_on_the_next_run() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = checkout(dir.path());
+    let registered = dir.path().join("registered");
+    let walk_fails = Arc::new(AtomicBool::new(true));
+    let (socket, calls) = {
+        let registered = registered.clone();
+        let walk_fails = Arc::clone(&walk_fails);
+        serve(dir.path(), move |method, _, _| match method {
+            "search.index.create" => {
+                std::fs::write(&registered, b"").expect("register");
+                json!({"result": {"created": true}})
+            }
+            "search.index.reindex" => json!({"result": {"queued": true}}),
+            "search.index.delete" => {
+                let _ = std::fs::remove_file(&registered);
+                json!({"result": {"deleted": true}})
+            }
+            _ if walk_fails.load(Ordering::SeqCst) => {
+                json!({"result": {"chunk_count": 2, "last_walk_error": "prune failed"}})
+            }
+            _ => finished_now(),
+        })
+    };
+    let stub = cli_stub(dir.path(), &dir.path().join("cli-calls"), &registered);
+
+    let first = ensure_repositories_routed(
+        stub.clone(),
+        route(socket.clone(), dir.path()),
+        &entry(&path),
+    )
+    .await;
+    walk_fails.store(false, Ordering::SeqCst);
+    let second = ensure_repositories_routed(stub, route(socket, dir.path()), &entry(&path)).await;
+
+    assert!(first[0].failed(), "{first:?}");
+    assert_eq!(
+        second[0].status,
+        RepoIndexStatus::Indexed,
+        "the failed index must be retried, not reported as served"
+    );
+    let id = index_id_for(&path).expect("id");
+    let calls = calls.lock().expect("calls lock").clone();
+    let delete = calls
+        .iter()
+        .find(|(m, _)| m == "search.index.delete")
+        .expect("the failed index is deregistered");
+    assert_eq!(
+        delete.1,
+        json!({
+            "index_id": id,
+            "delete_data": false,
+            "expected_root_path": std::fs::canonicalize(&path).expect("canonical").to_string_lossy(),
+        }),
+        "deregister only, and only the registration at this root"
+    );
+    let creates = calls
+        .iter()
+        .filter(|(m, _)| m == "search.index.create")
+        .count();
+    assert_eq!(creates, 2, "the second run creates the index again");
+}
+
+/// A deregister that fails is named in the reason, since the next run may
+/// then skip the repository.
+// The route blocks its thread, so the stub needs a second worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_deregister_is_named_in_the_reason() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = checkout(dir.path());
+    let (socket, _) = serve(dir.path(), |method, _, _| match method {
+        "search.index.create" => json!({"result": {"created": true}}),
+        "search.index.reindex" => json!({"result": {"queued": true}}),
+        "search.index.delete" => {
+            json!({"error": {"code": -32009, "message": "root_path mismatch"}})
+        }
+        _ => json!({"result": {"chunk_count": 0, "last_walk_error": "permission denied"}}),
+    });
+
+    let status = index_over_socket(&route(socket, dir.path()), &path, "same-file-1");
+
+    match status {
+        RepoIndexStatus::Failed(reason) => {
+            assert!(reason.contains("permission denied"), "{reason}");
+            assert!(reason.contains("could not be deregistered"), "{reason}");
+            assert!(reason.contains("root_path mismatch"), "{reason}");
+            assert_eq!(reason.lines().count(), 1, "{reason}");
+        }
+        other => panic!("a walk error must be a gap: {other:?}"),
+    }
 }
 
 /// The production route selects exactly the OS-temp roots trusty-search

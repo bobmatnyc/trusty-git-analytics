@@ -14,7 +14,8 @@
 //! What: [`TempRootRoute`], which decides whether a checkout takes this route,
 //! and [`index_over_socket`]: create the index with the opt-in, queue a reindex
 //! with no root override, and wait for the walk that started after the trigger.
-//! The wait detaches after a stall, as the CLI's own foreground wait does.
+//! A walk that stalls is a failure, never a partial success, and any failure
+//! after the create deregisters the index so the next run retries it.
 //!
 //! Test: `super::temp_root_tests`.
 
@@ -23,7 +24,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use trusty_common::search_rpc::{
-    call_blocking, METHOD_INDEX_CREATE, METHOD_INDEX_REINDEX, METHOD_INDEX_STATUS,
+    call_blocking, METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_REINDEX,
+    METHOD_INDEX_STATUS,
 };
 
 use super::RepoIndexStatus;
@@ -48,7 +50,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Interval between status polls.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How long the walk may go without progress before the wait detaches.
+/// How long the walk may go without progress before the wait gives up.
 ///
 /// 120 s, the same stall bound `trusty-search index` uses for its foreground
 /// wait, so both routes give up on a stuck index at the same point.
@@ -119,16 +121,22 @@ impl TempRootRoute {
 /// propagates.
 ///
 /// # Postconditions
-/// `Indexed` means the daemon registered the index and either finished a walk
-/// that started after this call's trigger, or holds chunks from a walk that
-/// stopped making progress (the detach the CLI route also makes). `Failed`
-/// covers a refused create, a refused reindex, a walk error, and a walk that
-/// produced no chunks before the stall bound.
+/// `Indexed` means the daemon registered the index and finished a walk that
+/// started after this call's trigger. `Failed` covers a refused create, a
+/// refused reindex, a walk error, and a walk that made no progress for the
+/// stall bound, whatever its chunk count. After any failure that follows a
+/// successful create, the index has been deregistered (corpus kept), or the
+/// reason says why that failed. A registered index answers the CLI membership
+/// probe even when empty, so leaving it would make the next run skip it.
 ///
 /// Test: `super::temp_root_tests::{a_temp_root_is_indexed_over_the_socket_with_the_opt_in,
 /// a_refused_create_is_a_gap_and_sends_no_reindex,
+/// a_refused_reindex_is_a_gap_and_polls_no_status,
 /// a_reindex_that_never_produces_chunks_is_a_gap,
-/// a_walk_error_is_a_gap}`.
+/// a_stalled_walk_with_chunks_is_a_gap,
+/// a_walk_error_is_a_gap,
+/// a_failed_temp_root_index_is_retried_on_the_next_run,
+/// a_failed_deregister_is_named_in_the_reason}`.
 pub(in crate::audit) fn index_over_socket(
     route: &TempRootRoute,
     checkout: &Path,
@@ -163,12 +171,28 @@ pub(in crate::audit) fn index_over_socket(
     }
     let triggered = chrono::Utc::now();
     // #214: no root override; the daemon's reindex root check has no opt-in.
-    if let Err(reason) = call(METHOD_INDEX_REINDEX, json!({ "index_id": index_id })) {
-        return RepoIndexStatus::Failed(reason);
+    let status = match call(METHOD_INDEX_REINDEX, json!({ "index_id": index_id })) {
+        Err(reason) => RepoIndexStatus::Failed(reason),
+        Ok(_) => wait_for_walk(route, index_id, triggered, |params| {
+            call(METHOD_INDEX_STATUS, params)
+        }),
+    };
+    let RepoIndexStatus::Failed(reason) = status else {
+        return status;
+    };
+    // #214: `index-status` exits 0 for any registered index, so an index left
+    // registered after a failure reads as served on the next run.
+    let deregister = json!({
+        "index_id": index_id,
+        "delete_data": false,
+        "expected_root_path": root.to_string_lossy(),
+    });
+    match call(METHOD_INDEX_DELETE, deregister) {
+        Ok(_) => RepoIndexStatus::Failed(reason),
+        Err(cause) => RepoIndexStatus::Failed(format!(
+            "{reason}; the index could not be deregistered, so the next run may skip it: {cause}"
+        )),
     }
-    wait_for_walk(route, index_id, triggered, |params| {
-        call(METHOD_INDEX_STATUS, params)
-    })
 }
 
 /// Poll the index status until the walk the trigger started is done.
@@ -178,10 +202,11 @@ pub(in crate::audit) fn index_over_socket(
 /// index.
 /// What: done when a walk that started at or after `triggered` has finished.
 /// A reported walk error fails at once. Progress is the chunk count plus the
-/// files seen; when neither moves for `stall_timeout`, the wait detaches as
-/// `Indexed` if the index holds chunks, and fails otherwise. A status call that
-/// errors counts as no progress, so a daemon that goes away fails at the bound
-/// with its last error rather than reading as indexed.
+/// files seen; when neither moves for `stall_timeout`, the wait fails. A walk
+/// can end with neither `last_indexed` nor `last_walk_error` (an aborted or
+/// unsettled run in trusty-search 0.62.1), leaving a partial corpus, so chunks
+/// alone never make it indexed. A status call that errors counts as no
+/// progress, and its last error is the reason.
 fn wait_for_walk(
     route: &TempRootRoute,
     index_id: &str,
@@ -222,24 +247,17 @@ fn wait_for_walk(
     }
 }
 
-/// The outcome of a wait that hit the stall bound.
+/// The outcome of a wait that hit the stall bound: always a failure.
 fn stalled(bound: Duration, chunks: u64, last_error: Option<String>) -> RepoIndexStatus {
     if let Some(reason) = last_error {
         return RepoIndexStatus::Failed(reason);
     }
-    if chunks == 0 {
-        // #214: an empty index is not indexed, whatever the detach would say.
-        return RepoIndexStatus::Failed(format!(
-            "the trusty-search reindex produced no chunks in {}s",
-            bound.as_secs()
-        ));
-    }
-    eprintln!(
-        "[tga audit] the trusty-search walk made no progress for {}s; continuing with the \
-         {chunks} chunks it holds",
+    // #214: a stalled walk may have ended unsettled, leaving a partial corpus.
+    RepoIndexStatus::Failed(format!(
+        "the trusty-search walk made no progress for {}s with {chunks} chunks indexed, so \
+         the index may be partial",
         bound.as_secs()
-    );
-    RepoIndexStatus::Indexed
+    ))
 }
 
 /// Whether the status body reports a walk that started at or after `since` and
