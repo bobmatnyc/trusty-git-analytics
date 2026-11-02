@@ -17,11 +17,13 @@
 //! they can be asserted without a live daemon — [`index_add_args`] and
 //! [`refusal`].
 //!
-//! `--allow-sensitive-path` is deliberately NOT passed. It is not reachable from
-//! tga's path anyway — `handle_index` calls the strict `is_denied`, so approving
-//! a denied root would leave the run refused at the next step regardless — and it
-//! does not relax `SENSITIVE_HOME_TOP_DIRS`, which is the rule a recipient
-//! unzipping into `~/Downloads` actually hits. Placement is what fixes those;
+//! `--allow-sensitive-path` is passed for a checkout under an OS-temp prefix
+//! (`/tmp`, `/private/tmp`, `/var/folders`) and for nothing else (#214). It
+//! relaxes only those prefix rows, so a scratch work dir can be approved;
+//! `tga audit` then indexes such a root over the daemon socket with the matching
+//! per-request opt-in, because `trusty-search index` refuses it with none. The
+//! flag does not relax `SENSITIVE_HOME_TOP_DIRS`, which is the rule a recipient
+//! unzipping into `~/Downloads` actually hits. Placement is what fixes that;
 //! see `crate::workdir::WorkDir::resolve`.
 //!
 //! Test: `super::run_tests::an_unapprovable_checkout_fails_the_repository_by_name`,
@@ -68,17 +70,44 @@ pub(crate) fn approve_for_indexing(search: &Path, checkout: &Path) -> Result<(),
     }
 }
 
-/// The argv `trusty-search` is given, with no opt-in flag.
+/// The OS-temp prefixes trusty-search refuses unless `index add` opts in.
 ///
-/// Kept separate so the absence of `--allow-sensitive-path` is asserted rather
-/// than assumed — the flag is the fix this deliberately did not take (see the
-/// module docs), and a later edit adding it would otherwise pass unnoticed.
+/// The temp rows of trusty-search's `SENSITIVE_PATH_PREFIXES` (0.62.1). The same
+/// list as `tga::audit::repo_index`'s temp-root route, which indexes what this
+/// approves; the two must select the same checkouts.
+const TEMP_PREFIXES: [&str; 4] = [
+    "/tmp",
+    "/private/tmp",
+    "/var/folders",
+    "/private/var/folders",
+];
+
+/// The argv `trusty-search` is given.
+///
+/// Kept separate so the flag's presence is asserted rather than assumed: it is
+/// passed only for a temp root (see the module docs), and an edit passing it for
+/// every root would otherwise pass unnoticed.
 fn index_add_args(checkout: &Path) -> Vec<OsString> {
-    vec![
+    let mut args = vec![
         OsString::from("index"),
         OsString::from("add"),
         checkout.as_os_str().to_owned(),
-    ]
+    ];
+    // #214: a scratch work dir under an OS-temp prefix needs the opt-in.
+    if is_temp_root(checkout) {
+        args.push(OsString::from("--allow-sensitive-path"));
+    }
+    args
+}
+
+/// Whether `checkout` is under an OS-temp prefix, checked on the canonical path
+/// as trusty-search checks it (macOS resolves `/tmp` and `/var` to
+/// `/private/...`). A path that cannot be canonicalised is checked as given.
+fn is_temp_root(checkout: &Path) -> bool {
+    let canonical = std::fs::canonicalize(checkout).unwrap_or_else(|_| checkout.to_path_buf());
+    TEMP_PREFIXES
+        .iter()
+        .any(|prefix| canonical.starts_with(prefix))
 }
 
 /// A non-zero exit rendered as one line the recipient can act on.
@@ -126,9 +155,7 @@ mod approve_tests {
         }
     }
 
-    /// The flag the owner ruled out. `--allow-sensitive-path` cannot help here:
-    /// tga's own index call uses the strict check, so a root approved through the
-    /// bypass is refused at the next step anyway.
+    /// An ordinary work dir is approved with no opt-in flag.
     #[test]
     fn the_approval_never_asks_for_the_sensitive_path_bypass() {
         let args = index_add_args(Path::new(
@@ -142,6 +169,30 @@ mod approve_tests {
                 OsString::from("/Users/r/.trusty-tools/trusty-audit/work/repos/xsv"),
             ]
         );
+        assert!(!is_temp_root(Path::new("/tmpfoo/work/repos/xsv")));
+    }
+
+    /// #214: a scratch work dir under an OS-temp prefix is approved with
+    /// `--allow-sensitive-path`; without it trusty-search refuses the approval.
+    #[test]
+    fn a_temp_work_dir_is_approved_with_the_sensitive_path_opt_in() {
+        for root in [
+            "/private/tmp/t208/work/repos/BurntSushi/same-file",
+            "/tmp/t208/work/repos/same-file",
+            "/private/var/folders/9x/T/work/repos/xsv",
+        ] {
+            let args = index_add_args(Path::new(root));
+            assert_eq!(
+                args,
+                vec![
+                    OsString::from("index"),
+                    OsString::from("add"),
+                    OsString::from(root),
+                    OsString::from("--allow-sensitive-path"),
+                ],
+                "{root}"
+            );
+        }
     }
 
     #[test]

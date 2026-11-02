@@ -16,7 +16,10 @@
 //! rule it applies, and the per-repository [`RepoIndexOutcome`] it returns.
 //! Indexing runs as a subprocess — the sanctioned route, since DOC-67 §5
 //! forbids a second HTTP-client implementation against the daemon, and the same
-//! house pattern [`super::review`] uses to reach `trusty-review`.
+//! house pattern [`super::review`] uses to reach `trusty-review`. The exception
+//! is a checkout under an OS-temp prefix, which `trusty-search index` refuses
+//! with no opt-in: that one is created and reindexed over the daemon socket
+//! through `trusty_common::search_rpc`, the shared client (`temp_root`, #214).
 //!
 //! ## This one is fail-open, and the analyze preflight is not
 //!
@@ -59,6 +62,30 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::report::dd_manifest::DdRepositoryEntry;
+
+// #214: a checkout under an OS-temp prefix is indexed over the socket.
+#[cfg(unix)]
+mod temp_root;
+#[cfg(all(test, unix))]
+mod temp_root_tests;
+#[cfg(unix)]
+pub(super) use temp_root::TempRootRoute;
+
+/// Non-unix stand-in: no socket client, so every checkout takes the CLI route.
+#[cfg(not(unix))]
+#[derive(Debug, Clone)]
+pub(super) struct TempRootRoute;
+
+#[cfg(not(unix))]
+impl TempRootRoute {
+    fn from_env() -> Self {
+        Self
+    }
+    #[cfg(test)]
+    fn disabled() -> Self {
+        Self
+    }
+}
 
 /// Environment variable that overrides the `trusty-search` binary path.
 ///
@@ -191,7 +218,7 @@ pub(super) fn index_args(path: &Path, index_id: &str) -> Vec<OsString> {
 /// Index every audited repository that trusty-search does not already serve.
 ///
 /// Why/What: see the module docs. Resolves the binary from the environment once,
-/// at this entry point, and delegates to [`ensure_repositories_indexed_with`].
+/// at this entry point, and delegates to [`ensure_repositories_routed`].
 /// Takes the manifest's own repository entries rather than the config so the
 /// index ids are derived from the exact paths the renderer will read.
 ///
@@ -200,29 +227,44 @@ pub(super) fn index_args(path: &Path, index_id: &str) -> Vec<OsString> {
 ///
 /// Test: `super::tests::an_unindexed_repository_is_indexed_before_the_render`.
 pub async fn ensure_repositories_indexed(repos: &[DdRepositoryEntry]) -> Vec<RepoIndexOutcome> {
-    ensure_repositories_indexed_with(resolve_search_binary(), repos).await
+    // #214: temp-prefix checkouts take the socket route.
+    ensure_repositories_routed(resolve_search_binary(), TempRootRoute::from_env(), repos).await
 }
 
-/// [`ensure_repositories_indexed`] with the binary already resolved.
+/// [`ensure_repositories_indexed`] with the binary already resolved, and every
+/// checkout on the CLI route.
 ///
 /// Why: taking it as a parameter is what lets a test drive the whole
 /// probe-and-index path against a stub executable without touching the process
-/// environment (#5308 review).
+/// environment (#5308 review). The temp-root route is disabled because test
+/// checkouts live in temp dirs; `super::temp_root_tests` drives that route.
+/// Test: `super::tests::{an_already_indexed_repository_is_not_reindexed,
+/// one_repository_that_fails_to_index_does_not_stop_the_others}`.
+#[cfg(test)]
+pub(super) async fn ensure_repositories_indexed_with(
+    binary: String,
+    repos: &[DdRepositoryEntry],
+) -> Vec<RepoIndexOutcome> {
+    ensure_repositories_routed(binary, TempRootRoute::disabled(), repos).await
+}
+
+/// The sweep itself, with the binary and the temp-root route supplied.
+///
 /// What: runs the repositories one at a time on the blocking pool — an indexing
 /// pass is CPU- and I/O-heavy at the daemon, and running an org's worth of them
 /// at once would make each slower rather than the set faster. Order is the
 /// manifest's, so two runs over the same state produce the same gap lines.
-/// Test: `super::tests::{an_already_indexed_repository_is_not_reindexed,
-/// one_repository_that_fails_to_index_does_not_stop_the_others}`.
-pub(super) async fn ensure_repositories_indexed_with(
+/// Test: `super::temp_root_tests::a_temp_root_is_indexed_over_the_socket_with_the_opt_in`.
+pub(super) async fn ensure_repositories_routed(
     binary: String,
+    route: TempRootRoute,
     repos: &[DdRepositoryEntry],
 ) -> Vec<RepoIndexOutcome> {
     let owned: Vec<DdRepositoryEntry> = repos.to_vec();
     let task = tokio::task::spawn_blocking(move || {
         owned
             .iter()
-            .map(|entry| ensure_one(&binary, entry))
+            .map(|entry| ensure_one(&binary, &route, entry))
             .collect::<Vec<_>>()
     });
 
@@ -250,7 +292,7 @@ pub(super) async fn ensure_repositories_indexed_with(
 /// What: derives the id, probes, and on a miss spawns the indexing pass. Every
 /// outcome is a value; nothing here panics or propagates.
 /// Test: `super::tests::an_already_indexed_repository_is_not_reindexed`.
-fn ensure_one(binary: &str, entry: &DdRepositoryEntry) -> RepoIndexOutcome {
+fn ensure_one(binary: &str, route: &TempRootRoute, entry: &DdRepositoryEntry) -> RepoIndexOutcome {
     let outcome = |index_id: Option<String>, status: RepoIndexStatus| RepoIndexOutcome {
         repo: entry.name.clone(),
         index_id,
@@ -279,6 +321,14 @@ fn ensure_one(binary: &str, entry: &DdRepositoryEntry) -> RepoIndexOutcome {
         "[tga audit] indexing `{}` into trusty-search index `{index_id}`…",
         entry.path.display()
     );
+    // #214: `trusty-search index` refuses a temp root with no opt-in.
+    #[cfg(unix)]
+    if route.applies_to(&entry.path) {
+        let status = temp_root::index_over_socket(route, &entry.path, &index_id);
+        return report(outcome(Some(index_id), status));
+    }
+    #[cfg(not(unix))]
+    let _ = route;
     let status = match run(binary, index_args(&entry.path, &index_id)) {
         Ok(output) if output.status.success() => RepoIndexStatus::Indexed,
         Ok(output) => RepoIndexStatus::Failed(format!(
