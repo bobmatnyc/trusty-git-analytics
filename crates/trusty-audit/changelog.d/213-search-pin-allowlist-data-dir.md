@@ -1,2 +1,0 @@
-Fixed
-- The `trusty-search` pin in `templates/engagement.template.toml` moves from 0.61.1 to 0.62.1, the first release whose `index add` writes `allowlist.toml` under `TRUSTY_DATA_DIR` (trusty-tools#10366). With 0.61.1, a run that isolated its daemon under a scratch data dir still appended each checkout to the operator's real allowlist ([#213](https://github.com/bobmatnyc/trusty-git-analytics/issues/213)).
