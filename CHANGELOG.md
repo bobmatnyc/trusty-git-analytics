@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.5.1] — 2026-11-03
+
+### Fixed
+
+- `tga collect` walks a GitHub repository's pull-request listing past 10,000 PRs. The `/pulls` walk has its own 2,000-page (200,000-PR) cap instead of the shared 100-page cap, so a large repository collects fully instead of stopping silently at 10,000. A listing that still stops early, at the cap or on a rate limit on any page, is reported as PARTIAL in the collect output; the rows fetched before the stop are kept. A repository rate limited on its first page is reported as not collected instead of as having no PRs (#200).
+- `tga audit` requires `OPENROUTER_API_KEY` only when the selected inference provider is `openrouter`. The provider comes from the four `TRUSTY_REVIEW_*` variables when all four are set, which is what `taudit` hands its `tga audit` child, and is OpenRouter otherwise. Under `provider = "bedrock"` the audit no longer refuses with "OPENROUTER_API_KEY is not set" before any Bedrock call; AWS credentials stay with the AWS SDK in trusty-review. An OpenRouter run with no key is refused with the same message as before ([#210](https://github.com/bobmatnyc/trusty-git-analytics/issues/210)).
+- `tga audit` starts trusty-search with `start --foreground --socket <path>`, where `<path>` is the socket its preflight polls. Before, it started a bare `start --foreground`, so with `TRUSTY_SEARCH_SOCKET` set the daemon bound `<TRUSTY_DATA_DIR>/trusty-search.sock` while the preflight polled the override; the audit was refused after the 60-second startup timeout and the daemon was left running ([#211](https://github.com/bobmatnyc/trusty-git-analytics/issues/211)).
+- `tga audit` reads `TRUSTY_ANALYZE_SOCKET`, the analyze-socket variable trusty-analyze and taudit document. Before, it read only `PR_INTELLIGENCE_ANALYZER_SOCKET`, so the override was ignored and the audit dialled, and started a daemon on, the default socket. `PR_INTELLIGENCE_ANALYZER_SOCKET` is still read when `TRUSTY_ANALYZE_SOCKET` is unset. The analyze preflight now starts `trusty-analyze serve --socket <path>` on the socket it polls, and the `trusty-review report` child is handed the same path, so the guard, the daemon and the renderer use one socket ([#212](https://github.com/bobmatnyc/trusty-git-analytics/issues/212)).
+- `tga audit` now indexes a checkout under `/tmp`, `/private/tmp` or `/var/folders`. `trusty-search index` refuses such a root with no opt-in, so a scratch work dir was never indexed and its findings, complexity and health factors were reported as not assessed. For these roots `tga audit` creates the index over the trusty-search socket with `allow_sensitive_path`, queues a reindex, and waits for the walk; other roots still use `trusty-search index`. The root must still be approved with `trusty-search index add --allow-sensitive-path` ([#214](https://github.com/bobmatnyc/trusty-git-analytics/issues/214)).
+
 ## [10.5.0] — 2026-10-29
 
 ### Breaking
