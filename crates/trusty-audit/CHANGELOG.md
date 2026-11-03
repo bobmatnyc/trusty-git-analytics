@@ -10,6 +10,26 @@ edit this file by hand (see
 
 ---
 
+## [0.15.3] — 2026-11-03
+
+### Fixed
+
+- An engagement pinned to tga 10.x now installs. trusty-audit moved from trusty-installer 0.13.7 to 0.14.0 and from trusty-common 0.52 to 0.58 ([#208](https://github.com/bobmatnyc/trusty-git-analytics/issues/208)). 0.13.7 looked for tga only in bobmatnyc/trusty-tools releases, which stop at v8.0.0, so every tga 10.x pin failed with `PinnedError::VersionNotPublished`. 0.14.0 resolves tga from bobmatnyc/trusty-git-analytics.
+- trusty-installer 0.14.0 also reads 100 releases per page instead of GitHub's default 30, so older pins such as trusty-analyze 0.12.7 no longer drop out of the release list as newer releases are published ([#208](https://github.com/bobmatnyc/trusty-git-analytics/issues/208)).
+- `taudit run` and `taudit audit` no longer refuse a blank or absent `openrouter_key` when `[models] provider = "bedrock"`. The key is required, prompted for and passed to the `tga audit` child only when the selected provider is `openrouter`; any other provider authenticates on its own, so operators no longer put a placeholder key in `engagement.toml` ([#210](https://github.com/bobmatnyc/trusty-git-analytics/issues/210)).
+- The `trusty-search` pin in `templates/engagement.template.toml` moves from 0.61.1 to 0.62.1, the first release whose `index add` writes `allowlist.toml` under `TRUSTY_DATA_DIR` (trusty-tools#10366). With 0.61.1, a run that isolated its daemon under a scratch data dir still appended each checkout to the operator's real allowlist ([#213](https://github.com/bobmatnyc/trusty-git-analytics/issues/213)).
+- `taudit` approves a checkout under `/tmp`, `/private/tmp` or `/var/folders` with `trusty-search index add --allow-sensitive-path`, so a work dir in a scratch location is no longer refused at approval. Other checkouts are approved without the flag, as before ([#214](https://github.com/bobmatnyc/trusty-git-analytics/issues/214)).
+- Grounding now starts `trusty-search` with `start --foreground --socket <path>` and `trusty-analyze` with `serve --socket <path>`, where `<path>` is the socket it then polls. With `TRUSTY_SEARCH_SOCKET` or `TRUSTY_ANALYZE_SOCKET` set, the daemon it started bound its default socket instead, so the readiness poll timed out and the daemon was left running ([#217](https://github.com/bobmatnyc/trusty-git-analytics/issues/217)).
+- `taudit render` no longer requires an OpenRouter key when the selected provider is not `openrouter`. A Bedrock engagement with a blank or absent `openrouter_key` re-renders, and no blank key is set on the `trusty-review` child; an `openrouter` engagement with no key is still refused ([#220](https://github.com/bobmatnyc/trusty-git-analytics/issues/220)).
+- `taudit render` decides whether an OpenRouter key is required from the provider the delivered manifest's `[inference]` table names, ahead of the operator's `TRUSTY_REVIEW_*` variables and the engagement config's `[models]` table, which is the order `trusty-review` resolves in. A Bedrock package re-renders with no key and no engagement config; a package declaring `openrouter` with no key is refused up front with the error naming `OPENROUTER_API_KEY`, even when the local config says `bedrock` ([#221](https://github.com/bobmatnyc/trusty-git-analytics/issues/221)).
+- Grounding's daemon health probe now has its own 3 s request budget instead of the 200 ms connect budget. trusty-search 0.62.1 answers `search.health` in about 1 s, so a running daemon was reported as `serving but did not report healthy within 60s` and the evidence tier degraded; the pre-spawn probe also read it as absent and started a second daemon. The readiness wait keeps its bound: a daemon that never answers is still reported unhealthy within it ([#230](https://github.com/bobmatnyc/trusty-git-analytics/issues/230)).
+
+### Changed
+
+- Refreshed the `[tools]` pins in `templates/engagement.template.toml` to the newest published releases ([#181](https://github.com/bobmatnyc/trusty-git-analytics/issues/181)): `tga` 10.3.0 -> 10.4.0, `trusty-search` 0.54.2 -> 0.61.1, `trusty-analyze` 0.12.6 -> 0.12.7 and `trusty-review` 0.36.0 -> 0.38.5. `scripts/check-engagement-pins.sh` now reports every pin as current.
+- trusty-audit now requires zip 2.6.1 or later. zip 2.6 adds a reader type parameter to `zip::read::ZipFile`, and the return-package signature check names it ([#227](https://github.com/bobmatnyc/trusty-git-analytics/pull/227)). No behaviour change.
+- Refreshed the `[tools]` pin in `templates/engagement.template.toml` to the newest published `tga`, 10.4.0 -> 10.5.1 ([#239](https://github.com/bobmatnyc/trusty-git-analytics/issues/239)). `trusty-search` 0.62.1, `trusty-analyze` 0.12.7 and `trusty-review` 0.38.5 already named their newest releases and do not move. `scripts/check-engagement-pins.sh` now reports every pin as current.
+
 ## [0.15.2] — 2026-10-07
 
 ### Fixed
