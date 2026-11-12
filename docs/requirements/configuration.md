@@ -766,6 +766,8 @@ In floor mode:
 | `backoff_factor` | f64 | 2.0 | Exponential backoff multiplier |
 | `fetch_prs` | bool | false | Fetch pull request metadata from GitHub |
 | `fetch_pr_reviews` | bool | true | Fetch review summaries with PRs |
+| `review_fetch_concurrency` | u32 | 1 | Concurrent `GET /pulls/{n}/reviews` requests in the reviewer pass |
+| `review_fetch_max_prs` | u32 | 500 | Most PRs one reviewer pass fetches reviews for; `0` means no cap. The pass picks PRs never checked, or whose GitHub `updated_at` is later than their last check, newest first. PRs a capped or rate-limited pass did not reach stay selectable for the next run. `--force-refresh-prs` ignores the cap and re-reads every GitHub PR. Added in #245. |
 | `open_pr_refresh_ttl_hours` | u32 | 1 | TTL for refreshing open PR snapshots |
 | `ticket_regex` | string | None | Override regex for detecting GitHub ticket refs (e.g. `#(\d+)`) in commit messages. Added in v1.0.6 (#75). |
 | `work_items_unavailable` | string | None | Declares the GitHub work-item leg ABSENT for this run and says why. Set it and no GitHub adapter is built, the reason is logged, and `tga audit` names it in the report's Gaps section as a leg that was not attempted. Leave it unset and nothing changes — a configured `repo` whose fetch fails still fails the `collect` stage. A reason, never a boolean: an empty string declares nothing. Added in #6130. |

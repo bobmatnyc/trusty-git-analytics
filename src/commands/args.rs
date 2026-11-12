@@ -353,10 +353,14 @@ pub struct CollectArgs {
     /// Perform all steps except writing to the database (log intent only).
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
-    /// Re-fetch ADO pull requests even if they are already in the database.
+    /// Re-fetch ADO pull requests and every GitHub pull request's reviews,
+    /// even if they are already in the database.
     ///
-    /// Use this to backfill rows persisted before v1.0.9 that have
-    /// `commit_shas = '[]'`. [default: false]
+    /// ADO: backfills rows persisted before v1.0.9 that have
+    /// `commit_shas = '[]'`. GitHub: re-reads reviews for every pull request,
+    /// ignoring the reviews-checked marker and `github.review_fetch_max_prs`.
+    /// [default: false]
+    // #245: the flag also drives the GitHub reviewer pass.
     #[arg(long, default_value_t = false)]
     pub force_refresh_prs: bool,
     /// Skip the post-collection tag and release-branch reachability scan.

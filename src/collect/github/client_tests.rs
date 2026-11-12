@@ -33,6 +33,7 @@ fn sample_pr(repository: &str, pr_number: u64, state: PrState, fetched_at: &str)
         fetched_at: fetched_at.to_string(),
         head_ref: Some("feature/PROJ-1-thing".to_string()),
         body_ticket_id: Some("#42".to_string()),
+        updated_at: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn gh(repo: Option<&str>, org: Option<&str>) -> GithubConfig {
         fetch_prs: true,
         fetch_pr_reviews: true,
         review_fetch_concurrency: 1,
+        review_fetch_max_prs: 0,
         ticket_regex: None,
         fetch_on_reference: false,
         work_items_unavailable: None,

@@ -562,6 +562,7 @@ fn sample_pr(repository: &str, pr_number: u64, state: PrState, fetched_at: &str)
         fetched_at: fetched_at.to_string(),
         head_ref: None,
         body_ticket_id: None,
+        updated_at: None,
     }
 }
 

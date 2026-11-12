@@ -264,6 +264,18 @@ pub struct PullRequest {
     /// Test: `collect::correlate::tests::pr_body_supplies_a_key_the_subject_lacks`.
     #[serde(default)]
     pub body_ticket_id: Option<String>,
+
+    /// The provider's own last-update time for this PR, when it reports one.
+    ///
+    /// Why: #245 — GitHub bumps a PR's `updated_at` when a review is
+    /// submitted, so it is the signal that tells the reviewer pass a PR it
+    /// already checked has new reviews to read.
+    /// What: `Some` for GitHub PRs (the list payload's `updated_at`); `None`
+    /// for providers that do not set it. Persisted in
+    /// `pull_requests.updated_at` (migration v39).
+    /// Test: `crate::collect::github_pipeline::review_select_tests`.
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Cascade tier that produced a classification.

@@ -21,7 +21,9 @@ use crate::collect::github::budget::RunBudget;
 use crate::collect::github::fetch_faults::{http_status, FaultWording, FetchFaults};
 use crate::collect::github::org_discovery::{discover_org_repos_within, effective_orgs};
 use crate::collect::github::repo_resolver::build_http_client;
-use crate::collect::github::reviewer_store::upsert_github_pr_reviewer;
+use crate::collect::github::reviewer_store::{
+    mark_reviews_checked, select_review_candidates, upsert_github_pr_reviewer,
+};
 use crate::collect::github::types::GitHubReview;
 use crate::collect::github::GitHubClient;
 use crate::core::config::GithubConfig;
@@ -115,8 +117,11 @@ pub(super) fn org_discovery_enabled(gh_cfg: &GithubConfig) -> bool {
 /// controls how many reviews requests fly in parallel; the field was
 /// previously declared and documented but never read, making it a silent
 /// no-op (review finding #1).
-/// What: queries all GitHub PRs from the DB (or just new ones when
-/// `force_refresh_prs=false`), issues review requests with up to
+/// What: selects GitHub PRs through
+/// [`select_review_candidates`] — every PR when `force_refresh_prs` is set,
+/// otherwise PRs never checked or updated since their last check, newest
+/// first, capped at `review_fetch_max_prs` (#245) — issues review requests
+/// with up to
 /// `review_fetch_concurrency.max(1)` concurrent in-flight calls via
 /// `futures::stream::buffer_unordered`, then serializes DB upserts after
 /// collecting results. A value of 0 or 1 produces serial behaviour
@@ -137,51 +142,30 @@ pub(super) async fn fetch_and_store_github_reviewers(
     stats: &mut CollectionStats,
     budget: &RunBudget,
 ) {
-    // Gather all GitHub PRs that need reviewer data.  When force_refresh_prs
-    // is true we re-fetch all; otherwise we only fetch PRs that have no
-    // reviewer rows yet (forward-only).
-    let prs: Vec<(i64, String, u64)> = {
-        let conn = db.connection();
-        let query = if force_refresh_prs {
-            "SELECT id, repository, pr_number FROM pull_requests \
-             WHERE provider = 'github' ORDER BY id"
-        } else {
-            "SELECT p.id, p.repository, p.pr_number \
-             FROM pull_requests p \
-             WHERE p.provider = 'github' \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM pr_reviewers r \
-                   WHERE r.pr_id = p.id AND r.provider = 'github' \
-               ) \
-             ORDER BY p.id"
-        };
-        let mut stmt = match conn.prepare(query) {
-            Ok(s) => s,
-            Err(e) => {
-                stats.fail_stage(format!("GitHub reviewer query prepare failed: {e}"));
-                return;
-            }
-        };
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)? as u64,
-            ))
-        });
-        match rows {
-            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
-            Err(e) => {
-                stats.fail_stage(format!("GitHub reviewer query failed: {e}"));
-                return;
-            }
+    // #245: newest first, bounded by `review_fetch_max_prs`, and only PRs
+    // never checked or updated since their last check. `--force-refresh-prs`
+    // re-reads every GitHub PR.
+    let prs = match select_review_candidates(
+        db.connection(),
+        force_refresh_prs,
+        gh_cfg.review_fetch_max_prs,
+    ) {
+        Ok(prs) => prs,
+        Err(e) => {
+            stats.fail_stage(format!("GitHub reviewer query failed: {e}"));
+            return;
         }
     };
 
     if prs.is_empty() {
         return;
     }
-    info!(count = prs.len(), "fetching GitHub PR reviews");
+    info!(
+        count = prs.len(),
+        cap = gh_cfg.review_fetch_max_prs,
+        force_refresh_prs,
+        "fetching GitHub PR reviews"
+    );
 
     // Build a reviews-only client (no dummy repo slugs needed).
     let gh_client = match GitHubClient::new_for_reviews(gh_cfg).map(|c| c.with_run_budget(budget)) {
@@ -281,9 +265,10 @@ async fn fetch_reviews(
 /// point the pass at a local mock.
 /// What: runs [`fetch_reviews`], then serializes the upserts (a rusqlite
 /// `Connection` is not `Send`). A rate limit is recorded ONCE, as
-/// [`crate::collect::CollectionStats::skip_item`] rather than `fail_stage`: the
-/// PR query is forward-only, so the next `tga collect` resumes at the PRs this
-/// run never reached, and failing the whole run made `fetch_pr_reviews: true`
+/// [`crate::collect::CollectionStats::skip_item`] rather than `fail_stage`:
+/// only a PR whose reviews were fetched and stored gets its reviews-checked
+/// marker (#245), so the next `tga collect` selects the PRs this run never
+/// reached, and failing the whole run made `fetch_pr_reviews: true`
 /// unusable unattended. Every other per-PR failure skips that PR and the pass
 /// continues; at the end [`FetchFaults`] records the 404s as one counted
 /// warning (exit 0) and every other failure as one stage failure (exit
@@ -299,6 +284,9 @@ async fn ingest_reviews(
     prs: &[(i64, String, u64)],
     stats: &mut CollectionStats,
 ) {
+    // #245: one wall clock for the whole pass, captured before any fetch; it
+    // is the marker only for a PR whose `updated_at` is unknown.
+    let checked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false);
     let fetched = fetch_reviews(gh_client, prs, concurrency).await;
 
     let mut rate_limited = 0usize;
@@ -307,16 +295,29 @@ async fn ingest_reviews(
         match outcome {
             ReviewFetch::Fetched(reviews) => {
                 let conn = db.connection();
+                let mut stored_all = true;
                 for review in &reviews {
                     match upsert_github_pr_reviewer(conn, pr_db_id, review) {
                         Ok(()) => stats.reviewers_fetched += 1,
                         Err(e) => {
                             // #5655: one PR's reviewer row, not the pass — the
                             // remaining PRs still upsert.
+                            stored_all = false;
                             stats.skip_item(format!(
                                 "reviewer upsert failed for {repository}#{pr_number}: {e}"
                             ));
                         }
+                    }
+                }
+                // #245: mark only a PR whose reviews were fetched AND stored,
+                // so a PR with zero reviews is not re-fetched every run. A
+                // failed or rate-limited PR is never marked and stays
+                // selectable next run.
+                if stored_all {
+                    if let Err(e) = mark_reviews_checked(conn, pr_db_id, &checked_at) {
+                        stats.skip_item(format!(
+                            "reviews-checked marker failed for {repository}#{pr_number}: {e}"
+                        ));
                     }
                 }
             }
@@ -348,8 +349,8 @@ async fn ingest_reviews(
         let msg = format!(
             "github reviewers: GitHub rate-limited the reviewer pass; {rate_limited} of {} \
              pull request(s) got no reviewer rows, so pr_reviewers is INCOMPLETE for this \
-             run. The pass is forward-only, so a later `tga collect` resumes at the pull \
-             requests this one never reached (see #6553)",
+             run. Those pull requests keep no reviews-checked marker, so a later `tga \
+             collect` selects them again (see #6553, #245)",
             prs.len()
         );
         warn!("{msg}");
@@ -380,6 +381,11 @@ const REVIEWER_WORDING: FaultWording<'static> = FaultWording {
 #[cfg(test)]
 #[path = "github_pipeline_discovery_tests.rs"]
 mod discovery_tests;
+
+// #245: selection order, cap, marker and the rate-limited arm.
+#[cfg(test)]
+#[path = "github_pipeline_review_select_tests.rs"]
+mod review_select_tests;
 
 #[cfg(test)]
 mod tests {
@@ -425,6 +431,7 @@ mod tests {
             fetch_prs: true,
             fetch_pr_reviews: true,
             review_fetch_concurrency: concurrency,
+            review_fetch_max_prs: 0,
             ticket_regex: None,
             fetch_on_reference: false,
             work_items_unavailable: None,

@@ -351,6 +351,7 @@ mod tests {
             fetch_prs: true,
             fetch_pr_reviews: true,
             review_fetch_concurrency: 1,
+            review_fetch_max_prs: 0,
             ticket_regex: None,
             fetch_on_reference: false,
             work_items_unavailable: None,

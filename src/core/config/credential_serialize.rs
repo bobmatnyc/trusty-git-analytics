@@ -96,11 +96,12 @@ impl Serialize for GithubConfig {
             fetch_prs,
             fetch_pr_reviews,
             review_fetch_concurrency,
+            review_fetch_max_prs,
             ticket_regex,
             fetch_on_reference,
             work_items_unavailable,
         } = self;
-        let mut s = serializer.serialize_struct("GithubConfig", 11)?;
+        let mut s = serializer.serialize_struct("GithubConfig", 12)?;
         s.serialize_field("token", &mask(token.as_ref()))?;
         s.serialize_field("org", org)?;
         s.serialize_field("orgs", orgs)?;
@@ -109,6 +110,8 @@ impl Serialize for GithubConfig {
         s.serialize_field("fetch_prs", fetch_prs)?;
         s.serialize_field("fetch_pr_reviews", fetch_pr_reviews)?;
         s.serialize_field("review_fetch_concurrency", review_fetch_concurrency)?;
+        // #245: the reviewer-pass cap.
+        s.serialize_field("review_fetch_max_prs", review_fetch_max_prs)?;
         s.serialize_field("ticket_regex", ticket_regex)?;
         s.serialize_field("fetch_on_reference", fetch_on_reference)?;
         s.serialize_field("work_items_unavailable", work_items_unavailable)?;

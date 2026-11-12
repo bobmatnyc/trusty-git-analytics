@@ -96,6 +96,94 @@ pub fn lookup_github_pr_id(
     }
 }
 
+/// Select the GitHub pull requests the reviewer pass should fetch reviews for.
+///
+/// Why: #245 — the pass selected every PR with no `pr_reviewers` row, ordered
+/// by `id`. A PR with zero reviews never gets a row, so it was re-fetched on
+/// every run, oldest first; on a large history those PRs used up the rate
+/// budget and newer PRs never got reviews. A PR that had a row was never
+/// re-read, so reviews added later were lost.
+/// What: returns `(id, repository, pr_number)` for GitHub PRs whose
+/// `reviews_checked_at` is NULL or earlier than their `updated_at`, newest
+/// first by `updated_at` (falling back to `created_at`), at most `max_prs`
+/// rows (`0` = no cap). With `force_refresh` set it returns every GitHub PR,
+/// newest first, ignoring both the marker and the cap — the full re-fetch
+/// `--force-refresh-prs` asks for. Timestamps are compared with
+/// `julianday()`, so RFC3339 strings with different precision or offset
+/// spellings still order correctly.
+/// Test: `crate::collect::github_pipeline::review_select_tests` —
+/// `a_rate_limited_pass_leaves_the_unfetched_prs_selectable_next_run`,
+/// `a_pr_updated_after_its_check_is_selected_again`,
+/// `selection_is_newest_first_and_capped`,
+/// `force_refresh_selects_every_github_pr_ignoring_marker_and_cap`.
+///
+/// # Errors
+///
+/// Returns [`TgaError::DbError`] on SQL failure.
+pub fn select_review_candidates(
+    conn: &Connection,
+    force_refresh: bool,
+    max_prs: u32,
+) -> Result<Vec<(i64, String, u64)>> {
+    // #245: SQLite reads a negative LIMIT as "no limit".
+    let limit: i64 = if force_refresh || max_prs == 0 {
+        -1
+    } else {
+        i64::from(max_prs)
+    };
+    let filter = if force_refresh {
+        ""
+    } else {
+        // #245: never checked, or updated since the last check.
+        "AND (p.reviews_checked_at IS NULL \
+              OR julianday(p.updated_at) > julianday(p.reviews_checked_at)) "
+    };
+    let sql = format!(
+        "SELECT p.id, p.repository, p.pr_number \
+         FROM pull_requests p \
+         WHERE p.provider = 'github' {filter}\
+         ORDER BY julianday(COALESCE(p.updated_at, p.created_at)) DESC, p.id DESC \
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(TgaError::from)?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })
+        .map_err(TgaError::from)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(TgaError::from)?;
+    Ok(rows)
+}
+
+/// Record that the reviewer pass fetched and stored this PR's reviews.
+///
+/// Why: #245 — the marker is what stops a PR with zero reviews being
+/// re-fetched on every run. It must be written only for a PR whose fetch
+/// succeeded; a rate-limited or failed PR keeps its old marker so the next
+/// run selects it again.
+/// What: sets `reviews_checked_at` to the PR's own `updated_at`, or to
+/// `checked_at` (the pass's wall clock) when `updated_at` is NULL. Using the
+/// provider's timestamp avoids comparing GitHub's clock with the local one:
+/// the PR is selected again only once GitHub reports a later `updated_at`.
+/// Test: `crate::collect::github_pipeline::review_select_tests::a_rate_limited_pass_leaves_the_unfetched_prs_selectable_next_run`.
+///
+/// # Errors
+///
+/// Returns [`TgaError::DbError`] on SQL failure.
+pub fn mark_reviews_checked(conn: &Connection, pr_db_id: i64, checked_at: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE pull_requests SET reviews_checked_at = COALESCE(updated_at, ?2) WHERE id = ?1",
+        params![pr_db_id, checked_at],
+    )
+    .map_err(TgaError::from)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
