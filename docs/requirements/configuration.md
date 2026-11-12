@@ -1024,6 +1024,17 @@ for identity. A 429 or 529 is retried up to four attempts, waiting the
 `Retry-After` the server sends (at most 30 s). A response that repeats the
 cursor it was asked for stops the sync with an error.
 
+Search results that are not pages (databases, data sources) are skipped, and
+no comments are requested for them. When one page's `/v1/comments` answers
+403 or 404 (Notion `restricted_resource` / `object_not_found`), that page's
+comments are skipped and counted: the run stores every page and user event,
+advances the cursor, logs a warning, and records one non-fatal fault with the
+number of pages whose comments were unreadable. The usual cause is a token
+without the "read comments" capability. Any other comments failure (401,
+429/529 after retries, 5xx, transport) and any `/v1/search` or `/v1/users`
+failure still fails the sync. Every Notion error names the HTTP status, the
+endpoint, and Notion's error `code` and `message`.
+
 Each sync is all-or-nothing, the first one included: a failure discards that
 run's fetched data, records a stage failure, and leaves the cursor unchanged,
 so the next run starts over from the same point. A first sync that fails

@@ -253,6 +253,32 @@ async fn a_repeated_cursor_is_an_error() {
     assert!(matches!(err, NotionError::CursorRepeated { .. }), "{err}");
 }
 
+/// #252: an error names the status, the endpoint, and Notion's own error
+/// `code` and `message` — and never the token.
+#[tokio::test]
+async fn an_error_carries_the_notion_code_and_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "object": "error", "status": 404, "code": "object_not_found",
+            "message": "Could not find block with ID: p1."
+        })))
+        .mount(&server)
+        .await;
+    let err = client(&server).list_comments("p1").await.expect_err("404");
+    let text = err.to_string();
+    for part in [
+        "HTTP 404",
+        "/v1/comments",
+        "object_not_found",
+        "Could not find block",
+    ] {
+        assert!(text.contains(part), "missing {part:?} in {text}");
+    }
+    assert!(!text.contains(TOKEN), "the token must never appear: {text}");
+}
+
 #[tokio::test]
 async fn has_more_without_a_cursor_is_an_error() {
     let server = MockServer::start().await;

@@ -14,7 +14,7 @@
 //! `sync_stores_events_and_advances_the_cursor`.
 
 use chrono::Utc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::client::{parse_ts, NotionClient};
 use super::error::NotionError;
@@ -37,6 +37,9 @@ pub struct NotionSyncOutcome {
     /// likely lacks the "read user information including email addresses"
     /// capability (#252).
     pub email_capability_missing: bool,
+    /// Pages whose `/v1/comments` answered 403 or 404; their comments were
+    /// skipped, their page events stored (#252).
+    pub unreadable_comment_pages: usize,
 }
 
 /// The fault text recorded when no listed person carries an email (#252).
@@ -85,6 +88,19 @@ pub(crate) async fn sync_workspace(
             );
             stats.notion_events += outcome.events;
             stats.notion_unresolved_actors += outcome.unresolved_actors;
+            if outcome.unreadable_comment_pages > 0 {
+                // #252: non-fatal — pages and users are stored, only those
+                // pages' comments are missing.
+                let msg = format!(
+                    "Notion: comments unreadable on {} page(s) (HTTP 403/404); those pages' \
+                     comments were skipped. The token most likely lacks the \"read \
+                     comments\" capability, or cannot read comments on those pages \
+                     (workspace {workspace})",
+                    outcome.unreadable_comment_pages
+                );
+                warn!(workspace, "{msg}");
+                stats.skip_item(msg);
+            }
             if outcome.email_capability_missing {
                 // #252: non-fatal — the events are stored, but identity is not.
                 warn!(workspace, "{EMAIL_CAPABILITY_MISSING}");
@@ -115,6 +131,7 @@ async fn try_sync(
         pages,
         comments,
         users,
+        unreadable_comment_pages,
     } = fetch_all(client, watermark).await?;
 
     let new_watermark = pages
@@ -136,6 +153,7 @@ async fn try_sync(
         events: written,
         unresolved_actors,
         email_capability_missing: people_without_any_email(&users),
+        unreadable_comment_pages,
     })
 }
 
@@ -144,18 +162,31 @@ struct Fetched {
     pages: Vec<PageMeta>,
     comments: Vec<CommentMeta>,
     users: Vec<NotionUser>,
+    unreadable_comment_pages: usize,
 }
 
 /// Fetch everything before writing anything, so a fetch error leaves the
 /// database exactly as it was.
+///
+/// #252: a page whose comments answer 403 or 404 is counted and its comments
+/// skipped; every other comments failure, and any search or users failure,
+/// still fails the whole sync.
 async fn fetch_all(
     client: &NotionClient,
     watermark: Option<chrono::DateTime<Utc>>,
 ) -> Result<Fetched, NotionError> {
     let pages = client.search_pages_since(watermark).await?;
     let mut comments = Vec::new();
+    let mut unreadable_comment_pages = 0;
     for p in &pages {
-        comments.extend(client.list_comments(&p.id).await?);
+        match client.list_comments(&p.id).await {
+            Ok(c) => comments.extend(c),
+            Err(e) if e.is_access_denied() => {
+                debug!(page_id = %p.id, error = %e, "Notion comments unreadable; skipped");
+                unreadable_comment_pages += 1;
+            }
+            Err(e) => return Err(e),
+        }
     }
     let users = if pages.is_empty() {
         Vec::new()
@@ -166,5 +197,6 @@ async fn fetch_all(
         pages,
         comments,
         users,
+        unreadable_comment_pages,
     })
 }
