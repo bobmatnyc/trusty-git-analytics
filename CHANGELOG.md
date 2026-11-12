@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.6.0] — 2026-11-12
+
+### Breaking
+
+- The public `PullRequest` struct gains `updated_at: Option<DateTime<Utc>>`, and `GithubConfig` gains `review_fetch_max_prs: u32` (`GithubConfig` is `#[non_exhaustive]`, so only `PullRequest` struct literals outside the crate break). Set `updated_at: None` where the provider reports no update time ([#245](https://github.com/bobmatnyc/trusty-git-analytics/issues/245)).
+
+### Fixed
+
+- The GitHub reviewer pass no longer re-fetches pull requests with zero reviews on every run, oldest first. Each PR now carries a "reviews checked at" marker (migration v39). The pass selects PRs never checked, or whose GitHub `updated_at` is later than their last check, so reviews added later are read. It runs newest first and stops at `github.review_fetch_max_prs` PRs per run (default 500, `0` = no cap). A rate-limited or capped pass marks only the PRs it fetched; the rest stay selectable for the next run. On upgrade, PRs that already have reviewer rows start marked at their last fetch time, so the first run does not re-read them all. `--force-refresh-prs` still re-reads every GitHub PR, and its help now names GitHub as well as ADO ([#245](https://github.com/bobmatnyc/trusty-git-analytics/issues/245)).
+- The GitHub PR listing gives each org its own rate-limit budget and breaker. Before, every org and repository listed on one run-wide breaker, so a rate limit in the first org stopped every repository of later orgs at page 1 and they were under-collected. Each org now gets an equal share of the sleep allowance the run has left, split across the orgs not yet listed, and a rate limit latches only that org's breaker. The run-wide allowance (`TGA_RATE_LIMIT_SLEEP_BUDGET_SECS`, default 120 s) stays the outer bound. The collect summary adds one line per affected org with a count, for example `GitHub pulls listing for org acme: 3 of 12 repositories truncated by a rate limit; these results are PARTIAL` ([#246](https://github.com/bobmatnyc/trusty-git-analytics/issues/246)).
+
 ## [10.5.1] — 2026-11-03
 
 ### Fixed
