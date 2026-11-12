@@ -1,0 +1,2 @@
+Fixed
+- Notion collect no longer fails when the token cannot list users (#252). A personal access token gets HTTP 403 `restricted_resource` on `/v1/users`; a 403 or 404 there now records one non-fatal fault ("token cannot list users; actors unresolved"), and the sync stores its events with every actor unresolved and advances the cursor. Other `/v1/users` failures still fail the stage. Users are listed before the page search, so a failure there no longer costs a full page walk first.

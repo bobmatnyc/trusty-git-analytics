@@ -6,17 +6,21 @@
 //! reads the whole workspace and can run for most of an hour, so one late
 //! failure must not discard everything fetched before it.
 //! What: [`fetch_and_store_notion_activity`] runs only when `config.notion`
-//! is set. [`sync_workspace`] reads the cursor, searches pages edited since
-//! it, lists the users, then walks the pages oldest edit first, fetching
-//! comments and committing events plus cursor in one transaction per batch
+//! is set. [`sync_workspace`] reads the cursor, lists the users, searches
+//! pages edited since the cursor, then walks the pages oldest edit first,
+//! fetching comments and committing events plus cursor in one transaction per batch
 //! of [`BATCH_PAGES`] pages. A failure records `stats.fail_stage`; batches
 //! already committed stay, and the cursor never passes a page whose events
 //! were not stored (Fail-Open Check). A rerun resumes after the last batch.
+//! A 403/404 on `/v1/users` (a personal access token cannot list users) is
+//! a non-fatal fault: actors stay unresolved and the sync continues.
 //! Test: `pipeline_tests` — `a_failed_fetch_leaves_the_cursor_unchanged`,
 //! `a_failed_write_leaves_the_cursor_unchanged`,
 //! `sync_stores_events_and_advances_the_cursor`,
 //! `a_persistent_failure_keeps_earlier_batches_and_stops_the_cursor_there`,
-//! `a_rerun_after_a_failure_resumes_without_duplicates`.
+//! `a_rerun_after_a_failure_resumes_without_duplicates`,
+//! `a_refused_user_listing_stores_events_with_actors_unresolved`,
+//! `a_non_access_user_listing_failure_still_fails_the_sync`.
 
 use std::collections::HashSet;
 
@@ -51,6 +55,8 @@ pub struct NotionSyncOutcome {
     /// Pages whose `/v1/comments` answered 403 or 404; their comments were
     /// skipped, their page events stored (#252).
     pub unreadable_comment_pages: usize,
+    /// `/v1/users` answered 403 or 404, so no actor was resolved (#252).
+    pub users_unlisted: bool,
 }
 
 /// The fault text recorded when no listed person carries an email (#252).
@@ -58,6 +64,12 @@ pub(crate) const EMAIL_CAPABILITY_MISSING: &str =
     "Notion: /v1/users listed people but none with an email; every actor stays \
      unresolved (NULL actor_email). The token most likely lacks the \"read user \
      information including email addresses\" capability";
+
+// #252: a personal access token gets 403 `restricted_resource` on /v1/users.
+/// The fault text recorded when `/v1/users` refuses the listing (#252).
+pub(crate) const USERS_UNLISTED: &str =
+    "Notion: token cannot list users (/v1/users answered HTTP 403/404); actors unresolved \
+     (NULL actor_email). Events are stored without identity";
 
 /// Run the Notion step when `config.notion` is set; no-op otherwise.
 ///
@@ -90,7 +102,13 @@ pub(crate) async fn sync_workspace(
     stats: &mut CollectionStats,
 ) -> Option<NotionSyncOutcome> {
     let mut progress = Progress::default();
-    match try_sync(db, client, workspace, resolver, &mut progress).await {
+    let result = try_sync(db, client, workspace, resolver, &mut progress).await;
+    if let Some(cause) = &progress.users_refused {
+        // #252: non-fatal, recorded once whether or not the sync later fails.
+        warn!(workspace, "{USERS_UNLISTED}: {cause}");
+        stats.skip_item(format!("{USERS_UNLISTED} (workspace {workspace}): {cause}"));
+    }
+    match result {
         Ok(()) => {
             let outcome = progress.outcome();
             info!(
@@ -147,6 +165,8 @@ struct Progress {
     unresolved: HashSet<String>,
     email_capability_missing: bool,
     unreadable_comment_pages: usize,
+    /// #252: the `/v1/users` refusal (403/404), when the listing was refused.
+    users_refused: Option<String>,
 }
 
 impl Progress {
@@ -156,6 +176,7 @@ impl Progress {
             unresolved_actors: self.unresolved.len(),
             email_capability_missing: self.email_capability_missing,
             unreadable_comment_pages: self.unreadable_comment_pages,
+            users_unlisted: self.users_refused.is_some(),
         }
     }
 }
@@ -177,6 +198,22 @@ async fn try_sync(
     progress: &mut Progress,
 ) -> Result<(), NotionError> {
     let watermark = store::read_watermark(db.connection(), workspace)?;
+    // #252: list users before the search, so a refusal or a failure costs no
+    // long page walk first. Only 403/404 degrades to "no users"; any other
+    // error (transient ones already retried) still fails (Fail-Open Check).
+    // Page and comment payloads carry only the user id, so nothing else can
+    // resolve an actor.
+    let users = match client.list_users().await {
+        Ok(users) => users,
+        Err(e) if e.is_access_denied() => {
+            progress.users_refused = Some(e.to_string());
+            Vec::new()
+        }
+        Err(e) => return Err(e),
+    };
+    progress.email_capability_missing = people_without_any_email(&users);
+    let actors = ActorDirectory::build(&users, resolver);
+
     let pages = client.search_pages_since(watermark).await?;
     if pages.is_empty() {
         return Ok(());
@@ -189,10 +226,6 @@ async fn try_sync(
     keyed.sort_by_key(|(t, _)| *t);
     let (times, pages): (Vec<_>, Vec<_>) = keyed.into_iter().unzip();
     let total = pages.len();
-
-    let users = client.list_users().await?;
-    progress.email_capability_missing = people_without_any_email(&users);
-    let actors = ActorDirectory::build(&users, resolver);
 
     let mut done = 0;
     for (batch, batch_times) in pages.chunks(BATCH_PAGES).zip(times.chunks(BATCH_PAGES)) {

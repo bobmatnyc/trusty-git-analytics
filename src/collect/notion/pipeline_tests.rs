@@ -817,3 +817,110 @@ async fn a_rerun_after_a_failure_resumes_without_duplicates() {
         Some(super::events::rfc3339(edited_at(MANY)))
     );
 }
+
+/// #252 live-check failure: a personal access token gets 403
+/// `restricted_resource` on `/v1/users`. The sync must still store its
+/// events and advance the cursor, leave every actor unresolved, and record
+/// one non-fatal fault naming the cause. Fails on 584206e, where the 403
+/// failed the whole stage with 0 events stored.
+#[tokio::test]
+async fn a_refused_user_listing_stores_events_with_actors_unresolved() {
+    let server = MockServer::start().await;
+    mount(&server, "2026-11-10T10:00:00.000Z", 200).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "object": "error", "status": 403, "code": "restricted_resource",
+            "message": "Personal access tokens cannot list users."
+        })))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut db = Database::open_in_memory().expect("db");
+    let mut stats = CollectionStats::default();
+    let out = sync_workspace(
+        &mut db,
+        &client(&server),
+        WS,
+        &IdentityResolver::new(None),
+        &mut stats,
+    )
+    .await
+    .expect("a refused user listing must not fail the sync");
+
+    assert!(
+        stats.stage_failures().is_empty(),
+        "non-fatal: {:?}",
+        stats.errors
+    );
+    assert!(out.users_unlisted);
+    assert!(!out.email_capability_missing, "no people were listed");
+    assert_eq!(out.events, 3);
+    assert_eq!(out.unresolved_actors, 2, "u1 and bot1");
+    assert_eq!(event_count(&db), 3);
+    assert_eq!(watermark(&db).as_deref(), Some("2026-11-10T10:00:00Z"));
+    let resolved: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM fact_notion_activity WHERE actor_email IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(resolved, 0, "no actor resolves without the user list");
+    let faults: Vec<&str> = stats
+        .errors
+        .iter()
+        .filter(|f| !f.is_stage_failure() && f.message.contains("cannot list users"))
+        .map(|f| f.message.as_str())
+        .collect();
+    assert_eq!(faults.len(), 1, "{:?}", stats.errors);
+    assert!(faults[0].contains("actors unresolved"), "{}", faults[0]);
+    assert!(faults[0].contains("restricted_resource"), "{}", faults[0]);
+}
+
+/// #252 Fail-Open Check: only 403/404 on `/v1/users` degrades. A 401 still
+/// fails the sync, stores nothing, and (users listed first) never starts
+/// the page search.
+#[tokio::test]
+async fn a_non_access_user_listing_failure_still_fails_the_sync() {
+    let server = MockServer::start().await;
+    mount(&server, "2026-11-10T10:00:00.000Z", 200).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users"))
+        .respond_with(ResponseTemplate::new(401))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(Vec::new(), None)))
+        .with_priority(1)
+        .expect(0)
+        .mount(&server)
+        .await;
+    let mut db = Database::open_in_memory().expect("db");
+    let mut stats = CollectionStats::default();
+    let out = sync_workspace(
+        &mut db,
+        &client(&server),
+        WS,
+        &IdentityResolver::new(None),
+        &mut stats,
+    )
+    .await;
+
+    assert!(out.is_none());
+    assert_eq!(stats.stage_failures().len(), 1, "{:?}", stats.errors);
+    assert!(
+        !stats
+            .errors
+            .iter()
+            .any(|f| f.message.contains("cannot list users")),
+        "a 401 is not a refusal: {:?}",
+        stats.errors
+    );
+    assert_eq!(event_count(&db), 0);
+    assert_eq!(watermark(&db), None);
+}
