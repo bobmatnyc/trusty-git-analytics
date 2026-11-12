@@ -175,6 +175,9 @@ pub struct FetchBudget {
     /// Total sleep this budget will authorise across its whole lifetime.
     sleep_budget: Duration,
     state: Mutex<BudgetState>,
+    /// #246: the run budget a scoped budget also charges, as the outer bound.
+    /// `None` for a run's own budget.
+    parent: Option<RunBudget>,
 }
 
 impl FetchBudget {
@@ -189,7 +192,39 @@ impl FetchBudget {
         Self {
             sleep_budget,
             state: Mutex::new(BudgetState::default()),
+            parent: None,
         }
+    }
+
+    /// A budget scoped to one org's PR listing, inside the run's budget.
+    ///
+    /// Why: #246 — the PR listing walked every org on the run's one breaker,
+    /// so a rate limit in the first org latched it and every repository in a
+    /// later org stopped at page 1. A scoped budget gives each org its own
+    /// allowance and breaker while the run budget stays the outer ceiling.
+    /// What: a budget with its own `sleep_budget` and breaker. Every
+    /// reservation must fit both this allowance and `parent`'s; a trip on the
+    /// attempt cap latches this budget only. A parent that has latched
+    /// refuses for every scoped budget. Truncation notices go to the parent,
+    /// so the run reports them.
+    /// Test: `budget_tests::a_scoped_budget_trips_alone_and_leaves_the_run_budget_open`,
+    /// `budget_tests::a_scoped_budget_is_bounded_by_its_parent`.
+    pub(crate) fn scoped(parent: &RunBudget, sleep_budget: Duration) -> Self {
+        Self {
+            sleep_budget,
+            state: Mutex::new(BudgetState::default()),
+            parent: Some(parent.clone()),
+        }
+    }
+
+    /// Sleep allowance still unspent; zero once the breaker has latched.
+    // #246: sizes each org's share of what the run has left.
+    pub(crate) fn remaining(&self) -> Duration {
+        let state = self.lock();
+        if state.tripped.is_some() {
+            return Duration::ZERO;
+        }
+        self.sleep_budget.saturating_sub(state.slept)
     }
 
     /// Take the lock, treating a poisoned mutex as usable.
@@ -215,21 +250,28 @@ impl FetchBudget {
     ///
     /// [`CollectError::Throttled`] once the allowance cannot cover `delay`.
     pub(crate) fn reserve(&self, delay: Duration, status: u16) -> Result<Duration, CollectError> {
-        let mut state = self.lock();
-        if let Some((status, retry_after)) = state.tripped {
-            return Err(CollectError::Throttled {
-                status,
-                retry_after,
-            });
+        {
+            let mut state = self.lock();
+            if let Some((status, retry_after)) = state.tripped {
+                return Err(CollectError::Throttled {
+                    status,
+                    retry_after,
+                });
+            }
+            if state.slept + delay > self.sleep_budget {
+                state.tripped = Some((status, Some(delay)));
+                return Err(CollectError::Throttled {
+                    status,
+                    retry_after: Some(delay),
+                });
+            }
         }
-        if state.slept + delay > self.sleep_budget {
-            state.tripped = Some((status, Some(delay)));
-            return Err(CollectError::Throttled {
-                status,
-                retry_after: Some(delay),
-            });
+        // #246: the run budget stays the outer bound for a scoped budget. Its
+        // lock is taken after this budget's is released, never both at once.
+        if let Some(parent) = &self.parent {
+            parent.shared().reserve(delay, status)?;
         }
-        state.slept += delay;
+        self.lock().slept += delay;
         Ok(delay)
     }
 
@@ -237,6 +279,7 @@ impl FetchBudget {
     /// still rate-limited, and return the error to propagate.
     ///
     /// Test: `budget_tests::tripping_on_the_attempt_cap_latches_the_breaker`.
+    // #246: a scoped budget latches only itself, never its parent.
     pub(crate) fn trip(&self, status: u16, retry_after: Option<Duration>) -> CollectError {
         let mut state = self.lock();
         if state.tripped.is_none() {
@@ -251,12 +294,19 @@ impl FetchBudget {
     /// The error every call should fail with once the breaker has latched, or
     /// `None` while the run may still fetch.
     pub(crate) fn tripped_error(&self) -> Option<CollectError> {
-        self.lock()
+        let own = self
+            .lock()
             .tripped
             .map(|(status, retry_after)| CollectError::Throttled {
                 status,
                 retry_after,
-            })
+            });
+        // #246: a latched run budget stops every scoped budget too.
+        own.or_else(|| {
+            self.parent
+                .as_ref()
+                .and_then(|p| p.shared().tripped_error())
+        })
     }
 
     /// Record that a bound trimmed the result set.
@@ -266,7 +316,11 @@ impl FetchBudget {
     /// walk early records why here so the run can say so.
     /// Test: `budget_tests::truncation_notices_are_recorded_in_order`.
     pub(crate) fn note_truncation(&self, message: impl Into<String>) {
-        self.lock().notices.push(message.into());
+        // #246: a scoped budget's notices belong to the run's ledger.
+        match &self.parent {
+            Some(parent) => parent.shared().note_truncation(message),
+            None => self.lock().notices.push(message.into()),
+        }
     }
 
     /// Every truncation recorded so far, in the order it happened.
@@ -331,6 +385,92 @@ impl std::fmt::Debug for RunBudget {
         f.debug_struct("RunBudget")
             .field("sleep_budget", &self.0.sleep_budget)
             .finish_non_exhaustive()
+    }
+}
+
+/// One org's PR-listing budget and its truncation count (#246).
+struct OrgListing {
+    budget: FetchBudget,
+    repos: usize,
+    truncated: usize,
+}
+
+/// Per-org budgets for one pass of the PR listing.
+///
+/// Why: #246 — one shared breaker meant the first org to hit a rate limit
+/// truncated every repository in every later org, so orgs listed later were
+/// systematically under-collected.
+/// What: hands each org (the repository owner) a [`FetchBudget::scoped`]
+/// budget the first time one of its repositories is listed. Its allowance is
+/// an equal share of what the run budget has left, split across the orgs not
+/// yet started, so an earlier org cannot spend a later org's share. Counts
+/// each org's repositories and the ones a rate limit truncated, and words one
+/// summary line per org that had any.
+/// Test: `budget_tests::org_budgets_split_what_the_run_has_left`,
+/// `client_tests::bounded_fetch_tests::a_second_org_is_fully_listed_after_the_first_trips_its_budget`.
+pub(crate) struct OrgBudgets {
+    run: RunBudget,
+    orgs_left: usize,
+    /// Org slugs in the order their first repository was listed.
+    order: Vec<String>,
+    orgs: std::collections::HashMap<String, OrgListing>,
+}
+
+impl OrgBudgets {
+    /// Budgets for a listing over `owners` (one entry per repository, any
+    /// order, duplicates allowed), drawn from `run`.
+    pub(crate) fn new<'o>(run: &RunBudget, owners: impl IntoIterator<Item = &'o str>) -> Self {
+        let distinct: std::collections::HashSet<&str> = owners.into_iter().collect();
+        Self {
+            run: run.clone(),
+            orgs_left: distinct.len(),
+            order: Vec::new(),
+            orgs: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The budget for `owner`'s next repository; counts that repository.
+    pub(crate) fn budget_for(&mut self, owner: &str) -> &FetchBudget {
+        let run = &self.run;
+        let orgs_left = &mut self.orgs_left;
+        let order = &mut self.order;
+        let org = self.orgs.entry(owner.to_string()).or_insert_with(|| {
+            // An owner not counted in `new` still gets a share, never a 0 divisor.
+            let share = run.shared().remaining() / (*orgs_left).max(1) as u32;
+            *orgs_left = orgs_left.saturating_sub(1);
+            order.push(owner.to_string());
+            OrgListing {
+                budget: FetchBudget::scoped(run, share),
+                repos: 0,
+                truncated: 0,
+            }
+        });
+        org.repos += 1;
+        &org.budget
+    }
+
+    /// Record that a rate limit truncated one of `owner`'s repositories.
+    pub(crate) fn note_truncated(&mut self, owner: &str) {
+        if let Some(org) = self.orgs.get_mut(owner) {
+            org.truncated += 1;
+        }
+    }
+
+    /// One PARTIAL line per org with a truncated repository, naming the count.
+    pub(crate) fn summaries(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter_map(|owner| {
+                let org = self.orgs.get(owner)?;
+                (org.truncated > 0).then(|| {
+                    format!(
+                        "GitHub pulls listing for org {owner}: {} of {} repositories truncated \
+                         by a rate limit; these results are PARTIAL",
+                        org.truncated, org.repos
+                    )
+                })
+            })
+            .collect()
     }
 }
 

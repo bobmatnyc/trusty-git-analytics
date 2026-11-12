@@ -203,3 +203,91 @@ fn a_cloned_run_budget_shares_its_allowance() {
         .reserve(Duration::from_secs(3), 429)
         .expect("a separate run budget starts full");
 }
+
+/// Why (#246): one org's rate limit must not latch the breaker every later
+/// org lists on.
+/// What: a scoped budget tripped on the attempt cap refuses its own later
+/// calls, while its parent run budget and a sibling scoped budget still fetch.
+/// Test: itself.
+#[test]
+fn a_scoped_budget_trips_alone_and_leaves_the_run_budget_open() {
+    let run = RunBudget::with_sleep_budget(Duration::from_secs(10));
+    let first = FetchBudget::scoped(&run, Duration::from_secs(5));
+    let second = FetchBudget::scoped(&run, Duration::from_secs(5));
+
+    first.trip(429, Some(Duration::ZERO));
+    assert!(
+        first.tripped_error().is_some(),
+        "the tripped org stays latched"
+    );
+    assert!(
+        run.shared().tripped_error().is_none(),
+        "the run breaker must stay open"
+    );
+    assert!(second.tripped_error().is_none());
+    second
+        .reserve(Duration::from_secs(1), 429)
+        .expect("a sibling org still has its own allowance");
+}
+
+/// Why (#246): the run's ceiling stays the outer bound — scoped budgets must
+/// never let a run sleep longer in total than its own allowance.
+/// What: a scoped share larger than what the run has left is refused once the
+/// run is spent, and the spend is charged to the run. A latched run budget
+/// refuses every scoped budget. Notices go to the run's ledger.
+/// Test: itself.
+#[test]
+fn a_scoped_budget_is_bounded_by_its_parent() {
+    let run = RunBudget::with_sleep_budget(Duration::from_secs(3));
+    let scoped = FetchBudget::scoped(&run, Duration::from_secs(10));
+
+    scoped
+        .reserve(Duration::from_secs(2), 429)
+        .expect("2s fits both");
+    assert_eq!(run.shared().remaining(), Duration::from_secs(1));
+    assert!(
+        scoped.reserve(Duration::from_secs(2), 429).is_err(),
+        "the run has only 1s left"
+    );
+    assert!(run.shared().tripped_error().is_some());
+    assert!(
+        FetchBudget::scoped(&run, Duration::from_secs(10))
+            .tripped_error()
+            .is_some(),
+        "a latched run stops a fresh scoped budget too"
+    );
+
+    scoped.note_truncation("cut");
+    assert_eq!(run.shared().notices(), vec!["cut"]);
+    assert!(scoped.notices().is_empty());
+}
+
+/// Why (#246): an earlier org must not be able to spend a later org's share.
+/// What: three orgs over 9s; each gets a third of what is left when it starts,
+/// and the summary names only the org with a truncated repository, with its
+/// count.
+/// Test: itself.
+#[test]
+fn org_budgets_split_what_the_run_has_left() {
+    let run = RunBudget::with_sleep_budget(Duration::from_secs(9));
+    let mut orgs = OrgBudgets::new(&run, ["a", "b", "a", "c"]);
+
+    assert_eq!(orgs.budget_for("a").remaining(), Duration::from_secs(3));
+    orgs.budget_for("a")
+        .reserve(Duration::from_secs(3), 429)
+        .expect("a spends its share");
+    orgs.note_truncated("a");
+    // 6s left over two orgs not yet started; b has spent nothing, so c's
+    // share is all 6s that remain.
+    assert_eq!(orgs.budget_for("b").remaining(), Duration::from_secs(3));
+    assert_eq!(orgs.budget_for("c").remaining(), Duration::from_secs(6));
+
+    assert_eq!(
+        orgs.summaries(),
+        vec![
+            "GitHub pulls listing for org a: 1 of 2 repositories truncated by a rate \
+             limit; these results are PARTIAL"
+                .to_string()
+        ]
+    );
+}
