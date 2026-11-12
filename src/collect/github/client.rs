@@ -8,7 +8,9 @@ use async_trait::async_trait;
 
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::fault::CollectionFault;
-use crate::collect::github::budget::{RunBudget, MAX_PAGES, PULLS_MAX_PAGES};
+use crate::collect::github::budget::{
+    FetchBudget, OrgBudgets, RunBudget, MAX_PAGES, PULLS_MAX_PAGES,
+};
 use crate::collect::github::fetch_faults::{http_status, FaultWording, FetchFaults};
 use crate::collect::github::repo_resolver::{
     build_http_client_with_token, parse_slug, resolve_github_token,
@@ -237,7 +239,11 @@ impl GitHubClient {
     /// error are kept. A rate limit is not a fault (#6553 handles it
     /// run-wide), but one that stops a walk, on any page, records a PARTIAL
     /// truncation notice for that repository (#200), so the short listing
-    /// reaches [`Self::fetch_notices`]. At the end the recorded failures replace
+    /// reaches [`Self::fetch_notices`]. Each org (repository owner) lists on
+    /// its own [`OrgBudgets`] share of the run budget, so one org's rate limit
+    /// latches only that org's breaker and later orgs are listed in full;
+    /// one more notice per affected org names how many of its repositories
+    /// were truncated (#246). At the end the recorded failures replace
     /// [`PrProvider::fetch_faults`]: 404s as one counted warning, every other
     /// failure (403, 5xx after retries, transport) as one stage failure.
     /// Test: `crate::collect::pr_pipeline::tests::a_pr_list_404_is_a_counted_warning_not_a_stage_failure`,
@@ -245,7 +251,8 @@ impl GitHubClient {
     /// `crate::collect::pr_pipeline::tests::a_page_2_404_keeps_page_1_and_is_a_counted_warning`,
     /// `crate::collect::pr_pipeline::tests::a_page_2_403_keeps_page_1_and_fails_the_stage_once`,
     /// `client_tests::a_pulls_listing_rate_limited_mid_walk_keeps_its_rows_and_says_partial`,
-    /// `client_tests::a_page_1_throttle_after_the_breaker_trips_is_reported_partial`.
+    /// `client_tests::a_page_1_throttle_after_the_breaker_trips_is_reported_partial`,
+    /// `client_tests::a_second_org_is_fully_listed_after_the_first_trips_its_budget`.
     ///
     /// # Errors
     ///
@@ -254,8 +261,12 @@ impl GitHubClient {
     pub async fn fetch_pull_requests(&self) -> Result<Vec<PullRequest>> {
         let mut out: Vec<PullRequest> = Vec::new();
         let mut faults = FetchFaults::default();
+        // #246: each org lists on its own share of the run budget, so a rate
+        // limit in one org does not truncate the repositories of later orgs.
+        let mut orgs = OrgBudgets::new(&self.budget, self.repos.iter().map(|(o, _)| o.as_str()));
         for (owner, repo) in &self.repos {
-            let (mut prs, stopped) = self.fetch_pull_requests_for_repo(owner, repo).await;
+            let budget = orgs.budget_for(owner);
+            let (mut prs, stopped) = self.fetch_pull_requests_for_repo(owner, repo, budget).await;
             // #146: pages fetched before an error are kept and stored, exactly
             // as a full fetch would store them.
             let prs_kept = prs.len();
@@ -273,8 +284,9 @@ impl GitHubClient {
             if matches!(e, CollectError::Throttled { .. }) {
                 // #200: a rate-limited walk leaves a short listing that reads
                 // as complete; record it PARTIAL via the notice path. The
-                // breaker stays tripped, so later repos stop on page 1 and
-                // would otherwise read as having no PRs.
+                // org's breaker stays tripped, so its later repos stop on
+                // page 1 and would otherwise read as having no PRs (#246:
+                // other orgs keep their own breaker).
                 let notice = if page > 1 {
                     format!(
                         "GitHub pulls listing for {owner}/{repo} stopped at page {page} \
@@ -287,6 +299,8 @@ impl GitHubClient {
                     )
                 };
                 self.budget.shared().note_truncation(notice);
+                // #246: counted per org for the run summary.
+                orgs.note_truncated(owner);
             } else {
                 let item = if page > 1 {
                     format!(
@@ -298,6 +312,10 @@ impl GitHubClient {
                 };
                 faults.record(item, http_status(&e));
             }
+        }
+        // #246: one line per org naming how many of its repositories were cut.
+        for summary in orgs.summaries() {
+            self.budget.shared().note_truncation(summary);
         }
         let recorded = faults.into_faults(&PR_LIST_WORDING, self.repos.len());
         *self
@@ -319,11 +337,15 @@ impl GitHubClient {
         &self,
         owner: &str,
         repo: &str,
+        budget: &FetchBudget,
     ) -> (Vec<PullRequest>, Option<(u32, CollectError)>) {
         let mut out: Vec<PullRequest> = Vec::new();
         let mut page = 1u32;
         loop {
-            let n = match self.fetch_pull_request_page(owner, repo, page).await {
+            let n = match self
+                .fetch_pull_request_page(owner, repo, page, budget)
+                .await
+            {
                 Ok(mut prs) => {
                     let n = prs.len();
                     out.append(&mut prs);
@@ -348,13 +370,15 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
         page: u32,
+        budget: &FetchBudget,
     ) -> Result<Vec<PullRequest>> {
         let base = self.api_base();
         let mut out: Vec<PullRequest> = Vec::new();
         let url =
             format!("{base}/repos/{owner}/{repo}/pulls?state=all&per_page={PAGE_SIZE}&page={page}");
         debug!(url = %url, "GET");
-        let resp = self.retry_request(&url).await?;
+        // #246: charged to the org's scoped budget, not the run's directly.
+        let resp = retry_get(&self.client, &url, budget).await?;
 
         // Respect rate-limit hints.
         if let Some(rem) = resp

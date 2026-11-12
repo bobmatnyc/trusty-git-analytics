@@ -778,13 +778,19 @@ mod bounded_fetch_tests {
 
         assert_eq!(prs.len(), 15_000, "pages 1-150 must be kept");
         let notices = client.fetch_notices();
+        // #246: the repository's notice, then its org's count line.
         assert_eq!(
             notices.len(),
-            1,
+            2,
             "a rate-limited pulls walk must be reported, got: {notices:?}"
         );
         assert!(notices[0].contains("PARTIAL"), "got: {}", notices[0]);
         assert!(notices[0].contains("acme/widgets"), "got: {}", notices[0]);
+        assert!(
+            notices[1].contains("org acme: 1 of 1 repositories truncated"),
+            "got: {}",
+            notices[1]
+        );
     }
 
     /// Why (#200): the rate-limit breaker stays tripped once it trips, so every
@@ -826,10 +832,16 @@ mod bounded_fetch_tests {
             "repo A's rows must be kept"
         );
         let notices = client.fetch_notices();
+        // #246: both repositories share org `acme`'s breaker, so both are
+        // cut; the third notice is the org's count line.
         assert_eq!(
             notices.len(),
-            2,
+            3,
             "both throttled repos must be reported, got: {notices:?}"
+        );
+        assert!(
+            notices[2].contains("org acme: 2 of 2 repositories truncated"),
+            "got: {notices:?}"
         );
         assert!(
             notices.iter().all(|n| n.contains("PARTIAL")),
@@ -841,6 +853,78 @@ mod bounded_fetch_tests {
         );
         assert!(
             notices.iter().any(|n| n.contains("acme/gadgets")),
+            "got: {notices:?}"
+        );
+    }
+
+    /// Why (#246): the PR listing walked every org on one run breaker, so a
+    /// rate limit in the first org stopped every repository of a later org at
+    /// page 1 and the later org was systematically under-collected.
+    /// What: org `acme` is rate-limited on page 3 with a `Retry-After` longer
+    /// than its share of a 1 s run budget, so its breaker latches. Org
+    /// `globex` is listed after it: two full pages and a short third page.
+    /// Asserts `globex` is listed in full (205 rows), the run breaker is still
+    /// open, and the notices name `acme` alone, with its count line.
+    /// Test: itself. Pre-fix the `acme` trip latched the run breaker, so
+    /// `globex` page 1 was refused without a request: `globex` got 0 rows
+    /// instead of 205, and a PARTIAL notice for `globex/tools`.
+    #[tokio::test]
+    async fn a_second_org_is_fully_listed_after_the_first_trips_its_budget() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/pulls"))
+            .respond_with(PagedPulls {
+                full_pages: 2,
+                tail: ResponseTemplate::new(429).insert_header("retry-after", "30"),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/globex/tools/pulls"))
+            .respond_with(PagedPulls {
+                full_pages: 2,
+                tail: ResponseTemplate::new(200).set_body_json(pulls_page(3, 5)),
+            })
+            .mount(&server)
+            .await;
+
+        let run = crate::collect::github::budget::RunBudget::with_sleep_budget(
+            std::time::Duration::from_secs(1),
+        );
+        let mut client = client_at(&server.uri()).with_run_budget(&run);
+        client.repos = vec![
+            ("acme".to_string(), "widgets".to_string()),
+            ("globex".to_string(), "tools".to_string()),
+        ];
+        let prs = client.fetch_pull_requests().await.expect("walk returns");
+
+        let globex = prs
+            .iter()
+            .filter(|p| p.repository == "globex/tools")
+            .count();
+        assert_eq!(
+            globex,
+            2 * PAGE_SIZE as usize + 5,
+            "the second org must be listed in full"
+        );
+        assert_eq!(
+            prs.len(),
+            4 * PAGE_SIZE as usize + 5,
+            "acme's two pages are kept"
+        );
+        assert!(
+            run.shared().tripped_error().is_none(),
+            "one org's trip must not latch the run breaker"
+        );
+        let notices = client.fetch_notices();
+        assert!(
+            notices.iter().all(|n| !n.contains("globex")),
+            "globex was not truncated, got: {notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("org acme: 1 of 1 repositories truncated")),
             "got: {notices:?}"
         );
     }
