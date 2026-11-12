@@ -164,7 +164,7 @@ Records a path and the two line counts, never the file's contents.
 ### `pull_requests`
 
 Pull request metadata fetched from GitHub, Bitbucket, or Azure DevOps. Migration
-`0001_initial_schema.sql`, extended by `0010`, `0012`, `0022`, and `0024`.
+`0001_initial_schema.sql`, extended by `0010`, `0012`, `0022`, `0024`, and `0039`.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -181,9 +181,11 @@ Pull request metadata fetched from GitHub, Bitbucket, or Azure DevOps. Migration
 | `fetched_at` | TEXT | no | RFC3339 snapshot time, the stale-write guard; default `''` (`0022`) |
 | `head_ref` | TEXT | no | Source branch name; default `''` (`0024`) |
 | `body_ticket_id` | TEXT | yes | Ticket reference extracted from the PR body (`0024`) |
+| `updated_at` | TEXT | yes | Provider's last-update time (RFC3339); set by the GitHub listing, NULL otherwise (`0039`) |
+| `reviews_checked_at` | TEXT | yes | When the GitHub reviewer pass last fetched and stored this PR's reviews: the PR's `updated_at` then, or the wall clock if that was NULL. NULL = never checked. The pass re-selects a PR when `updated_at` is later (`0039`, #245) |
 
 **Indexes**: UNIQUE(`provider`, `repository`, `pr_number`), INDEX(`pr_number`),
-INDEX(`state`), INDEX(`provider`, `repository`).
+INDEX(`state`), INDEX(`provider`, `repository`), INDEX(`provider`, `reviews_checked_at`).
 
 `0012` replaced `0010`'s UNIQUE(`provider`, `pr_number`) index, which collapsed
 cross-repository PR-number collisions (bug #88).

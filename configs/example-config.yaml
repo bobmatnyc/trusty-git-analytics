@@ -100,6 +100,9 @@ github:
   # (default 1) only after verifying your token's rate-limit headroom.
   # fetch_pr_reviews: true
   # review_fetch_concurrency: 1
+  # Most PRs one reviewer pass reads, newest first (0 = no cap). PRs not
+  # reached stay selectable for the next run.
+  # review_fetch_max_prs: 500
 
 # Linear project management integration (optional).
 # Enriches commits that reference Linear issue IDs (e.g. ENG-123) with

@@ -103,6 +103,7 @@ impl fmt::Debug for GithubConfig {
             fetch_prs,
             fetch_pr_reviews,
             review_fetch_concurrency,
+            review_fetch_max_prs,
             ticket_regex,
             fetch_on_reference,
             work_items_unavailable,
@@ -116,6 +117,8 @@ impl fmt::Debug for GithubConfig {
             .field("fetch_prs", fetch_prs)
             .field("fetch_pr_reviews", fetch_pr_reviews)
             .field("review_fetch_concurrency", review_fetch_concurrency)
+            // #245: the reviewer-pass cap.
+            .field("review_fetch_max_prs", review_fetch_max_prs)
             .field("ticket_regex", ticket_regex)
             .field("fetch_on_reference", fetch_on_reference)
             .field("work_items_unavailable", work_items_unavailable)

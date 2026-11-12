@@ -141,6 +141,7 @@ mod tests {
             fetched_at: "2026-01-01T00:00:00Z".into(),
             head_ref: head_ref.map(str::to_string),
             body_ticket_id: None,
+            updated_at: None,
         }
     }
 
@@ -224,6 +225,7 @@ mod tests {
             fetch_prs: true,
             fetch_pr_reviews: false,
             review_fetch_concurrency: 1,
+            review_fetch_max_prs: 0,
             ticket_regex: None,
             fetch_on_reference: false,
             work_items_unavailable: None,

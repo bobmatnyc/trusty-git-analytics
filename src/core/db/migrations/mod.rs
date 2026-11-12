@@ -254,6 +254,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "linear_comment_due",
         sql: include_str!("../sql/0038_linear_comment_due.sql"),
     },
+    // #245: GitHub PR `updated_at` plus the reviewer pass's per-PR
+    // "reviews checked at" marker; additive, see the SQL file header.
+    Migration {
+        version: 39,
+        name: "pull_requests_reviews_checked_at",
+        sql: include_str!("../sql/0039_pull_requests_reviews_checked_at.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

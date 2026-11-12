@@ -1135,8 +1135,9 @@ fn default_failure_window_hours() -> u32 {
 /// `GithubConfig::default()` is NOT an omitted-keys YAML block (#137): it gives
 /// `fetch_on_reference: false`, `fetch_pr_reviews: false` and
 /// `review_fetch_concurrency: 0`, where YAML gives `true`, `true` and `1`.
-/// Outside this crate, start from `default()` and set those three fields too,
-/// or deserialize the section.
+/// It also gives `review_fetch_max_prs: 0` (no cap), where YAML gives `500`
+/// (#245). Outside this crate, start from `default()` and set those fields
+/// too, or deserialize the section.
 // #5770: `Debug` is hand-written in `credential_debug`, not derived — the
 // derived one printed `token` in the clear.
 // #5775: `Serialize` is hand-written in `credential_serialize` for the same
@@ -1207,6 +1208,22 @@ pub struct GithubConfig {
     /// primary hourly bucket is non-zero.
     #[serde(default = "default_review_fetch_concurrency")]
     pub review_fetch_concurrency: u32,
+
+    /// Most pull requests one reviewer pass fetches reviews for (default
+    /// 500); `0` means no cap.
+    ///
+    /// Why: #245 — an unbounded pass over a large history spent the rate
+    /// budget on old pull requests and ended INCOMPLETE before newer ones got
+    /// reviews. The pass is newest-first, so the cap keeps each run's cost
+    /// bounded while the PRs that matter most are read first; the rest stay
+    /// selectable and later runs reach them.
+    /// What: the `LIMIT` on the reviewer pass's selection of pull requests
+    /// never checked, or updated since their last check. Ignored by
+    /// `--force-refresh-prs`, which re-reads every GitHub pull request.
+    /// Test: `crate::collect::github_pipeline::review_select_tests::selection_is_newest_first_and_capped`.
+    // #245: bounds the reviewer pass.
+    #[serde(default = "default_review_fetch_max_prs")]
+    pub review_fetch_max_prs: u32,
 
     /// Optional override regex for detecting GitHub issue / PR references
     /// in commit messages.
@@ -1286,6 +1303,11 @@ fn default_fetch_pr_reviews() -> bool {
 
 fn default_review_fetch_concurrency() -> u32 {
     1
+}
+
+// #245: default cap on one reviewer pass.
+fn default_review_fetch_max_prs() -> u32 {
+    500
 }
 
 /// Bitbucket Cloud API integration settings.
@@ -2152,6 +2174,19 @@ mod tests {
     fn github_config_review_fetch_concurrency_default() {
         let cfg: GithubConfig = serde_yaml::from_str("fetch_prs: true\n").expect("parse");
         assert_eq!(cfg.review_fetch_concurrency, 1);
+    }
+
+    /// Why: #245 — the reviewer pass is bounded unless the operator says
+    /// otherwise, and `0` is the documented "no cap" value.
+    /// What: parse YAML without the field, then with `0`.
+    /// Test: pure deserialization.
+    #[test]
+    fn github_config_review_fetch_max_prs_defaults_to_500() {
+        let cfg: GithubConfig = serde_yaml::from_str("fetch_prs: true\n").expect("parse");
+        assert_eq!(cfg.review_fetch_max_prs, 500);
+        let cfg: GithubConfig =
+            serde_yaml::from_str("fetch_prs: true\nreview_fetch_max_prs: 0\n").expect("parse");
+        assert_eq!(cfg.review_fetch_max_prs, 0);
     }
 
     /// Why: issue #2244 — a `team.members` entry with no `aliases:`

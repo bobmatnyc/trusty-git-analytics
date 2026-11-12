@@ -34,6 +34,10 @@ pub(crate) struct ApiPull {
     /// issue reference; the prose itself is never persisted.
     #[serde(default)]
     pub(crate) body: Option<String>,
+    /// #245: last-update time; GitHub bumps it when a review is submitted, so
+    /// the reviewer pass re-reads a PR updated since its last check.
+    #[serde(default)]
+    pub(crate) updated_at: Option<DateTime<Utc>>,
 }
 
 /// Internal wire type for the `head` block of a pull request (#5734).

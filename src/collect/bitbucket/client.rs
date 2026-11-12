@@ -693,6 +693,8 @@ fn map_pr(pr: BbPullRequest, repository: &str) -> PullRequest {
         // this provider makes no claim, rather than asserting an empty branch.
         head_ref: None,
         body_ticket_id: None,
+        // #245: only the GitHub reviewer pass reads `updated_at`.
+        updated_at: None,
     }
 }
 

@@ -352,6 +352,9 @@ pub const CONSTRAINED: &[&str] = &[
     "pull_requests.fetched_at",
     "pull_requests.head_ref",
     "pull_requests.body_ticket_id",
+    // #245: RFC3339 timestamps written by the GitHub listing / reviewer pass.
+    "pull_requests.updated_at",
+    "pull_requests.reviews_checked_at",
     "repo_walk_state.repository",
     "repo_walk_state.head_sha",
     "repo_walk_state.head_ref",

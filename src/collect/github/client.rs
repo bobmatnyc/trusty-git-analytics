@@ -385,6 +385,8 @@ impl GitHubClient {
             // all — the same "no claim made" value other providers use.
             let head_ref = p.head.map(|h| h.ref_name);
             let body_ticket_id = p.body.as_deref().and_then(pr_body_ticket_key);
+            // #245: kept so the reviewer pass re-reads a PR updated since its check.
+            let updated_at = p.updated_at;
             out.push(PullRequest {
                 id: 0,
                 pr_number: p.number,
@@ -398,6 +400,7 @@ impl GitHubClient {
                 fetched_at: Utc::now().to_rfc3339(),
                 head_ref,
                 body_ticket_id,
+                updated_at,
             });
         }
         Ok(out)
@@ -438,13 +441,14 @@ impl GitHubClient {
                 // guard as every other mutable column, so an older snapshot
                 // cannot overwrite a newer branch or issue reference.
                 "INSERT INTO pull_requests \
-                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas,fetched_at,head_ref,body_ticket_id) \
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
+                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas,fetched_at,head_ref,body_ticket_id,updated_at) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) \
                  ON CONFLICT(provider,repository,pr_number) DO UPDATE SET \
                    title=excluded.title,author=excluded.author,state=excluded.state,\
                    merged_at=excluded.merged_at,commit_shas=excluded.commit_shas,\
                    fetched_at=excluded.fetched_at,head_ref=excluded.head_ref,\
-                   body_ticket_id=excluded.body_ticket_id \
+                   body_ticket_id=excluded.body_ticket_id,\
+                   updated_at=COALESCE(excluded.updated_at,pull_requests.updated_at) \
                  WHERE excluded.fetched_at > pull_requests.fetched_at",
                 params![
                     "github",
@@ -459,6 +463,8 @@ impl GitHubClient {
                     pr.fetched_at,
                     pr.head_ref.as_deref().unwrap_or(""),
                     pr.body_ticket_id,
+                    // #245: the reviewer pass compares this to its marker.
+                    pr.updated_at.map(|t| t.to_rfc3339()),
                 ],
             )?;
             count += 1;
