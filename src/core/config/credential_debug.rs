@@ -35,6 +35,7 @@
 use std::fmt;
 
 use super::azdo::AzureDevOpsConfig;
+use super::notion::NotionConfig;
 use super::{BitbucketConfig, ClassificationConfig, GithubConfig, JiraConfig, LinearConfig};
 use crate::classify::classifier::ClassificationEngineConfig;
 
@@ -86,6 +87,21 @@ impl fmt::Debug for LinearConfig {
             .field("ticket_regex", ticket_regex)
             .field("stats", stats)
             .field("sync_on_collect", sync_on_collect)
+            .finish()
+    }
+}
+
+/// Redacting `Debug` for the Notion token (#252), same rule as Linear's key.
+/// Test: `debug_never_renders_the_notion_token`.
+impl fmt::Debug for NotionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            token,
+            workspace_id,
+        } = self;
+        f.debug_struct("NotionConfig")
+            .field("token", &mask(token.as_ref()))
+            .field("workspace_id", workspace_id)
             .finish()
     }
 }
@@ -389,6 +405,28 @@ mod tests {
             rendered.contains("api_key: None"),
             "an unset key must stay visibly unset — that is what the reader came \
              for: {rendered}"
+        );
+    }
+
+    // #252: the Notion token gets the same treatment as Linear's key.
+    #[test]
+    fn debug_never_renders_the_notion_token() {
+        for_each_shape(|secret| {
+            let cfg = NotionConfig {
+                token: Some(secret.to_string()),
+                workspace_id: Some(PROBE.to_string()),
+            };
+            format!("{cfg:?}{cfg:#?}")
+        });
+
+        let unset = NotionConfig {
+            token: None,
+            workspace_id: Some(PROBE.to_string()),
+        };
+        let rendered = format!("{unset:?}");
+        assert!(
+            rendered.contains("token: None"),
+            "an unset token must stay visibly unset: {rendered}"
         );
     }
 

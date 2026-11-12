@@ -992,6 +992,56 @@ takes its scope from `--team`, `--all-teams` or `team_keys`. Under
 `sync_on_collect`, `tga collect` syncs every `team_keys` entry, or all teams
 when the list is empty.
 
+### `notion` — NotionConfig (added issue #252)
+
+Opt-in. Absent, `tga collect` makes no Notion request. Present, the collect
+run reads the Notion workspace after the Linear and work-item steps and stores
+activity events in `fact_notion_activity` (see
+[database-schema.md](database-schema.md#fact_notion_activity)).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `token` | string | required | Notion internal-integration token. Use `"${NOTION_TOKEN}"` so the token stays in the environment. Redacted in every `Debug` and `Serialize` rendering of the config; never logged. Unset or empty after expansion: the Notion stage fails and `tga collect` exits non-zero. |
+| `workspace_id` | string | `"default"` | Label for the workspace. Keys the `notion_sync_cursor` row and fills `fact_notion_activity.workspace_id`. |
+
+```yaml
+notion:
+  token: "${NOTION_TOKEN}"
+  workspace_id: acme
+```
+
+The integration needs the "Read content", "Read comments" and "Read user
+information including email addresses" capabilities. Without the email
+capability every actor stays unresolved.
+
+What a sync reads: `POST /v1/search` (pages, newest `last_edited_time` first,
+stopping at the stored watermark), `GET /v1/comments?block_id=<page>` for
+each page edited since the watermark, and `GET /v1/users` for identity. A 429
+or 529 is retried up to four attempts, waiting the `Retry-After` the server
+sends (at most 30 s).
+
+Events recorded:
+
+- `page_created`: the page's `created_by` at `created_time`.
+- `page_edited`: the page's `last_edited_by` at `last_edited_time`, at most
+  one per page per sync. This is a **lower bound** on editing: only the last
+  editor of each page is visible.
+- `comment_created`: the comment's `created_by` at `created_time`, with the
+  body length in characters. The body is never stored.
+
+Not measurable through the public API, and not recorded: per-edit history,
+editors other than the last one, page views, resolved comments, pages not
+shared with the integration, and history before the first sync. Comments are
+read only for pages edited since the previous sync.
+
+Identity: each Notion person's `(name, email)` goes through the identity
+resolver, and the canonical email is stored as `actor_email`. Bots, users with
+no email, and users the token cannot list keep a NULL `actor_email`; the
+collect summary prints how many such actors the run stored.
+
+Notion activity is its own signal. It is never summed into effort or any
+existing effort or volume metric.
+
 ### `pm.azure_devops` — AzureDevOpsConfig
 
 | Field | Type | Default | Description |

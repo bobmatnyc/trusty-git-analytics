@@ -30,7 +30,7 @@
 use tga::classify::classifier::ClassificationEngineConfig;
 use tga::core::config::{
     AzureDevOpsConfig, BitbucketConfig, ClassificationConfig, Config, GithubConfig, JiraConfig,
-    LinearConfig,
+    LinearConfig, NotionConfig,
 };
 
 /// What a masked credential must render as. Duplicated from
@@ -130,6 +130,21 @@ fn serialize_never_renders_the_linear_api_key() {
     assert!(
         rendered.contains("\"api_key\":null"),
         "an unset key must stay visibly unset — masking must not invent one: {rendered}"
+    );
+}
+
+// #252: the Notion token is masked exactly like Linear's key.
+#[test]
+fn serialize_never_renders_the_notion_token() {
+    for_each_shape::<NotionConfig>(|secret| {
+        format!("token: \"{secret}\"\nworkspace_id: \"{PROBE}\"\n")
+    });
+
+    let unset: NotionConfig = load(&format!("workspace_id: \"{PROBE}\"\n"));
+    let rendered = serde_json::to_string(&unset).expect("json");
+    assert!(
+        rendered.contains("\"token\":null"),
+        "an unset token must stay visibly unset: {rendered}"
     );
 }
 
@@ -234,6 +249,7 @@ fn serialize_never_renders_any_credential_from_a_whole_config() {
     const BB_TOKEN: &str = "m4Bx8Lv6Nc1Rd5Ph0SjQ7Zt2W";
     const AZDO: &str = "4Bx8Lv6Nc1Rd5Ph0SjQ7Zt2Wm";
     const OPENROUTER: &str = "Bx8Lv6Nc1Rd5Ph0SjQ7Zt2Wm4";
+    const NOTION: &str = "x8Lv6Nc1Rd5Ph0SjQ7Zt2Wm4B";
     const SECRETS: &[&str] = &[
         LINEAR,
         GITHUB,
@@ -242,6 +258,7 @@ fn serialize_never_renders_any_credential_from_a_whole_config() {
         BB_TOKEN,
         AZDO,
         OPENROUTER,
+        NOTION,
     ];
     let cfg: Config = load(&format!(
         "linear:\n  \
@@ -254,6 +271,8 @@ fn serialize_never_renders_any_credential_from_a_whole_config() {
          bitbucket:\n  \
            app_password: \"{BB_PASSWORD}\"\n  \
            token: \"{BB_TOKEN}\"\n\
+         notion:\n  \
+           token: \"{NOTION}\"\n\
          classification:\n  \
            openrouter_api_key: \"{OPENROUTER}\"\n\
          pm:\n  \

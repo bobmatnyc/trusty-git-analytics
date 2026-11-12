@@ -733,6 +733,60 @@ write deletes the issue's row.
 
 ---
 
+### `fact_notion_activity`
+
+One row per Notion activity event, written by `tga collect` when the `notion:`
+block is set (#252). Migration `0040_notion_activity.sql`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `event_id` | TEXT PK | no | `page_created:<page_id>`, `page_edited:<page_id>:<last_edited_time>` or `comment_created:<comment_id>` |
+| `kind` | TEXT | no | `page_created`, `page_edited` or `comment_created` |
+| `page_id` | TEXT | no | Notion page id |
+| `workspace_id` | TEXT | no | `notion.workspace_id`, default `default` |
+| `actor_id` | TEXT | yes | Notion user id |
+| `actor_email` | TEXT | yes | Canonical email from the identity resolver; NULL for bots, users with no email, and users the token cannot list |
+| `actor_name` | TEXT | yes | Canonical or Notion display name |
+| `occurred_at` | TEXT | no | RFC3339 UTC |
+| `iso_year` / `iso_week` | INTEGER | no | ISO 8601 week of `occurred_at` (UTC) |
+| `body_len` | INTEGER | yes | Comment body length in characters; `comment_created` only. The body is never stored |
+| `synced_at` | TEXT | no | RFC3339 wall clock of the write |
+
+**Indexes**: INDEX(`actor_email`, `iso_year`, `iso_week`), INDEX(`page_id`).
+
+A re-sync upserts by `event_id`, so it adds no duplicate row. `page_edited`
+is a lower bound: the public API exposes only a page's last editor and last
+edit time, so a sync records at most one edit per page. Not measurable, and
+not stored: per-edit history, editors other than the last one, page views,
+resolved comments, pages not shared with the integration, and history before
+the first sync.
+
+Notion activity is its own signal. It is never summed into
+`fact_commit_effort`, `fact_pm_work`, `fact_pm_effort` or any effort or
+volume metric.
+
+---
+
+### `notion_sync_cursor`
+
+Per-workspace cursor of the Notion sync (#252). Migration
+`0040_notion_activity.sql`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `workspace_id` | TEXT PK | no | `notion.workspace_id` |
+| `last_edited_watermark` | TEXT | no | RFC3339: newest page `last_edited_time` a completed sync stored |
+| `synced_at` | TEXT | no | RFC3339 wall clock of that sync's commit |
+
+The next sync reads pages edited at or after the watermark (Notion rounds
+`last_edited_time` to the minute, so pages at the watermark are read again;
+the upsert makes that harmless). The row is written in the same transaction
+as the sync's event rows and never moves backward. A failed fetch or write
+records a stage failure and leaves the row unchanged. No row: the next sync
+reads every page shared with the integration.
+
+---
+
 ### `jira_sync_cursor`
 
 Per-project incremental-sync cursor for `tga jira sync`. Migration
@@ -893,6 +947,7 @@ Migrations live in `src/core/db/sql/` and are registered in
 | 36 | `0036_linear_issue_activity.sql` | `fact_linear_transitions`, `fact_linear_comment_detail`, `linear_issue_activity_state` tables (#190 step 6) |
 | 37 | `0037_linear_comment_cursor.sql` | `linear_comment_cursor` table (#190) |
 | 38 | `0038_linear_comment_due.sql` | `linear_comment_due` table (#190) |
+| 40 | `0040_notion_activity.sql` | `fact_notion_activity` and `notion_sync_cursor` tables (#252) |
 
 Migrations 17 and 21 carry a `PRAGMA table_info` pre-flight guard, because a pre-release
 build may already have added their columns and SQLite has no
@@ -901,4 +956,4 @@ module — `v17.rs` and `v21.rs` — so their `.sql` files are read as reference
 executed. Migration 21's registry entry carries an empty `sql` string to make that
 explicit.
 
-Future migrations continue from `0039_*.sql`. Rows 28–35 are not yet listed here; each SQL file's header describes it.
+Future migrations continue from `0041_*.sql`. Rows 28–35 and 39 are not yet listed here; each SQL file's header describes it.

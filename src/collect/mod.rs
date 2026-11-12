@@ -46,6 +46,8 @@ pub mod linear;
 // `fetch_and_store_linear_issues` already applies to commit-referenced ones.
 pub(crate) mod linear_pipeline;
 mod notify;
+// #252: Notion activity as a per-person weekly signal.
+pub mod notion;
 pub mod pm_adapter;
 // #5734: the concurrent PR fetch drain, split out of `collector` (frozen SLOC).
 mod pr_pipeline;
