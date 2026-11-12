@@ -203,7 +203,7 @@ jobs:
 
           includes = [
               {**common,
-               "runner": "macos-14",
+               "runner": "macos-15",
                "target": "aarch64-apple-darwin",
                "variant": "standard",
                "zig_target": ""},
@@ -277,7 +277,11 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     steps:
+      # Build the tag, not the dispatched ref (same form as the setup job).
+      # Empty ref on a tag push falls back to the pushed tag.
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
 
       - name: Install build prerequisites (Ubuntu)
         if: startsWith(matrix.runner, 'ubuntu')
