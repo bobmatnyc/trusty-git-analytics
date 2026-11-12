@@ -11,6 +11,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use super::client::NotionClient;
 use super::error::NotionError;
+use super::retry::RetryPolicy;
 use crate::core::config::NotionConfig;
 
 /// A token value no test asserts on except to prove it is sent.
@@ -175,20 +176,149 @@ async fn throttling_is_bounded() {
     );
 }
 
+/// #252 (c): a non-transient 4xx is sent once, and the #254 skip statuses
+/// (403, 404) are not retried either; every 5xx is retried to the bound.
 #[tokio::test]
-async fn a_500_is_not_retried() {
+async fn only_transient_statuses_are_retried() {
+    for (status, calls) in [
+        (400, 1),
+        (401, 1),
+        (403, 1),
+        (404, 1),
+        (409, 1),
+        (500, 3),
+        (502, 3),
+        (503, 3),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/comments"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(calls)
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .list_comments("p1")
+            .await
+            .expect_err("fails");
+        assert!(
+            matches!(err, NotionError::Status { status: s, .. } if s == status),
+            "HTTP {status}: {err}"
+        );
+        server.verify().await;
+    }
+}
+
+/// A policy whose `Retry-After` second lasts 1 ms.
+fn fast_policy(max_attempts: u32, max_total_ms: u64) -> RetryPolicy {
+    RetryPolicy {
+        max_attempts,
+        base_delay: Duration::ZERO,
+        max_delay: Duration::from_secs(30),
+        max_total_delay: Duration::from_millis(max_total_ms),
+        retry_after_unit: Duration::from_millis(1),
+    }
+}
+
+/// #252 (b): a 429 on `/v1/comments` is retried after the server's
+/// `Retry-After` (here 80 units of 1 ms), and the retry succeeds.
+#[tokio::test]
+async fn a_429_honors_retry_after() {
     let server = MockServer::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
     Mock::given(method("GET"))
-        .and(path("/v1/users"))
-        .respond_with(ResponseTemplate::new(500))
-        .expect(1)
+        .and(path("/v1/comments"))
+        .respond_with(move |_: &Request| {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(429).insert_header("Retry-After", "80")
+            } else {
+                ResponseTemplate::new(200).set_body_json(list(Vec::new(), None))
+            }
+        })
         .mount(&server)
         .await;
-    let err = client(&server).list_users().await.expect_err("fails");
+    let c = NotionClient::with_base_url(&config(), &server.uri())
+        .expect("client")
+        .with_retry_policy(fast_policy(3, 10_000));
+    let started = std::time::Instant::now();
+    c.list_comments("p1").await.expect("retried");
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "one retry");
     assert!(
-        matches!(err, NotionError::Status { status: 500, .. }),
+        started.elapsed() >= Duration::from_millis(80),
+        "waited the Retry-After: {:?}",
+        started.elapsed()
+    );
+}
+
+/// #252: the summed wait is bounded. A second 100-unit `Retry-After` would
+/// cross the 150 ms budget, so the request stops after two attempts.
+#[tokio::test]
+async fn the_total_retry_delay_is_bounded() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "100"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let err = NotionClient::with_base_url(&config(), &server.uri())
+        .expect("client")
+        .with_retry_policy(fast_policy(10, 150))
+        .list_comments("p1")
+        .await
+        .expect_err("budget spent");
+    assert!(
+        matches!(err, NotionError::Throttled { attempts: 2, .. }),
         "{err}"
     );
+}
+
+/// #252: the live-check failure was one transport error on `/v1/comments`.
+/// A raw listener drops the first two connections after reading the request,
+/// then answers; the client must retry through both drops.
+#[tokio::test]
+async fn a_transport_error_is_retried() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(k) => buf.extend_from_slice(&chunk[..k]),
+                }
+            }
+            if n < 2 {
+                drop(sock);
+                continue;
+            }
+            let body = list(Vec::new(), None).to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+    let c = NotionClient::with_base_url(&config(), &format!("http://{addr}"))
+        .expect("client")
+        .with_retry(4, Duration::ZERO);
+    let comments = c.list_comments("p1").await.expect("retried past drops");
+    assert!(comments.is_empty());
+    assert_eq!(accepted.load(Ordering::SeqCst), 3, "two drops, one answer");
 }
 
 #[tokio::test]

@@ -621,3 +621,199 @@ async fn a_database_search_result_is_skipped_and_never_commented() {
         "the database's later edit time does not set the cursor"
     );
 }
+
+/// #252 (a): `/v1/comments` answers 503, then 502, then 200. The retries
+/// carry the sync to completion with every event stored.
+#[tokio::test]
+async fn transient_comment_failures_are_retried_and_the_sync_completes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let server = MockServer::start().await;
+    mount(&server, "2026-11-10T10:00:00.000Z", 200).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .respond_with(
+            move |_: &wiremock::Request| match seen.fetch_add(1, Ordering::SeqCst) {
+                0 => ResponseTemplate::new(503),
+                1 => ResponseTemplate::new(502),
+                _ => ResponseTemplate::new(200).set_body_json(list(
+                    vec![json!({"object": "comment", "id": "c1",
+                                "created_time": "2026-11-03T10:00:00.000Z",
+                                "created_by": {"object": "user", "id": "u1"},
+                                "rich_text": [{"plain_text": "ok"}]})],
+                    None,
+                )),
+            },
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let mut db = Database::open_in_memory().expect("db");
+    let mut stats = CollectionStats::default();
+    let out = sync_workspace(
+        &mut db,
+        &client(&server),
+        WS,
+        &IdentityResolver::new(None),
+        &mut stats,
+    )
+    .await
+    .expect("the sync completes");
+
+    assert!(stats.errors.is_empty(), "{:?}", stats.errors);
+    assert_eq!(calls.load(Ordering::SeqCst), 3, "two failures, one success");
+    assert_eq!(out.events, 3, "page_created, page_edited, comment_created");
+    assert_eq!(event_count(&db), 3);
+    assert_eq!(watermark(&db).as_deref(), Some("2026-11-10T10:00:00Z"));
+}
+
+/// Pages in the many-page workspace below.
+const MANY: usize = 250;
+/// The page whose comments fail in the failing run: the first page of the
+/// third batch, in ascending edit order.
+const FAILING: usize = 201;
+
+/// `last_edited_time` of page `i`: one hour per page from 2026-01-01.
+fn edited_at(i: usize) -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+        .single()
+        .expect("t")
+        + chrono::Duration::hours(i64::try_from(i).expect("small"))
+}
+
+/// Mount `MANY` pages, newest first as the API sorts them, empty comments,
+/// and the users. `failing`: that page's comments always answer 500.
+async fn mount_many(server: &MockServer, failing: Option<usize>) {
+    let pages = (1..=MANY)
+        .rev()
+        .map(|i| {
+            let edited = edited_at(i).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            page(
+                &format!("p{i:03}"),
+                "2025-12-01T00:00:00.000Z",
+                &edited,
+                "u1",
+            )
+        })
+        .collect();
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(pages, None)))
+        .mount(server)
+        .await;
+    if let Some(i) = failing {
+        Mock::given(method("GET"))
+            .and(path("/v1/comments"))
+            .and(query_param("block_id", format!("p{i:03}").as_str()))
+            .respond_with(ResponseTemplate::new(500))
+            .with_priority(1)
+            .mount(server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(Vec::new(), None)))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(users_body()))
+        .mount(server)
+        .await;
+}
+
+/// Run one sync against `server` with a fresh stats record.
+async fn sync_once(
+    db: &mut Database,
+    server: &MockServer,
+) -> (Option<super::pipeline::NotionSyncOutcome>, CollectionStats) {
+    let mut stats = CollectionStats::default();
+    let out = sync_workspace(
+        db,
+        &client(server),
+        WS,
+        &IdentityResolver::new(None),
+        &mut stats,
+    )
+    .await;
+    (out, stats)
+}
+
+/// #252 (d) Fail-Open Check: page 201's comments fail on every retry. The
+/// two batches before it (pages 1-200) stay stored, the cursor stops at
+/// page 200's edit time and no further, and the sync reports failure.
+#[tokio::test]
+async fn a_persistent_failure_keeps_earlier_batches_and_stops_the_cursor_there() {
+    let server = MockServer::start().await;
+    mount_many(&server, Some(FAILING)).await;
+    let mut db = Database::open_in_memory().expect("db");
+    let (out, stats) = sync_once(&mut db, &server).await;
+
+    assert!(out.is_none(), "a failed sync never reports success");
+    let failures = stats.stage_failures();
+    assert_eq!(failures.len(), 1, "{:?}", stats.errors);
+    assert!(
+        failures[0].message.contains("400 event(s) in 2 batch(es)"),
+        "{}",
+        failures[0].message
+    );
+    assert_eq!(event_count(&db), 400, "pages 1-200: created + edited");
+    assert_eq!(stats.notion_events, 400, "stored events are reported");
+    let stored_pages: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM fact_notion_activity WHERE page_id >= 'p201'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(stored_pages, 0, "nothing from the failed batch");
+    assert_eq!(
+        watermark(&db),
+        Some(super::events::rfc3339(edited_at(FAILING - 1))),
+        "the cursor is the last fully stored page, page 200"
+    );
+}
+
+/// #252 (e): after the (d) failure, a rerun resumes at the cursor — it reads
+/// comments only for pages from `cursor - lookback` on, not all 250 — and
+/// finishes with every event stored exactly once.
+#[tokio::test]
+async fn a_rerun_after_a_failure_resumes_without_duplicates() {
+    let server = MockServer::start().await;
+    mount_many(&server, Some(FAILING)).await;
+    let mut db = Database::open_in_memory().expect("db");
+    sync_once(&mut db, &server).await;
+
+    server.reset().await;
+    mount_many(&server, None).await;
+    let (out, stats) = sync_once(&mut db, &server).await;
+
+    assert!(stats.errors.is_empty(), "{:?}", stats.errors);
+    assert!(out.is_some());
+    let comment_reads = server
+        .received_requests()
+        .await
+        .expect("recorded")
+        .iter()
+        .filter(|r| r.url.path() == "/v1/comments")
+        .count();
+    // Cursor at page 200, lookback 60 min = one page: pages 199-250.
+    assert_eq!(comment_reads, 52, "resumed at the cursor, not from zero");
+    assert_eq!(event_count(&db), 500, "250 pages x 2 events, no duplicates");
+    let distinct: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(DISTINCT page_id || kind) FROM fact_notion_activity",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(distinct, 500);
+    assert_eq!(
+        watermark(&db),
+        Some(super::events::rfc3339(edited_at(MANY)))
+    );
+}

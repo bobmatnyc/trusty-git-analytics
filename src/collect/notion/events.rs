@@ -215,13 +215,21 @@ pub fn build_events(
             Some(i64::try_from(c.body_len).unwrap_or(i64::MAX)),
         ));
     }
-    let unresolved = events
-        .iter()
-        .filter(|e| e.actor_email.is_none())
-        .filter_map(|e| e.actor_id.as_deref())
+    let unresolved = unresolved_actor_ids(&events)
         .collect::<HashSet<&str>>()
         .len();
     Ok((events, unresolved))
+}
+
+/// Actor ids of `events` whose email stayed unresolved, with repeats.
+///
+/// #252: the pipeline persists in batches and unions these across batches,
+/// so an actor seen in two batches is counted once.
+pub fn unresolved_actor_ids(events: &[ActivityEvent]) -> impl Iterator<Item = &str> {
+    events
+        .iter()
+        .filter(|e| e.actor_email.is_none())
+        .filter_map(|e| e.actor_id.as_deref())
 }
 
 /// RFC 3339, whole seconds, `Z` — the stored form of every timestamp.

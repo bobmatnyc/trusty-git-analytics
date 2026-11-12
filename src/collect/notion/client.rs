@@ -5,11 +5,12 @@
 //! else is requested.
 //! What: [`NotionClient`] — `POST /v1/search` sorted by `last_edited_time`
 //! descending and stopped at a watermark, `GET /v1/comments?block_id=` per
-//! page, `GET /v1/users`. Every list follows `next_cursor`. A 429 or 529 is
-//! retried a bounded number of times, waiting the `Retry-After` the server
-//! sent (clamped).
+//! page, `GET /v1/users`. Every list follows `next_cursor`. A transient
+//! failure (transport, 429/529, 5xx) is retried under a bounded
+//! [`RetryPolicy`]; see `retry`.
 //! Test: `client_tests` — `search_paginates_and_stops_at_the_watermark`,
 //! `a_429_is_retried_after_retry_after`, `throttling_is_bounded`,
+//! `only_transient_statuses_are_retried`, `a_transport_error_is_retried`,
 //! `comments_and_users_paginate`, `an_unset_token_is_a_config_error`,
 //! `a_repeated_cursor_is_an_error`; the lookback window:
 //! `pipeline_tests::a_late_indexed_page_below_the_watermark_is_collected`.
@@ -17,12 +18,15 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use reqwest::{Client, RequestBuilder, StatusCode};
+use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::error::NotionError;
+use super::retry::{
+    is_throttled, is_transient_status, is_transient_transport, retry_after_secs, RetryPolicy,
+};
 use super::wire::{CommentMeta, CommentWire, ListPage, NotionUser, PageMeta};
 use crate::collect::env_expand::expand_env_var;
 use crate::core::config::NotionConfig;
@@ -33,15 +37,8 @@ const NOTION_API_BASE: &str = "https://api.notion.com";
 const NOTION_VERSION: &str = "2022-06-28";
 /// Largest page size every list endpoint accepts.
 const PAGE_SIZE: u32 = 100;
-/// Attempts per request, counting the first.
-const MAX_ATTEMPTS: u32 = 4;
-/// Wait used when a throttling answer carries no `Retry-After`.
-const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
-/// Ceiling on a server-supplied `Retry-After`, so one request cannot park
-/// the collect run for minutes.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
-/// Notion's "overloaded" status, treated like 429.
-const STATUS_OVERLOADED: u16 = 529;
+/// Pages between two search progress lines (#252).
+const PROGRESS_EVERY: usize = 100;
 
 /// Authenticated client for the Notion public API.
 ///
@@ -50,9 +47,18 @@ pub struct NotionClient {
     http: Client,
     base_url: String,
     token: String,
-    max_attempts: u32,
-    default_backoff: Duration,
+    // #252: one policy for every transient failure, not only throttling.
+    retry: RetryPolicy,
     lookback: chrono::Duration,
+}
+
+/// One attempt's result: final, or a transient failure worth retrying.
+enum Attempt<T> {
+    Done(Result<T, NotionError>),
+    Retry {
+        err: NotionError,
+        retry_after_secs: Option<u64>,
+    },
 }
 
 impl NotionClient {
@@ -90,17 +96,25 @@ impl NotionClient {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
-            max_attempts: MAX_ATTEMPTS,
-            default_backoff: DEFAULT_BACKOFF,
+            retry: RetryPolicy::default(),
             // #252: overlap window below the watermark; see `search_pages_since`.
             lookback: chrono::Duration::minutes(i64::from(cfg.lookback_minutes())),
         })
     }
 
-    /// Override the retry bound and the no-`Retry-After` wait (tests).
-    pub fn with_retry(mut self, max_attempts: u32, default_backoff: Duration) -> Self {
-        self.max_attempts = max_attempts.max(1);
-        self.default_backoff = default_backoff;
+    /// Override the attempt bound and the base backoff (tests).
+    pub fn with_retry(mut self, max_attempts: u32, base_delay: Duration) -> Self {
+        self.retry.max_attempts = max_attempts.max(1);
+        self.retry.base_delay = base_delay;
+        self
+    }
+
+    /// Replace the whole retry policy (#252: tests shrink every wait).
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry = RetryPolicy {
+            max_attempts: policy.max_attempts.max(1),
+            ..policy
+        };
         self
     }
 
@@ -150,6 +164,10 @@ impl NotionClient {
                     }
                 }
                 out.push(p);
+                // #252: a first sync walks the whole workspace; show progress.
+                if out.len() % PROGRESS_EVERY == 0 {
+                    info!("notion: search {} pages so far", out.len());
+                }
             }
             match next_cursor(endpoint, page.has_more, page.next_cursor, cursor.as_deref())? {
                 Some(c) => cursor = Some(c),
@@ -210,64 +228,116 @@ impl NotionClient {
         }
     }
 
-    /// Send one request with the bounded throttling retry, then decode.
+    /// Send one request under the retry policy, then decode.
     ///
     /// `build` is called once per attempt because a `RequestBuilder` is
-    /// single-use. Only 429 and 529 are retried; any other non-success
-    /// status fails at once.
+    /// single-use. #252: a transport error, 429/529 and any 5xx are retried
+    /// until `max_attempts` or `max_total_delay` runs out, then the last
+    /// error is returned; any other non-success status fails at once.
     async fn send<T: DeserializeOwned>(
         &self,
         endpoint: &str,
         build: impl Fn() -> RequestBuilder,
     ) -> Result<T, NotionError> {
         let mut attempt = 0;
+        let mut waited = Duration::ZERO;
         loop {
             attempt += 1;
-            let resp = build()
-                .bearer_auth(&self.token)
-                .header("Notion-Version", NOTION_VERSION)
-                .send()
-                .await?;
-            let status = resp.status();
-            if is_throttled(status) {
-                if attempt >= self.max_attempts {
-                    let (code, message) = error_body(resp).await;
-                    return Err(NotionError::Throttled {
-                        status: status.as_u16(),
-                        endpoint: endpoint.to_string(),
-                        attempts: attempt,
-                        code,
-                        message,
-                    });
-                }
-                let wait = retry_after(&resp).unwrap_or(self.default_backoff);
-                warn!(
-                    endpoint,
-                    status = status.as_u16(),
-                    attempt,
-                    wait_ms = wait.as_millis() as u64,
-                    "Notion throttled; retrying"
-                );
-                tokio::time::sleep(wait).await;
-                continue;
+            let (err, retry_after_secs) = match self.attempt(endpoint, &build, attempt).await {
+                Attempt::Done(result) => return result,
+                Attempt::Retry {
+                    err,
+                    retry_after_secs,
+                } => (err, retry_after_secs),
+            };
+            if attempt >= self.retry.max_attempts {
+                return Err(err);
             }
-            if !status.is_success() {
-                // #252: carry Notion's error code and message, never headers.
-                let (code, message) = error_body(resp).await;
-                return Err(NotionError::Status {
+            let wait = self.retry.wait(attempt, retry_after_secs);
+            if waited + wait > self.retry.max_total_delay {
+                warn!(endpoint, attempt, error = %err, "Notion retry budget spent; giving up");
+                return Err(err);
+            }
+            waited += wait;
+            warn!(
+                endpoint,
+                attempt,
+                wait_ms = wait.as_millis() as u64,
+                error = %err,
+                "Notion request failed transiently; retrying"
+            );
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    /// One attempt of [`Self::send`], classified as final or retryable.
+    async fn attempt<T: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        build: &impl Fn() -> RequestBuilder,
+        attempt: u32,
+    ) -> Attempt<T> {
+        let transport = |e: reqwest::Error| {
+            if is_transient_transport(&e) {
+                Attempt::Retry {
+                    err: NotionError::Transport(e),
+                    retry_after_secs: None,
+                }
+            } else {
+                Attempt::Done(Err(NotionError::Transport(e)))
+            }
+        };
+        let resp = match build()
+            .bearer_auth(&self.token)
+            .header("Notion-Version", NOTION_VERSION)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return transport(e),
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let retry_after_secs = retry_after_secs(&resp);
+            // #252: carry Notion's error code and message, never headers.
+            let (code, message) = error_body(resp).await;
+            let endpoint = endpoint.to_string();
+            let err = if is_throttled(status) {
+                NotionError::Throttled {
                     status: status.as_u16(),
-                    endpoint: endpoint.to_string(),
+                    endpoint,
+                    attempts: attempt,
                     code,
                     message,
-                });
-            }
-            let bytes = resp.bytes().await?;
-            debug!(endpoint, bytes = bytes.len(), "Notion response");
-            return serde_json::from_slice(&bytes).map_err(|e| NotionError::Decode {
+                }
+            } else {
+                NotionError::Status {
+                    status: status.as_u16(),
+                    endpoint,
+                    code,
+                    message,
+                }
+            };
+            return if is_transient_status(status) {
+                Attempt::Retry {
+                    err,
+                    retry_after_secs,
+                }
+            } else {
+                Attempt::Done(Err(err))
+            };
+        }
+        let bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => return transport(e),
+        };
+        debug!(endpoint, bytes = bytes.len(), "Notion response");
+        Attempt::Done(
+            serde_json::from_slice(&bytes).map_err(|e| NotionError::Decode {
                 endpoint: endpoint.to_string(),
                 message: e.to_string(),
-            });
-        }
+            }),
+        )
     }
 }
 
@@ -300,23 +370,6 @@ async fn error_body(resp: reqwest::Response) -> (Option<String>, Option<String>)
         ),
         Err(_) => (None, None),
     }
-}
-
-/// 429 (rate limited) or 529 (overloaded).
-fn is_throttled(status: StatusCode) -> bool {
-    status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == STATUS_OVERLOADED
-}
-
-/// `Retry-After` in delta-seconds, clamped to [`MAX_RETRY_AFTER`].
-fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
-    resp.headers()
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(|secs| Duration::from_secs(secs).min(MAX_RETRY_AFTER))
 }
 
 /// The cursor to request next, `None` after the last page.
