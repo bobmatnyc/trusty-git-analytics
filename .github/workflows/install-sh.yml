@@ -28,7 +28,7 @@ jobs:
     name: install.sh syntax, lint, selftest
     # macOS runner: the script is macOS-only and the selftest's fixtures use
     # `shasum`, the tool the script itself selects on a stock Mac.
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
