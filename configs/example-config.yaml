@@ -114,6 +114,18 @@ linear:
     - "FE"
   fetch_on_reference: true
 
+# Notion activity signal (optional, opt-in; issue #252).
+# When set, `tga collect` stores page_created, page_edited and
+# comment_created events in `fact_notion_activity`, per person per ISO week.
+# A separate signal: never summed into effort. Collection covers the pages
+# and comments the token can read. Keep the token in the environment, not in
+# this file. A failed sync (the first one included) is discarded; the next
+# run starts over.
+# notion:
+#   token: "${NOTION_TOKEN}"
+#   workspace_id: "acme"   # label for the sync cursor; default "default"
+#   lookback_minutes: 60   # re-read window below the watermark; default 60
+
 # DORA metrics configuration (issues #207, #208, #212, #213).
 #
 # Drives `tga deployments collect`, `tga incidents collect`, and

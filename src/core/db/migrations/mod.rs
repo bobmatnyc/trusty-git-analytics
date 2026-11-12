@@ -261,6 +261,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "pull_requests_reviews_checked_at",
         sql: include_str!("../sql/0039_pull_requests_reviews_checked_at.sql"),
     },
+    // #252: Notion activity events and the per-workspace sync cursor;
+    // additive, see the SQL file header.
+    Migration {
+        version: 40,
+        name: "notion_activity",
+        sql: include_str!("../sql/0040_notion_activity.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

@@ -217,6 +217,14 @@ pub async fn run_reporting_fetch(
             stats.repos_skipped,
         );
     }
+    // #252: Notion is reported on its own line, never folded into the
+    // commit/PR figures above.
+    if pipeline.config().notion.is_some() {
+        println!(
+            "Notion: {} activity events stored ({} actors unresolved: bots or no email)",
+            stats.notion_events, stats.notion_unresolved_actors,
+        );
+    }
     if !stats.errors.is_empty() {
         eprintln!(
             "Encountered {} issue(s) during collection:",

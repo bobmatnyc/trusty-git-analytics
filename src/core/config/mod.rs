@@ -50,6 +50,8 @@ pub mod database_path;
 mod linear_stats;
 // #131: the `llm:` section and the LLM-tier routing enums.
 mod llm;
+// #252: the opt-in `notion:` block.
+mod notion;
 // #111: anchor a config's relative paths to its own directory.
 mod relative_paths;
 // #167: the `classification.repo_map` block (floor mode).
@@ -81,6 +83,7 @@ pub use llm::{
     LLM_MIN_INPUT_ROOM_TOKENS,
     LLM_MIN_MAX_INPUT_TOKENS,
 };
+pub use notion::{NotionConfig, NOTION_DEFAULT_LOOKBACK_MINUTES, NOTION_DEFAULT_WORKSPACE};
 pub use repo_map::{
     RepoMapConfig, RepoMapMode, REPO_MAP_DEFAULT_EXCEPTIONS, REPO_MAP_DEFAULT_MIN_CONFIDENCE,
 };
@@ -125,6 +128,11 @@ pub struct Config {
     /// Linear integration settings.
     #[serde(default)]
     pub linear: Option<LinearConfig>,
+
+    /// Notion activity signal (#252). Opt-in: absent, collect makes no
+    /// Notion request. See [`NotionConfig`].
+    #[serde(default)]
+    pub notion: Option<NotionConfig>,
 
     /// Project management integrations. Canonical location for ADO,
     /// and future PM tools.

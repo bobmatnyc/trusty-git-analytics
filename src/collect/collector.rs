@@ -92,6 +92,11 @@ pub struct CollectionStats {
     pub reviewers_fetched: usize,
     /// Number of Linear issues fetched (0 if Linear not configured).
     pub linear_issues_fetched: usize,
+    /// Notion activity event rows upserted (#252; 0 without `notion:`).
+    pub notion_events: usize,
+    /// Distinct Notion actors stored with a NULL email: bots, users with no
+    /// email, and users the token cannot list (#252).
+    pub notion_unresolved_actors: usize,
     /// Number of `(repo, week)` pairs that were collected this run.
     pub weeks_collected: usize,
     /// Number of `(repo, week)` pairs skipped because already present in
@@ -536,6 +541,16 @@ impl CollectionPipeline {
         }
 
         linear_pipeline::fetch_and_store_linear_issues(db, &self.config, &mut stats).await;
+
+        // #252: Notion activity, only when `notion:` is set. Its own signal —
+        // never summed into effort or any volume metric.
+        crate::collect::notion::fetch_and_store_notion_activity(
+            db,
+            &self.config,
+            &resolver,
+            &mut stats,
+        )
+        .await;
 
         // #5219: JIRA, GitHub Issues and Azure DevOps all reach `work_items`
         // through one `PmAdapter`-driven pass. Linear stays above because it

@@ -58,6 +58,7 @@ use serde::{Serialize, Serializer};
 
 use super::azdo::AzureDevOpsConfig;
 use super::credential_debug::{mask, mask_required};
+use super::notion::NotionConfig;
 use super::{BitbucketConfig, ClassificationConfig, GithubConfig, JiraConfig, LinearConfig};
 
 /// Redacting `Serialize` — the derived one wrote `api_key` in the clear (#5775).
@@ -79,6 +80,23 @@ impl Serialize for LinearConfig {
         s.serialize_field("ticket_regex", ticket_regex)?;
         s.serialize_field("stats", stats)?;
         s.serialize_field("sync_on_collect", sync_on_collect)?;
+        s.end()
+    }
+}
+
+/// Redacting `Serialize` for the Notion token (#252), same rule as Linear's key.
+/// Test: `serialize_never_renders_the_notion_token`.
+impl Serialize for NotionConfig {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let Self {
+            token,
+            workspace_id,
+            lookback_minutes,
+        } = self;
+        let mut s = serializer.serialize_struct("NotionConfig", 3)?;
+        s.serialize_field("token", &mask(token.as_ref()))?;
+        s.serialize_field("workspace_id", workspace_id)?;
+        s.serialize_field("lookback_minutes", lookback_minutes)?;
         s.end()
     }
 }
