@@ -231,10 +231,13 @@ impl NotionClient {
             let status = resp.status();
             if is_throttled(status) {
                 if attempt >= self.max_attempts {
+                    let (code, message) = error_body(resp).await;
                     return Err(NotionError::Throttled {
                         status: status.as_u16(),
                         endpoint: endpoint.to_string(),
                         attempts: attempt,
+                        code,
+                        message,
                     });
                 }
                 let wait = retry_after(&resp).unwrap_or(self.default_backoff);
@@ -249,9 +252,13 @@ impl NotionClient {
                 continue;
             }
             if !status.is_success() {
+                // #252: carry Notion's error code and message, never headers.
+                let (code, message) = error_body(resp).await;
                 return Err(NotionError::Status {
                     status: status.as_u16(),
                     endpoint: endpoint.to_string(),
+                    code,
+                    message,
                 });
             }
             let bytes = resp.bytes().await?;
@@ -261,6 +268,37 @@ impl NotionClient {
                 message: e.to_string(),
             });
         }
+    }
+}
+
+/// Longest Notion error `message` carried into an error, in characters.
+const MAX_ERROR_MESSAGE_CHARS: usize = 300;
+
+/// Notion's error body: `{"object": "error", "status", "code", "message"}`.
+#[derive(serde::Deserialize)]
+struct ErrorBody {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// Read `(code, message)` from an error response body (#252).
+///
+/// A body that is not Notion's error shape yields `(None, None)`; the status
+/// and endpoint still name the failure. The message is truncated.
+async fn error_body(resp: reqwest::Response) -> (Option<String>, Option<String>) {
+    let Ok(bytes) = resp.bytes().await else {
+        return (None, None);
+    };
+    match serde_json::from_slice::<ErrorBody>(&bytes) {
+        Ok(b) => (
+            b.code.filter(|c| !c.is_empty()),
+            b.message
+                .filter(|m| !m.is_empty())
+                .map(|m| m.chars().take(MAX_ERROR_MESSAGE_CHARS).collect()),
+        ),
+        Err(_) => (None, None),
     }
 }
 

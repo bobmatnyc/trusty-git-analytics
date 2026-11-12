@@ -440,3 +440,184 @@ fn email_capability_check_needs_people_and_no_email() {
     assert!(!people_without_any_email(&[bot]), "bots alone say nothing");
     assert!(!people_without_any_email(&[]));
 }
+
+/// Mount a search with `p1` (comments answer `p1_status`) and `p2` (one
+/// readable comment), plus the users list.
+async fn mount_two_pages(server: &MockServer, p1_status: u16) {
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(
+            vec![
+                page(
+                    "p1",
+                    "2026-11-02T09:00:00.000Z",
+                    "2026-11-10T10:00:00.000Z",
+                    "u1",
+                ),
+                page(
+                    "p2",
+                    "2026-11-03T09:00:00.000Z",
+                    "2026-11-09T10:00:00.000Z",
+                    "u1",
+                ),
+            ],
+            None,
+        )))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .and(query_param("block_id", "p1"))
+        .respond_with(ResponseTemplate::new(p1_status).set_body_json(json!({
+            "object": "error", "status": p1_status,
+            "code": "object_not_found", "message": "Could not find block with ID: p1."
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .and(query_param("block_id", "p2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(
+            vec![json!({"object": "comment", "id": "c2",
+                        "created_time": "2026-11-09T11:00:00.000Z",
+                        "created_by": {"object": "user", "id": "u1"},
+                        "rich_text": [{"plain_text": "ok"}]})],
+            None,
+        )))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(users_body()))
+        .mount(server)
+        .await;
+}
+
+/// #252 live-check failure: one page's comments answering `status` must skip
+/// that page's comments only. Page events of both pages, the readable page's
+/// comment, a non-fatal fault counting 1 page, and an advanced cursor.
+async fn assert_unreadable_comments_are_skipped(status: u16) {
+    let server = MockServer::start().await;
+    mount_two_pages(&server, status).await;
+    let mut db = Database::open_in_memory().expect("db");
+    let mut stats = CollectionStats::default();
+    sync_workspace(
+        &mut db,
+        &client(&server),
+        WS,
+        &IdentityResolver::new(None),
+        &mut stats,
+    )
+    .await;
+
+    assert!(
+        stats.stage_failures().is_empty(),
+        "HTTP {status} on one page's comments must not fail the sync: {:?}",
+        stats.errors
+    );
+    let count = |sql: &str| -> i64 {
+        db.connection()
+            .query_row(sql, [], |r| r.get(0))
+            .expect("count")
+    };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM fact_notion_activity WHERE kind IN ('page_created','page_edited')"),
+        4,
+        "page events of both pages"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM fact_notion_activity WHERE kind = 'comment_created'"),
+        1,
+        "the readable page's comment"
+    );
+    let faults: Vec<&str> = stats
+        .errors
+        .iter()
+        .filter(|f| !f.is_stage_failure() && f.message.contains("comments unreadable"))
+        .map(|f| f.message.as_str())
+        .collect();
+    assert_eq!(faults.len(), 1, "{:?}", stats.errors);
+    assert!(faults[0].contains("on 1 page(s)"), "{}", faults[0]);
+    assert!(faults[0].contains("read comments"), "{}", faults[0]);
+    assert_eq!(watermark(&db).as_deref(), Some("2026-11-10T10:00:00Z"));
+}
+
+#[tokio::test]
+async fn a_404_on_one_pages_comments_skips_only_those_comments() {
+    assert_unreadable_comments_are_skipped(404).await;
+}
+
+#[tokio::test]
+async fn a_403_on_one_pages_comments_skips_only_those_comments() {
+    assert_unreadable_comments_are_skipped(403).await;
+}
+
+/// #252: a database (or any non-page) search result is skipped, and its id
+/// never reaches `/v1/comments`.
+#[tokio::test]
+async fn a_database_search_result_is_skipped_and_never_commented() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(
+            vec![
+                json!({"object": "database", "id": "db1",
+                       "created_time": "2026-11-10T09:00:00.000Z",
+                       "last_edited_time": "2026-11-11T10:00:00.000Z"}),
+                page(
+                    "p1",
+                    "2026-11-02T09:00:00.000Z",
+                    "2026-11-10T10:00:00.000Z",
+                    "u1",
+                ),
+            ],
+            None,
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .and(query_param("block_id", "db1"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .and(query_param("block_id", "p1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(Vec::new(), None)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(users_body()))
+        .mount(&server)
+        .await;
+    let mut db = Database::open_in_memory().expect("db");
+    let mut stats = CollectionStats::default();
+    sync_workspace(
+        &mut db,
+        &client(&server),
+        WS,
+        &IdentityResolver::new(None),
+        &mut stats,
+    )
+    .await;
+
+    assert!(stats.errors.is_empty(), "{:?}", stats.errors);
+    let db_rows: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM fact_notion_activity WHERE page_id = 'db1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(db_rows, 0, "no events for a database object");
+    assert_eq!(
+        watermark(&db).as_deref(),
+        Some("2026-11-10T10:00:00Z"),
+        "the database's later edit time does not set the cursor"
+    );
+}
