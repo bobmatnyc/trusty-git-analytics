@@ -292,3 +292,151 @@ fn persist_is_idempotent_and_keeps_the_cursor_monotonic() {
         "never backward"
     );
 }
+
+/// #252 HIGH: Notion search is indexed asynchronously, so a page edited just
+/// before the stored watermark can first appear after the sync that set it.
+/// The walk re-reads a lookback window below the watermark; without it this
+/// page is skipped forever.
+#[tokio::test]
+async fn a_late_indexed_page_below_the_watermark_is_collected() {
+    let server = MockServer::start().await;
+    mount(&server, "2026-11-10T10:00:00.000Z", 200).await;
+    let mut db = Database::open_in_memory().expect("db");
+    let resolver = IdentityResolver::new(None);
+    let mut stats = CollectionStats::default();
+    sync_workspace(&mut db, &client(&server), WS, &resolver, &mut stats)
+        .await
+        .expect("first sync");
+    assert_eq!(watermark(&db).as_deref(), Some("2026-11-10T10:00:00Z"));
+
+    // p2 was edited at 09:30, before the watermark, but indexed only now.
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(
+            vec![
+                page(
+                    "p1",
+                    "2026-11-02T09:00:00.000Z",
+                    "2026-11-10T10:00:00.000Z",
+                    "u1",
+                ),
+                page(
+                    "p2",
+                    "2026-11-10T09:00:00.000Z",
+                    "2026-11-10T09:30:00.000Z",
+                    "u1",
+                ),
+            ],
+            None,
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(Vec::new(), None)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(users_body()))
+        .mount(&server)
+        .await;
+    let mut stats = CollectionStats::default();
+    sync_workspace(&mut db, &client(&server), WS, &resolver, &mut stats).await;
+
+    assert!(stats.stage_failures().is_empty(), "{:?}", stats.errors);
+    let p2_rows: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM fact_notion_activity WHERE page_id = 'p2'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(
+        p2_rows, 2,
+        "p2's page_created and page_edited are collected"
+    );
+    assert_eq!(
+        watermark(&db).as_deref(),
+        Some("2026-11-10T10:00:00Z"),
+        "the cursor never moves backward"
+    );
+}
+
+/// #252: people listed with no email means the token lacks the email
+/// capability. The run stores its events, warns, and records a non-fatal
+/// fault naming the capability.
+#[tokio::test]
+async fn people_without_emails_report_the_missing_capability() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(
+            vec![page(
+                "p1",
+                "2026-11-02T09:00:00.000Z",
+                "2026-11-10T10:00:00.000Z",
+                "u1",
+            )],
+            None,
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(Vec::new(), None)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(
+            vec![
+                json!({"object": "user", "id": "u1", "type": "person", "name": "Ada L",
+                       "person": {}}),
+                json!({"object": "user", "id": "bot1", "type": "bot", "name": "Zapier", "bot": {}}),
+            ],
+            None,
+        )))
+        .mount(&server)
+        .await;
+    let mut db = Database::open_in_memory().expect("db");
+    let mut stats = CollectionStats::default();
+    let out = sync_workspace(
+        &mut db,
+        &client(&server),
+        WS,
+        &IdentityResolver::new(None),
+        &mut stats,
+    )
+    .await
+    .expect("the sync itself succeeds");
+
+    assert!(out.email_capability_missing);
+    assert!(
+        stats.stage_failures().is_empty(),
+        "non-fatal: {:?}",
+        stats.errors
+    );
+    assert!(
+        stats.errors.iter().any(
+            |f| !f.is_stage_failure() && f.message.contains("user information including email")
+        ),
+        "a non-fatal fault names the capability: {:?}",
+        stats.errors
+    );
+    assert_eq!(watermark(&db).as_deref(), Some("2026-11-10T10:00:00Z"));
+}
+
+#[test]
+fn email_capability_check_needs_people_and_no_email() {
+    use super::events::people_without_any_email;
+    let with_email = user("u1", "person", "Ada", Some("ada@corp.example"));
+    let without = user("u2", "person", "Bo", None);
+    let bot = user("bot1", "bot", "Zapier", None);
+    assert!(people_without_any_email(&[without.clone(), bot.clone()]));
+    assert!(!people_without_any_email(&[with_email, without]));
+    assert!(!people_without_any_email(&[bot]), "bots alone say nothing");
+    assert!(!people_without_any_email(&[]));
+}

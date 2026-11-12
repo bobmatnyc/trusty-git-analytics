@@ -14,11 +14,11 @@
 //! `sync_stores_events_and_advances_the_cursor`.
 
 use chrono::Utc;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::client::{parse_ts, NotionClient};
 use super::error::NotionError;
-use super::events::{build_events, ActorDirectory};
+use super::events::{build_events, people_without_any_email, ActorDirectory};
 use super::store;
 use super::wire::{CommentMeta, NotionUser, PageMeta};
 use crate::collect::collector::CollectionStats;
@@ -33,7 +33,17 @@ pub struct NotionSyncOutcome {
     pub events: usize,
     /// Distinct actors left with a NULL email (bots, no email, unlisted).
     pub unresolved_actors: usize,
+    /// `/v1/users` listed people but none with an email: the token most
+    /// likely lacks the "read user information including email addresses"
+    /// capability (#252).
+    pub email_capability_missing: bool,
 }
+
+/// The fault text recorded when no listed person carries an email (#252).
+pub(crate) const EMAIL_CAPABILITY_MISSING: &str =
+    "Notion: /v1/users listed people but none with an email; every actor stays \
+     unresolved (NULL actor_email). The token most likely lacks the \"read user \
+     information including email addresses\" capability";
 
 /// Run the Notion step when `config.notion` is set; no-op otherwise.
 ///
@@ -75,6 +85,13 @@ pub(crate) async fn sync_workspace(
             );
             stats.notion_events += outcome.events;
             stats.notion_unresolved_actors += outcome.unresolved_actors;
+            if outcome.email_capability_missing {
+                // #252: non-fatal — the events are stored, but identity is not.
+                warn!(workspace, "{EMAIL_CAPABILITY_MISSING}");
+                stats.skip_item(format!(
+                    "{EMAIL_CAPABILITY_MISSING} (workspace {workspace})"
+                ));
+            }
             Some(outcome)
         }
         Err(e) => {
@@ -118,6 +135,7 @@ async fn try_sync(
     Ok(NotionSyncOutcome {
         events: written,
         unresolved_actors,
+        email_capability_missing: people_without_any_email(&users),
     })
 }
 

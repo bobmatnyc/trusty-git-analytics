@@ -229,6 +229,30 @@ async fn comments_and_users_paginate() {
     assert!(comments.iter().all(|c| c.page_id == "p1"));
 }
 
+/// #252: a server that answers `has_more` with the cursor just requested
+/// must not loop the walk forever.
+#[tokio::test]
+async fn a_repeated_cursor_is_an_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(Vec::new(), Some("k1"))))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list(Vec::new(), Some("s1"))))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let c = client(&server);
+    let err = c.list_users().await.expect_err("users stop");
+    assert!(matches!(err, NotionError::CursorRepeated { .. }), "{err}");
+    let err = c.search_pages_since(None).await.expect_err("search stops");
+    assert!(matches!(err, NotionError::CursorRepeated { .. }), "{err}");
+}
+
 #[tokio::test]
 async fn has_more_without_a_cursor_is_an_error() {
     let server = MockServer::start().await;

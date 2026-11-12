@@ -54,6 +54,15 @@ pub enum NotionError {
     #[error("Notion API reported has_more with no next_cursor on {0}")]
     Pagination(String),
 
+    /// A pagination response that repeats the cursor just requested (#252).
+    #[error(
+        "Notion API returned the same next_cursor twice on {endpoint}; stopping to avoid a loop"
+    )]
+    CursorRepeated {
+        /// The endpoint path that answered.
+        endpoint: String,
+    },
+
     /// SQLite read or write failure.
     #[error("Notion store: {0}")]
     Db(#[from] rusqlite::Error),

@@ -149,6 +149,25 @@ impl ActorDirectory {
     }
 }
 
+/// Whether `users` lists at least one `person` and no person has an email.
+///
+/// #252: that shape means the token cannot read emails (the "read user
+/// information including email addresses" capability is missing), so every
+/// actor would be stored unresolved without anyone being told.
+pub fn people_without_any_email(users: &[NotionUser]) -> bool {
+    let has_email = |u: &NotionUser| {
+        u.person
+            .as_ref()
+            .and_then(|p| p.email.as_deref())
+            .is_some_and(|e| !e.trim().is_empty())
+    };
+    let mut people = users
+        .iter()
+        .filter(|u| u.kind.as_deref() == Some("person"))
+        .peekable();
+    people.peek().is_some() && !people.any(has_email)
+}
+
 /// Build the v1 events for one sync.
 ///
 /// Every page yields one `page_created` and one `page_edited` (keyed by its

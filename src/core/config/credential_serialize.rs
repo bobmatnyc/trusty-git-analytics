@@ -91,10 +91,12 @@ impl Serialize for NotionConfig {
         let Self {
             token,
             workspace_id,
+            lookback_minutes,
         } = self;
-        let mut s = serializer.serialize_struct("NotionConfig", 2)?;
+        let mut s = serializer.serialize_struct("NotionConfig", 3)?;
         s.serialize_field("token", &mask(token.as_ref()))?;
         s.serialize_field("workspace_id", workspace_id)?;
+        s.serialize_field("lookback_minutes", lookback_minutes)?;
         s.end()
     }
 }

@@ -10,7 +10,9 @@
 //! sent (clamped).
 //! Test: `client_tests` — `search_paginates_and_stops_at_the_watermark`,
 //! `a_429_is_retried_after_retry_after`, `throttling_is_bounded`,
-//! `comments_and_users_paginate`, `an_unset_token_is_a_config_error`.
+//! `comments_and_users_paginate`, `an_unset_token_is_a_config_error`,
+//! `a_repeated_cursor_is_an_error`; the lookback window:
+//! `pipeline_tests::a_late_indexed_page_below_the_watermark_is_collected`.
 
 use std::time::Duration;
 
@@ -50,6 +52,7 @@ pub struct NotionClient {
     token: String,
     max_attempts: u32,
     default_backoff: Duration,
+    lookback: chrono::Duration,
 }
 
 impl NotionClient {
@@ -89,6 +92,8 @@ impl NotionClient {
             token,
             max_attempts: MAX_ATTEMPTS,
             default_backoff: DEFAULT_BACKOFF,
+            // #252: overlap window below the watermark; see `search_pages_since`.
+            lookback: chrono::Duration::minutes(i64::from(cfg.lookback_minutes())),
         })
     }
 
@@ -99,13 +104,15 @@ impl NotionClient {
         self
     }
 
-    /// Pages edited at or after `watermark`, newest first.
+    /// Pages edited at or after `watermark` minus the lookback, newest first.
     ///
     /// Walks `/v1/search` (pages only, `last_edited_time` descending) and stops
-    /// at the first page edited strictly before `watermark`. Pages edited AT
-    /// the watermark are returned again: Notion rounds `last_edited_time` to
-    /// the minute, so an edit later in that minute would otherwise be lost.
-    /// The event upsert makes the repeat harmless. `None`: every page the
+    /// at the first page edited strictly before `watermark - lookback`
+    /// (`notion.lookback_minutes`, default 60). Notion indexes search
+    /// asynchronously, so a page edited just before the stored watermark can
+    /// first appear after the sync that set it; the overlap window re-reads
+    /// those pages. Notion also rounds `last_edited_time` to the minute. The
+    /// event upsert makes every re-read harmless. `None`: every page the
     /// token can see.
     ///
     /// # Errors
@@ -118,6 +125,8 @@ impl NotionClient {
         let endpoint = "/v1/search";
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
+        // #252: re-read an overlap window below the watermark.
+        let stop_before = watermark.map(|w| w - self.lookback);
         loop {
             let mut body = json!({
                 "filter": {"property": "object", "value": "page"},
@@ -135,14 +144,14 @@ impl NotionClient {
                 if p.object != "page" {
                     continue;
                 }
-                if let Some(mark) = watermark {
+                if let Some(mark) = stop_before {
                     if parse_ts(&p.last_edited_time)? < mark {
                         return Ok(out);
                     }
                 }
                 out.push(p);
             }
-            match next_cursor(endpoint, page.has_more, page.next_cursor)? {
+            match next_cursor(endpoint, page.has_more, page.next_cursor, cursor.as_deref())? {
                 Some(c) => cursor = Some(c),
                 None => return Ok(out),
             }
@@ -194,7 +203,7 @@ impl NotionClient {
                 .send(endpoint, || self.http.get(url).query(&query))
                 .await?;
             out.extend(page.results);
-            match next_cursor(endpoint, page.has_more, page.next_cursor)? {
+            match next_cursor(endpoint, page.has_more, page.next_cursor, cursor.as_deref())? {
                 Some(c) => cursor = Some(c),
                 None => return Ok(out),
             }
@@ -273,15 +282,22 @@ fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
 }
 
 /// The cursor to request next, `None` after the last page.
+///
+/// #252: a `next_cursor` equal to the cursor just requested is an error, so
+/// a server that repeats itself cannot loop the walk forever.
 fn next_cursor(
     endpoint: &str,
     has_more: bool,
     next: Option<String>,
+    previous: Option<&str>,
 ) -> Result<Option<String>, NotionError> {
     if !has_more {
         return Ok(None);
     }
     match next {
+        Some(c) if previous == Some(c.as_str()) => Err(NotionError::CursorRepeated {
+            endpoint: endpoint.to_string(),
+        }),
         Some(c) if !c.is_empty() => Ok(Some(c)),
         _ => Err(NotionError::Pagination(endpoint.to_string())),
     }

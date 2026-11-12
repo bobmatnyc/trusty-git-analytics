@@ -83,7 +83,7 @@ pub use llm::{
     LLM_MIN_INPUT_ROOM_TOKENS,
     LLM_MIN_MAX_INPUT_TOKENS,
 };
-pub use notion::{NotionConfig, NOTION_DEFAULT_WORKSPACE};
+pub use notion::{NotionConfig, NOTION_DEFAULT_LOOKBACK_MINUTES, NOTION_DEFAULT_WORKSPACE};
 pub use repo_map::{
     RepoMapConfig, RepoMapMode, REPO_MAP_DEFAULT_EXCEPTIONS, REPO_MAP_DEFAULT_MIN_CONFIDENCE,
 };

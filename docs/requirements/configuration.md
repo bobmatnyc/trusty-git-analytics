@@ -1001,8 +1001,9 @@ activity events in `fact_notion_activity` (see
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `token` | string | required | Notion internal-integration token. Use `"${NOTION_TOKEN}"` so the token stays in the environment. Redacted in every `Debug` and `Serialize` rendering of the config; never logged. Unset or empty after expansion: the Notion stage fails and `tga collect` exits non-zero. |
+| `token` | string | required | Notion token: a personal access token or an integration token. Collection covers the pages and comments that token can read. Use `"${NOTION_TOKEN}"` so the token stays in the environment. Redacted in every `Debug` and `Serialize` rendering of the config; never logged. Unset or empty after expansion: the Notion stage fails and `tga collect` exits non-zero. |
 | `workspace_id` | string | `"default"` | Label for the workspace. Keys the `notion_sync_cursor` row and fills `fact_notion_activity.workspace_id`. |
+| `lookback_minutes` | integer | `60` | Minutes below the stored watermark each sync re-reads. Notion search is indexed asynchronously, so a page edited just before the watermark can appear after the sync that set it. Re-read events are upserted, not duplicated. |
 
 ```yaml
 notion:
@@ -1010,15 +1011,23 @@ notion:
   workspace_id: acme
 ```
 
-The integration needs the "Read content", "Read comments" and "Read user
-information including email addresses" capabilities. Without the email
-capability every actor stays unresolved.
+When the token is an integration token, the integration needs the "Read
+content", "Read comments" and "Read user information including email
+addresses" capabilities. Without the email capability every actor stays
+unresolved: when `/v1/users` lists people but none with an email, the run
+logs a warning and records a non-fatal fault naming that capability.
 
 What a sync reads: `POST /v1/search` (pages, newest `last_edited_time` first,
-stopping at the stored watermark), `GET /v1/comments?block_id=<page>` for
-each page edited since the watermark, and `GET /v1/users` for identity. A 429
-or 529 is retried up to four attempts, waiting the `Retry-After` the server
-sends (at most 30 s).
+stopping `lookback_minutes` below the stored watermark),
+`GET /v1/comments?block_id=<page>` for each page read, and `GET /v1/users`
+for identity. A 429 or 529 is retried up to four attempts, waiting the
+`Retry-After` the server sends (at most 30 s). A response that repeats the
+cursor it was asked for stops the sync with an error.
+
+Each sync is all-or-nothing, the first one included: a failure discards that
+run's fetched data, records a stage failure, and leaves the cursor unchanged,
+so the next run starts over from the same point. A first sync that fails
+reads every page again on the next run.
 
 Events recorded:
 
@@ -1030,8 +1039,8 @@ Events recorded:
   body length in characters. The body is never stored.
 
 Not measurable through the public API, and not recorded: per-edit history,
-editors other than the last one, page views, resolved comments, pages not
-shared with the integration, and history before the first sync. Comments are
+editors other than the last one, page views, resolved comments, pages and
+comments the token cannot read, and history before the first sync. Comments are
 read only for pages edited since the previous sync.
 
 Identity: each Notion person's `(name, email)` goes through the identity

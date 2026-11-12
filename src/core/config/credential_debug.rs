@@ -98,10 +98,12 @@ impl fmt::Debug for NotionConfig {
         let Self {
             token,
             workspace_id,
+            lookback_minutes,
         } = self;
         f.debug_struct("NotionConfig")
             .field("token", &mask(token.as_ref()))
             .field("workspace_id", workspace_id)
+            .field("lookback_minutes", lookback_minutes)
             .finish()
     }
 }
@@ -415,6 +417,7 @@ mod tests {
             let cfg = NotionConfig {
                 token: Some(secret.to_string()),
                 workspace_id: Some(PROBE.to_string()),
+                lookback_minutes: None,
             };
             format!("{cfg:?}{cfg:#?}")
         });
@@ -422,6 +425,7 @@ mod tests {
         let unset = NotionConfig {
             token: None,
             workspace_id: Some(PROBE.to_string()),
+            lookback_minutes: None,
         };
         let rendered = format!("{unset:?}");
         assert!(
