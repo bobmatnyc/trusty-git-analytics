@@ -1,3 +1,0 @@
-Fixed
-- Notion collect no longer fails a long first sync on one transient error (#252). Search and comments requests retry transport and timeout errors, HTTP 429/529 (honoring `Retry-After`) and other 5xx with bounded exponential backoff and jitter; other 4xx are not retried.
-- Notion collect commits events and the cursor in batches of 100 pages, oldest edit first (#252). A failure part-way still fails the stage, but keeps the batches already stored, never moves the cursor past an unstored page, and the next run resumes from the cursor without duplicate events. The run logs progress every 100 pages.

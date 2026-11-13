@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.7.0] — 2026-11-12
+
+### Added
+
+- Notion activity as a per-person weekly signal ([#252](https://github.com/bobmatnyc/trusty-git-analytics/issues/252)). An opt-in `notion:` config block (`token: "${NOTION_TOKEN}"`, redacted in `Debug` and `Serialize`) makes `tga collect` store `page_created`, `page_edited` (last editor only, a lower bound) and `comment_created` (body length only) events in the new `fact_notion_activity` table, bucketed by ISO week, with actors resolved to canonical emails through the identity resolver. Migration v40 adds `fact_notion_activity` and `notion_sync_cursor`. A failed fetch or write records a stage failure and leaves the cursor unchanged. Notion activity is never summed into effort.
+
+### Fixed
+
+- Notion collect no longer fails the whole sync when one page's comments answer HTTP 403 or 404 ([#252](https://github.com/bobmatnyc/trusty-git-analytics/issues/252)). That page's comments are skipped, the run records one non-fatal fault counting such pages and warns about a likely missing "read comments" capability, and pages, users and the cursor are still stored. Notion errors now carry Notion's error `code` and `message`.
+- Notion collect no longer fails a long first sync on one transient error ([#252](https://github.com/bobmatnyc/trusty-git-analytics/issues/252)). Search and comments requests retry transport and timeout errors, HTTP 429/529 (honoring `Retry-After`) and other 5xx with bounded exponential backoff and jitter; other 4xx are not retried.
+- Notion collect commits events and the cursor in batches of 100 pages, oldest edit first ([#252](https://github.com/bobmatnyc/trusty-git-analytics/issues/252)). A failure part-way still fails the stage, but keeps the batches already stored, never moves the cursor past an unstored page, and the next run resumes from the cursor without duplicate events. The run logs progress every 100 pages.
+- Notion collect no longer fails when the token cannot list users ([#252](https://github.com/bobmatnyc/trusty-git-analytics/issues/252)). A personal access token gets HTTP 403 `restricted_resource` on `/v1/users`; a 403 or 404 there now records one non-fatal fault ("token cannot list users; actors unresolved"), and the sync stores its events with every actor unresolved and advances the cursor. Other `/v1/users` failures still fail the stage. Users are listed before the page search, so a failure there no longer costs a full page walk first.
+
+### Known limits
+
+- Notion activity is stored per Notion user id but is not attributable per person yet: a personal access token cannot list users, so actors stay unresolved until [#257](https://github.com/bobmatnyc/trusty-git-analytics/issues/257) lands. Do not use the Notion signal in per-person rankings before then. Comments on pages the token cannot read are skipped and counted ([#254](https://github.com/bobmatnyc/trusty-git-analytics/issues/254)).
+
 ## [10.6.0] — 2026-11-12
 
 ### Breaking
