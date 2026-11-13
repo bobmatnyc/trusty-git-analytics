@@ -1020,9 +1020,19 @@ logs a warning and records a non-fatal fault naming that capability.
 What a sync reads: `POST /v1/search` (pages, newest `last_edited_time` first,
 stopping `lookback_minutes` below the stored watermark),
 `GET /v1/comments?block_id=<page>` for each page read, and `GET /v1/users`
-for identity. A 429 or 529 is retried up to four attempts, waiting the
-`Retry-After` the server sends (at most 30 s). A response that repeats the
-cursor it was asked for stops the sync with an error.
+for identity. A transient failure is retried: a transport or timeout error,
+a 429 or 529, or any other 5xx. A request gets up to six attempts. It waits
+the `Retry-After` the server sends, or else an exponential backoff with
+jitter starting at 1 s. One wait is at most 30 s, and the waits of one
+request total at most 120 s. After that the last error stands. Other 4xx
+answers are not retried. A response that repeats the cursor it was asked
+for stops the sync with an error.
+
+**The first sync reads the whole workspace.** With no stored watermark,
+every page the token can see is read, with one `/v1/comments` request per
+page. On a large workspace that takes a long time, most of an hour for
+thousands of pages. The run logs `notion: search N pages so far` and
+`notion: comments page N of M` every 100 pages.
 
 Search results that are not pages (databases, data sources) are skipped, and
 no comments are requested for them. When one page's `/v1/comments` answers
@@ -1031,14 +1041,19 @@ comments are skipped and counted: the run stores every page and user event,
 advances the cursor, logs a warning, and records one non-fatal fault with the
 number of pages whose comments were unreadable. The usual cause is a token
 without the "read comments" capability. Any other comments failure (401,
-429/529 after retries, 5xx, transport) and any `/v1/search` or `/v1/users`
-failure still fails the sync. Every Notion error names the HTTP status, the
-endpoint, and Notion's error `code` and `message`.
+or a transient failure that outlasts its retries) and any `/v1/search` or
+`/v1/users` failure still fails the sync. Every Notion error names the HTTP
+status, the endpoint, and Notion's error `code` and `message`.
 
-Each sync is all-or-nothing, the first one included: a failure discards that
-run's fetched data, records a stage failure, and leaves the cursor unchanged,
-so the next run starts over from the same point. A first sync that fails
-reads every page again on the next run.
+Progress is committed in batches. After the search, pages are processed
+oldest `last_edited_time` first, 100 at a time. Each batch's events and the
+cursor, set to that batch's newest `last_edited_time`, commit in one
+transaction. A failure part-way records a stage failure, so `tga collect`
+exits non-zero. The batches committed before it stay stored, and the cursor
+never passes a page whose events were not stored. The next run resumes from
+that cursor (minus `lookback_minutes`) instead of from the start. Pages it
+reads again are upserted by `event_id`, never duplicated. A failure before
+the first batch commits leaves the cursor unchanged.
 
 Events recorded:
 

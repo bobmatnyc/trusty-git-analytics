@@ -1,7 +1,8 @@
 //! `fact_notion_activity` and `notion_sync_cursor` reads and writes (#252).
 //!
-//! Why: the cursor must move only when every event of the sync is stored,
-//! or a failed write would skip that sync's pages for good.
+//! Why: the cursor must move only with the events it covers, or a failed
+//! write would skip those pages for good. #252: the pipeline calls
+//! `persist` once per batch, so this holds per batch, not per sync.
 //! What: [`read_watermark`] and [`persist`]; `persist` upserts the events by
 //! `event_id` and writes the cursor in ONE transaction, so a failure leaves
 //! both unchanged. The cursor never moves backward.

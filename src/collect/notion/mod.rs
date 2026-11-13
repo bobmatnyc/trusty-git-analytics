@@ -19,6 +19,7 @@ mod client;
 mod error;
 mod events;
 mod pipeline;
+mod retry;
 mod store;
 mod wire;
 
@@ -31,6 +32,7 @@ pub use client::NotionClient;
 pub use error::NotionError;
 pub use events::{iso_week_of, ActivityEvent, Actor, ActorDirectory, EventKind};
 pub use pipeline::NotionSyncOutcome;
+pub use retry::RetryPolicy;
 pub use wire::{CommentMeta, NotionUser, PageMeta, PersonWire, UserRef};
 
 pub(crate) use pipeline::fetch_and_store_notion_activity;
