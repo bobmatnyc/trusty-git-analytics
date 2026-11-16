@@ -29,6 +29,7 @@ use super::{
     github_issues::{self, GitHubRef},
     jira, linear, shortcut, ExternalSignal, SourceConfig,
 };
+use crate::classify::errors::ClassifyError;
 use crate::core::creds::CredentialSource;
 
 mod warm;
@@ -109,8 +110,14 @@ impl ExternalSourceResolver {
     /// What: builds one [`SourceState`] per config entry, sharing a single
     /// `reqwest::Client` across all sources.
     /// Test: see `tests::resolver_builds_from_empty_sources`.
-    pub fn new(sources: &[SourceConfig]) -> Self {
-        let client = reqwest::Client::new();
+    ///
+    /// # Errors
+    ///
+    /// [`ClassifyError::Http`] when the timed HTTP client cannot be built.
+    pub fn new(sources: &[SourceConfig]) -> Result<Self, ClassifyError> {
+        // #255: source lookups were untimed; use the shared connect + total
+        // bound, and fail closed rather than fall back to an untimed client.
+        let client = crate::core::http::timed_client(crate::core::http::DEFAULT_TOTAL_TIMEOUT)?;
         let states = sources
             .iter()
             .map(|cfg| match cfg {
@@ -146,12 +153,12 @@ impl ExternalSourceResolver {
                 },
             })
             .collect();
-        Self {
+        Ok(Self {
             client,
             sources: states,
             github_budget: crate::collect::github::budget::FetchBudget::new(),
             creds: CredentialSource::from_env(),
-        }
+        })
     }
 
     /// The GitHub fetch budget this resolver's sources share (#6084).

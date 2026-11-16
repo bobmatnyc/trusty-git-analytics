@@ -15,7 +15,7 @@ use crate::classify::sources::{
 /// Test: no HTTP, pure unit.
 #[tokio::test]
 async fn resolver_builds_from_empty_sources() {
-    let resolver = ExternalSourceResolver::new(&[]);
+    let resolver = ExternalSourceResolver::new(&[]).unwrap();
     assert!(resolver.resolve("feat: add login").await.is_none());
 }
 
@@ -33,7 +33,7 @@ async fn resolver_returns_none_for_messages_without_keys() {
         project_keys: vec!["PROJ".to_string()],
         field_mappings: JiraFieldMappings::default(),
     };
-    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)]);
+    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)]).unwrap();
     let result = resolver.resolve("feat: add login flow").await;
     assert!(result.is_none(), "no keys → no signal");
 }
@@ -79,6 +79,7 @@ async fn resolver_returns_jira_signal_for_bug_issue_type() {
     };
     // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)])
+        .unwrap()
         .with_jira_base_url(0, server.uri())
         .with_credentials([("JIRA_API_TOKEN_TEST_BUG", "test-token")]);
 
@@ -134,6 +135,7 @@ async fn resolver_caches_jira_result_across_calls() {
     };
     // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)])
+        .unwrap()
         .with_jira_base_url(0, server.uri())
         .with_credentials([("JIRA_API_TOKEN_CACHE_TEST", "test-token")]);
 
@@ -165,6 +167,7 @@ async fn resolver_skips_jira_when_token_unset() {
     // #6405: an empty credential table proves "the variable is unset" without
     // clearing anything process-wide.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)])
+        .unwrap()
         .with_credentials(Vec::<(String, String)>::new());
     let result = resolver.resolve("PROJ-1234 update").await;
     assert!(result.is_none(), "missing token must yield None, not panic");
@@ -201,6 +204,7 @@ async fn resolver_returns_github_signal_for_bug_label() {
 
     // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::GithubIssues(config)])
+        .unwrap()
         .with_github_api_base(0, server.uri())
         .with_credentials([("GITHUB_TOKEN_TEST_BUG", "test-token")]);
 
@@ -210,4 +214,47 @@ async fn resolver_returns_github_signal_for_bug_label() {
         .expect("should have signal");
     assert_eq!(signal.category, "bug_fix");
     assert!(signal.source.contains("bug"));
+}
+
+/// Why: #255 — the resolver's client was `Client::new()` with no timeout, so
+/// a ticket server that accepts and never answers hung classify forever.
+/// What: a local listener accepts and holds every socket; `resolve` must
+/// return (with no signal) inside the shared 30 s total timeout plus slack.
+/// Test: pre-fix this hits the 45 s guard and fails.
+#[tokio::test]
+async fn resolver_times_out_on_stalled_server_255() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hold = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+    let config = JiraSourceConfig {
+        base_url: format!("http://{addr}"),
+        token_env: "JIRA_API_TOKEN_TEST_STALL".to_string(),
+        username: None,
+        email_env: None,
+        project_keys: vec![],
+        field_mappings: JiraFieldMappings::default(),
+    };
+    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)])
+        .unwrap()
+        .with_jira_base_url(0, format!("http://{addr}"))
+        .with_credentials([("JIRA_API_TOKEN_TEST_STALL", "test-token")]);
+    let start = std::time::Instant::now();
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        resolver.resolve("PROJ-1 stalled lookup"),
+    )
+    .await;
+    let elapsed = start.elapsed();
+    hold.abort();
+    assert!(out.is_ok(), "resolver hung past the #255 timeout bound");
+    // The 30 s client timeout, not some earlier failure, must end the call.
+    assert!(
+        elapsed >= std::time::Duration::from_secs(25),
+        "resolver returned after {elapsed:?}; expected the 30 s timeout to end it"
+    );
 }

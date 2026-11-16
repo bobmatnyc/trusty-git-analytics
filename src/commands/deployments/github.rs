@@ -87,10 +87,12 @@ fn build_github_http_client(token: Option<&str>) -> anyhow::Result<reqwest::Clie
             .map_err(|e| anyhow::anyhow!("invalid GITHUB_TOKEN: {e}"))?;
         headers.insert(AUTHORIZATION, val);
     }
-    Ok(reqwest::Client::builder()
-        .default_headers(headers)
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?)
+    // #255: shared builder adds a connect timeout to the 30 s total.
+    Ok(
+        crate::core::http::client_builder(crate::core::http::DEFAULT_TOTAL_TIMEOUT)
+            .default_headers(headers)
+            .build()?,
+    )
 }
 
 /// Resolve a `RepositoryConfig` to an `(owner, repo)` slug.

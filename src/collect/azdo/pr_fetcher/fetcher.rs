@@ -80,9 +80,9 @@ impl AdoPrFetcher {
             reqwest::header::ACCEPT,
             reqwest::header::HeaderValue::from_static("application/json"),
         );
-        let client = reqwest::Client::builder()
+        // #255: shared builder adds a connect timeout to the 30 s total.
+        let client = crate::core::http::client_builder(crate::core::http::DEFAULT_TOTAL_TIMEOUT)
             .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(AzdoError::Request)?;
         Ok(Self { config, client })

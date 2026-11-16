@@ -231,8 +231,8 @@ impl JevTransport {
     /// The HTTP client cannot be built; #111: never fall back to a client
     /// without the request timeout.
     fn new(api_key: String) -> Result<Self, JevError> {
-        let client = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+        // #255: shared builder adds the connect timeout.
+        let client = crate::core::http::client_builder(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| JevError::Client(e.to_string()))?;
         Ok(Self {
@@ -454,7 +454,7 @@ impl JevClassifier {
     #[cfg(test)]
     pub(crate) fn with_test_timeout(mut self, timeout: Duration) -> Self {
         if let Mode::Live(t) = &mut self.mode {
-            if let Ok(client) = Client::builder().timeout(timeout).build() {
+            if let Ok(client) = crate::core::http::client_builder(timeout).build() {
                 t.client = client;
             }
         }

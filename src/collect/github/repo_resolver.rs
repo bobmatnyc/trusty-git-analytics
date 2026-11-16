@@ -105,10 +105,12 @@ pub(crate) fn build_http_client_with_token(token: Option<&str>) -> Result<reqwes
             .map_err(|e| CollectError::Config(format!("invalid token header: {e}")))?;
         headers.insert(AUTHORIZATION, val);
     }
-    Ok(reqwest::Client::builder()
-        .default_headers(headers)
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?)
+    // #255: shared builder adds a connect timeout to the 30 s total.
+    Ok(
+        crate::core::http::client_builder(crate::core::http::DEFAULT_TOTAL_TIMEOUT)
+            .default_headers(headers)
+            .build()?,
+    )
 }
 
 /// Try to read `origin`'s URL from a local git repository and extract an

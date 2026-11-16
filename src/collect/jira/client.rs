@@ -168,9 +168,9 @@ impl JiraClient {
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
-        let client = reqwest::Client::builder()
+        // #255: shared builder adds a connect timeout to the 30 s total.
+        let client = crate::core::http::client_builder(crate::core::http::DEFAULT_TOTAL_TIMEOUT)
             .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
         // Expand `${ENV_VAR}` placeholders in username/token so YAML configs

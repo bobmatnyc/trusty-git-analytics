@@ -184,6 +184,7 @@ async fn openai_prompts(llm_yaml: &str) -> Vec<String> {
     let server = server("/v1/chat/completions", openai_reply()).await;
     prompts_for(llm_section(llm_yaml), &server, |s| {
         LlmClassifier::new("test-model", Some("sk-test".to_string()))
+            .unwrap()
             .with_endpoint(format!("{}/v1/chat/completions", s.uri()))
     })
     .await
@@ -258,7 +259,7 @@ async fn anthropic_prompt_carries_every_context_item() {
     let server = server("/v1/messages", anthropic_reply()).await;
     let llm = llm_section("source: anthropic-api\ncontext: [paths, pr_title, issue_type]\n");
     let prompts = prompts_for(llm, &server, |s| {
-        LlmClassifier::build_anthropic("claude-test", Some("sk-ant-test".to_string())) // pragma: allowlist secret
+        LlmClassifier::build_anthropic("claude-test", Some("sk-ant-test".to_string())).unwrap() // pragma: allowlist secret
             .with_endpoint(format!("{}/v1/messages", s.uri()))
     })
     .await;
@@ -284,6 +285,7 @@ async fn missing_context_facts_add_nothing() {
     let cats = pipeline.llm_categories().expect("cats").expect("custom");
     engine.attach_llm(
         LlmClassifier::new("test-model", Some("sk-test".to_string()))
+            .unwrap()
             .with_endpoint(format!("{}/v1/chat/completions", server.uri()))
             .with_allowed_categories(cats),
     );

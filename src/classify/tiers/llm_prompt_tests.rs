@@ -132,7 +132,7 @@ async fn anthropic_server(category: &str) -> MockServer {
 }
 
 fn anthropic_llm(server: &MockServer) -> LlmClassifier {
-    LlmClassifier::build_anthropic("claude-sonnet-5", Some("sk-ant-test".to_string())) // pragma: allowlist secret
+    LlmClassifier::build_anthropic("claude-sonnet-5", Some("sk-ant-test".to_string())).unwrap() // pragma: allowlist secret
         .with_endpoint(format!("{}/v1/messages", server.uri()))
 }
 
@@ -212,6 +212,7 @@ async fn openai_usage_is_recorded() {
         .mount(&server)
         .await;
     let llm = LlmClassifier::new("gpt-4o-mini", Some("sk-test".to_string()))
+        .unwrap()
         .with_endpoint(format!("{}/v1/chat/completions", server.uri()));
     let call = llm.classify_detailed("feat: add login").await;
     assert_eq!(call.outcome, LlmOutcome::Answered);

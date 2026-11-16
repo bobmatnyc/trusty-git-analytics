@@ -10,9 +10,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[test]
 fn has_api_key_reflects_key_state() {
-    let with_key = LlmClassifier::new("gpt-4o-mini", Some("sk-test".to_string()));
+    let with_key = LlmClassifier::new("gpt-4o-mini", Some("sk-test".to_string())).unwrap();
     assert!(with_key.has_api_key());
-    let without_key = LlmClassifier::new("gpt-4o-mini", None);
+    let without_key = LlmClassifier::new("gpt-4o-mini", None).unwrap();
     assert!(!without_key.has_api_key());
 }
 
@@ -27,7 +27,8 @@ fn build_anthropic_sets_format_flag_and_version_header() {
     let llm = LlmClassifier::build_anthropic(
         "claude-3-5-haiku-latest",
         Some("sk-ant-test".to_string()), // pragma: allowlist secret
-    );
+    )
+    .unwrap();
     assert!(llm.use_anthropic_format, "must set use_anthropic_format");
     assert!(llm.api_key.is_some(), "api_key must be set");
     assert_eq!(llm.endpoint, ANTHROPIC_ENDPOINT);
@@ -46,7 +47,7 @@ fn build_anthropic_sets_format_flag_and_version_header() {
 /// Test: pure field inspection.
 #[test]
 fn build_anthropic_without_key_has_no_api_key() {
-    let llm = LlmClassifier::build_anthropic("claude-3-5-haiku-latest", None);
+    let llm = LlmClassifier::build_anthropic("claude-3-5-haiku-latest", None).unwrap();
     assert!(!llm.has_api_key());
 }
 
@@ -77,6 +78,7 @@ async fn anthropic_response_parsing() {
         "claude-3-5-haiku-latest",
         Some("sk-ant-test".to_string()), // pragma: allowlist secret
     )
+    .unwrap()
     .with_endpoint(format!("{}/v1/messages", server.uri()));
 
     let r = llm
@@ -118,6 +120,7 @@ async fn anthropic_api_request_sets_correct_headers() {
         "claude-3-5-haiku-latest",
         Some("sk-ant-test".to_string()), // pragma: allowlist secret
     )
+    .unwrap()
     .with_endpoint(format!("{}/v1/messages", server.uri()));
 
     let r = llm
@@ -249,7 +252,7 @@ fn llm_section_presence_self_enables_tier() {
 
 #[tokio::test]
 async fn classify_returns_none_without_api_key() {
-    let llm = LlmClassifier::new("gpt-4o-mini", None);
+    let llm = LlmClassifier::new("gpt-4o-mini", None).unwrap();
     assert!(llm.classify("feat: anything").await.is_none());
 }
 
@@ -278,6 +281,7 @@ async fn classify_does_not_set_ticket_id() {
         .await;
 
     let llm = LlmClassifier::new("gpt-4o-mini", Some("sk-test".to_string()))
+        .unwrap()
         .with_endpoint(format!("{}/v1/chat/completions", server.uri()));
     let r = llm
         .classify("fix: handle null in PROJ-1234 endpoint")
@@ -338,6 +342,7 @@ async fn classify_dispatches_to_endpoint_when_keyed() {
         .await;
 
     let llm = LlmClassifier::new("gpt-4o-mini", Some("sk-test".to_string()))
+        .unwrap()
         .with_endpoint(format!("{}/v1/chat/completions", server.uri()));
     let r = llm.classify("chore: bump deps").await.expect("LLM verdict");
     assert_eq!(r.category, "feature");

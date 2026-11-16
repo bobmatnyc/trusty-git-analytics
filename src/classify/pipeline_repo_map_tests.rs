@@ -169,6 +169,7 @@ async fn mapped_repo_commits_never_reach_the_llm() {
     let mut engine = pipeline.build_rule_engine().expect("rule engine");
     engine.attach_llm(
         LlmClassifier::new("test-model", Some("sk-test".to_string()))
+            .unwrap()
             .with_endpoint(format!("{}/v1/chat/completions", server.uri())),
     );
     let stats = pipeline
@@ -311,6 +312,7 @@ async fn backfill_complexity_never_sends_a_repo_map_row_to_the_llm() {
     let mut engine = pipeline.build_rule_engine().expect("rule engine");
     engine.attach_llm(
         LlmClassifier::new("test-model", Some("sk-test".to_string()))
+            .unwrap()
             .with_endpoint(format!("{}/v1/chat/completions", server.uri())),
     );
     let updated = ClassificationPipeline::backfill_complexity_with_engine(&mut db, &engine)

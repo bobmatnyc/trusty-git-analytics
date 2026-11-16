@@ -24,6 +24,7 @@ pub mod db;
 pub mod effort;
 pub mod effort_percentile;
 pub mod errors;
+pub mod http;
 pub mod inspect;
 pub mod models;
 pub mod pm_effort;

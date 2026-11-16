@@ -25,6 +25,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use crate::classify::errors::ClassifyError;
 use crate::classify::rules::CategoryDef;
 use crate::classify::tiers::bedrock::{BedrockClassifier, DEFAULT_BEDROCK_MODEL};
 use crate::classify::tiers::jev::{JevClassifier, JEV_MODEL};
@@ -151,9 +152,15 @@ pub(crate) fn default_model_for(source: &LlmSource) -> &'static str {
 impl LlmClassifier {
     /// Every field at its OpenAI-compatible default; constructors override
     /// the fields their provider needs.
-    pub(super) fn base(model: &str) -> Self {
-        Self {
-            client: Client::new(),
+    ///
+    /// # Errors
+    ///
+    /// [`ClassifyError::Http`] when the timed HTTP client cannot be built.
+    pub(super) fn base(model: &str) -> Result<Self, ClassifyError> {
+        Ok(Self {
+            // #255: LLM calls were untimed; use the shared connect + total
+            // bound, and fail closed rather than fall back to an untimed client.
+            client: crate::core::http::timed_client(crate::core::http::LLM_TOTAL_TIMEOUT)?,
             model: model.to_string(),
             api_key: None,
             endpoint: DEFAULT_ENDPOINT.to_string(),
@@ -165,7 +172,7 @@ impl LlmClassifier {
             effort: None,
             jev: None,
             budget: None,
-        }
+        })
     }
 
     /// Construct a new LLM classifier targeting the OpenAI chat-completions
@@ -173,11 +180,15 @@ impl LlmClassifier {
     ///
     /// `model` is provider-specific (e.g. `"gpt-4o-mini"`). If `api_key` is
     /// `None`, classification calls will return `None` immediately.
-    pub fn new(model: &str, api_key: Option<String>) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// [`ClassifyError::Http`] when the timed HTTP client cannot be built (#255).
+    pub fn new(model: &str, api_key: Option<String>) -> Result<Self, ClassifyError> {
+        Ok(Self {
             api_key,
-            ..Self::base(model)
-        }
+            ..Self::base(model)?
+        })
     }
 
     /// Build an [`LlmClassifier`] that calls the Anthropic Messages API directly.
@@ -195,20 +206,24 @@ impl LlmClassifier {
     /// Test: `anthropic_api_request_sets_correct_headers` mocks the endpoint
     /// and asserts the headers and body shape; `anthropic_response_parsing`
     /// asserts the `content[].text` parse path.
-    pub fn build_anthropic(model: &str, api_key: Option<String>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`ClassifyError::Http`] when the timed HTTP client cannot be built (#255).
+    pub fn build_anthropic(model: &str, api_key: Option<String>) -> Result<Self, ClassifyError> {
         let mut headers = HeaderMap::new();
         // `anthropic-version` is required by the Anthropic API; requests
         // without it are rejected with HTTP 400.
         if let Ok(v) = HeaderValue::from_str(ANTHROPIC_API_VERSION) {
             headers.insert("anthropic-version", v);
         }
-        Self {
+        Ok(Self {
             api_key,
             endpoint: ANTHROPIC_ENDPOINT.to_string(),
             extra_headers: headers,
             use_anthropic_format: true,
-            ..Self::base(model)
-        }
+            ..Self::base(model)?
+        })
     }
 
     /// Construct an LLM classifier configured for a specific provider.
@@ -258,8 +273,10 @@ impl LlmClassifier {
     ) -> Result<Self, String> {
         let normalized = provider.trim().to_ascii_lowercase();
         match normalized.as_str() {
-            "openrouter" => Ok(Self::build_openrouter(model, openrouter_api_key, creds)),
-            "openai" => Ok(Self::new(model, creds.get("OPENAI_API_KEY"))),
+            "openrouter" => {
+                Self::build_openrouter(model, openrouter_api_key, creds).map_err(|e| e.to_string())
+            }
+            "openai" => Self::new(model, creds.get("OPENAI_API_KEY")).map_err(|e| e.to_string()),
             "bedrock" => {
                 // Bedrock requires async SDK initialization. Direct sync
                 // callers get a clear error so they know to use
@@ -283,10 +300,10 @@ impl LlmClassifier {
                     .or_else(|| creds.get(trusty_common::env_vars::ENV_OPENROUTER_API_KEY));
                 if or_key.is_some() {
                     info!("LLM provider auto-selected: openrouter");
-                    Ok(Self::build_openrouter(model, or_key, creds))
+                    Self::build_openrouter(model, or_key, creds).map_err(|e| e.to_string())
                 } else {
                     info!("LLM provider auto-selected: openai");
-                    Ok(Self::new(model, creds.get("OPENAI_API_KEY")))
+                    Self::new(model, creds.get("OPENAI_API_KEY")).map_err(|e| e.to_string())
                 }
             }
             // #111: without this arm a legacy `llm_provider: jev` fell
@@ -301,7 +318,7 @@ impl LlmClassifier {
                     provider = %other,
                     "unknown LLM provider; falling back to OpenAI endpoint"
                 );
-                Ok(Self::new(model, creds.get("OPENAI_API_KEY")))
+                Self::new(model, creds.get("OPENAI_API_KEY")).map_err(|e| e.to_string())
             }
         }
     }
@@ -330,7 +347,7 @@ impl LlmClassifier {
             return Ok(Self {
                 endpoint: String::new(),
                 bedrock: Some(bedrock),
-                ..Self::base(model)
+                ..Self::base(model).map_err(|e| e.to_string())?
             });
         }
         Self::from_provider(provider, model, openrouter_api_key)
@@ -397,7 +414,7 @@ impl LlmClassifier {
                     api_key_env = %cfg.api_key_env,
                     "LLM provider: openrouter (from llm: config section)"
                 );
-                Ok(Self::build_openrouter(model, key, creds))
+                Self::build_openrouter(model, key, creds).map_err(|e| e.to_string())
             }
             LlmSource::Bedrock => {
                 info!(
@@ -409,7 +426,7 @@ impl LlmClassifier {
                 Ok(Self {
                     endpoint: String::new(),
                     bedrock: Some(bedrock),
-                    ..Self::base(model)
+                    ..Self::base(model).map_err(|e| e.to_string())?
                 })
             }
             LlmSource::AnthropicApi => {
@@ -439,7 +456,9 @@ impl LlmClassifier {
                     api_key_env = %cfg.api_key_env,
                     "LLM provider: anthropic-api (direct Anthropic Messages API)"
                 );
-                Ok(Self::build_anthropic(effective_model, key).with_effort(cfg.effort))
+                Ok(Self::build_anthropic(effective_model, key)
+                    .map_err(|e| e.to_string())?
+                    .with_effort(cfg.effort))
             }
             // #111: see `jev_glue::LlmClassifier::build_jev`.
             LlmSource::Jev => Self::build_jev(cfg, model, creds),
@@ -450,7 +469,11 @@ impl LlmClassifier {
 
     /// Internal helper: build an OpenRouter-configured classifier with
     /// attribution headers set.
-    fn build_openrouter(model: &str, api_key: Option<String>, creds: &CredentialSource) -> Self {
+    fn build_openrouter(
+        model: &str,
+        api_key: Option<String>,
+        creds: &CredentialSource,
+    ) -> Result<Self, ClassifyError> {
         // #6405: the fallback lookup is a parameter, so a test never has to set
         // or clear `OPENROUTER_API_KEY` process-wide to reach either arm.
         let key = api_key.or_else(|| creds.get(trusty_common::env_vars::ENV_OPENROUTER_API_KEY));
@@ -459,12 +482,12 @@ impl LlmClassifier {
         // on them at runtime.
         headers.insert("HTTP-Referer", HeaderValue::from_static(OPENROUTER_REFERER));
         headers.insert("X-Title", HeaderValue::from_static(OPENROUTER_TITLE));
-        Self {
+        Ok(Self {
             api_key: key,
             endpoint: OPENROUTER_ENDPOINT.to_string(),
             extra_headers: headers,
-            ..Self::base(model)
-        }
+            ..Self::base(model)?
+        })
     }
 
     /// Override the chat-completions endpoint URL (e.g. for Azure / local proxies).
