@@ -507,7 +507,11 @@ impl ClassificationPipeline {
     /// What: returns `None` when `no_external` is `true` OR when the
     /// `sources` list is empty; otherwise constructs a fresh resolver.
     /// Test: exercised by the pipeline integration tests via `run`.
-    fn build_resolver(&self) -> Option<ExternalSourceResolver> {
+    ///
+    /// # Errors
+    ///
+    /// The resolver's timed HTTP client cannot be built (#255).
+    fn build_resolver(&self) -> Result<Option<ExternalSourceResolver>> {
         let no_external = self
             .config
             .classification
@@ -515,7 +519,7 @@ impl ClassificationPipeline {
             .map(|c| c.no_external)
             .unwrap_or(false);
         if no_external {
-            return None;
+            return Ok(None);
         }
         let sources = self
             .config
@@ -524,9 +528,10 @@ impl ClassificationPipeline {
             .map(|c| c.sources.as_slice())
             .unwrap_or(&[]);
         if sources.is_empty() {
-            return None;
+            return Ok(None);
         }
-        Some(ExternalSourceResolver::new(sources))
+        // #255: a client build failure fails the run instead of going untimed.
+        ExternalSourceResolver::new(sources).map(Some)
     }
 
     /// Execute the pipeline against `db`.
@@ -547,7 +552,7 @@ impl ClassificationPipeline {
         // 1. Build engine (async to support Bedrock credential init).
         let engine = self.build_engine().await?;
         // 2. Build optional external source resolver.
-        let resolver = self.build_resolver();
+        let resolver = self.build_resolver()?;
         self.run_with_engine_and_resolver(db, engine, resolver)
             .await
     }

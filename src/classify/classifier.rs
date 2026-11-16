@@ -406,6 +406,7 @@ impl ClassificationEngine {
     pub(crate) fn with_test_llm_endpoint(mut self, endpoint: &str) -> Self {
         self.llm = Some(
             LlmClassifier::new(&self.config.llm_model, Some("sk-test".to_string()))
+                .unwrap()
                 .with_endpoint(endpoint),
         );
         self

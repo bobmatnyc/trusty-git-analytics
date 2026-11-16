@@ -31,20 +31,19 @@ pub fn client_builder(total: Duration) -> ClientBuilder {
         .timeout(total)
 }
 
-/// A built client with [`CONNECT_TIMEOUT`] and the given total timeout, for
-/// infallible constructors.
+/// A built client with [`CONNECT_TIMEOUT`] and the given total timeout.
 ///
-/// Why: some constructors (`LlmClassifier::base`, `ExternalSourceResolver::new`)
-/// return `Self`, not `Result`; changing their signatures is out of scope.
-/// What: `build()` fails only when the TLS backend cannot initialise, the same
-/// condition under which `Client::new()` panics; in that case the error is
-/// logged and `Client::new()` is used, which keeps the pre-#255 behaviour.
+/// Why: callers with no headers to add need a one-call constructor.
+/// What: fails closed — a build error is returned, never replaced by an
+/// untimed `Client::new()` (#255, matching #111 in `jev.rs`).
 /// Test: `core::http::tests::stalled_server_times_out_within_bound`.
-pub fn timed_client(total: Duration) -> Client {
-    client_builder(total).build().unwrap_or_else(|e| {
-        tracing::error!(error = %e, "failed to build timed HTTP client; using reqwest defaults");
-        Client::new()
-    })
+///
+/// # Errors
+///
+/// The underlying `reqwest` builder fails (e.g. the TLS backend cannot
+/// initialise).
+pub fn timed_client(total: Duration) -> Result<Client, reqwest::Error> {
+    client_builder(total).build()
 }
 
 #[cfg(test)]
@@ -67,7 +66,7 @@ mod tests {
                 held.push(sock);
             }
         });
-        let client = timed_client(Duration::from_secs(1));
+        let client = timed_client(Duration::from_secs(1)).unwrap();
         let start = Instant::now();
         let res = tokio::time::timeout(
             Duration::from_secs(10),

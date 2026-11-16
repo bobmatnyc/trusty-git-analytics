@@ -117,6 +117,7 @@ fn assert_truncated(budget: usize, system: &str, user: &str, sent_text: &str, or
 async fn oversized_message_fits_the_budget_on_openai_compat() {
     let server = server("/v1/chat/completions", openai_reply()).await;
     let llm = LlmClassifier::new("test-model", Some("sk-test".to_string()))
+        .unwrap()
         .with_endpoint(format!("{}/v1/chat/completions", server.uri()));
     let message = huge_message();
     let call = llm.classify_detailed(&message).await;
@@ -134,7 +135,7 @@ async fn oversized_message_fits_the_budget_on_openai_compat() {
 #[tokio::test]
 async fn oversized_message_keeps_the_context_block_on_anthropic() {
     let server = server("/v1/messages", anthropic_reply()).await;
-    let llm = LlmClassifier::build_anthropic("claude-test", Some("sk-ant-test".to_string())) // pragma: allowlist secret
+    let llm = LlmClassifier::build_anthropic("claude-test", Some("sk-ant-test".to_string())).unwrap() // pragma: allowlist secret
         .with_endpoint(format!("{}/v1/messages", server.uri()));
     let paths = vec!["src/ledger/retry.rs".to_string(), "docs/a.md".to_string()];
     let ctx = CommitContext::new(&paths, 30, 2048, Some("Retry ledger writes"), Some("Bug"));
@@ -161,6 +162,7 @@ async fn oversized_message_keeps_the_context_block_on_anthropic() {
 async fn oversized_context_block_fits_the_budget() {
     let server = server("/v1/chat/completions", openai_reply()).await;
     let llm = LlmClassifier::new("test-model", Some("sk-test".to_string()))
+        .unwrap()
         .with_endpoint(format!("{}/v1/chat/completions", server.uri()));
     let title = huge("Generated ⚙ title ", 600_000);
     let ctx = CommitContext::new(&[], 30, 2048, Some(&title), None);
@@ -187,7 +189,7 @@ async fn claude_sources_send_150_kb_whole_and_openai_compat_cuts_it() {
     let expected = format!("{PREFIX}{message}");
 
     let anthropic = server("/v1/messages", anthropic_reply()).await;
-    let llm = LlmClassifier::build_anthropic("claude-test", Some("sk-ant-test".to_string())) // pragma: allowlist secret
+    let llm = LlmClassifier::build_anthropic("claude-test", Some("sk-ant-test".to_string())).unwrap() // pragma: allowlist secret
         .with_endpoint(format!("{}/v1/messages", anthropic.uri()));
     llm.classify_detailed(&message).await;
     assert_eq!(sent(&anthropic).await.1, expected, "anthropic-api");
@@ -209,6 +211,7 @@ async fn claude_sources_send_150_kb_whole_and_openai_compat_cuts_it() {
 
     let openai = server("/v1/chat/completions", openai_reply()).await;
     let llm = LlmClassifier::new("test-model", Some("sk-test".to_string()))
+        .unwrap()
         .with_endpoint(format!("{}/v1/chat/completions", openai.uri()));
     llm.classify_detailed(&message).await;
     let (system, user) = sent(&openai).await;
@@ -224,6 +227,7 @@ async fn claude_sources_send_150_kb_whole_and_openai_compat_cuts_it() {
 async fn prompt_inside_the_budget_is_byte_identical() {
     let server = server("/v1/chat/completions", openai_reply()).await;
     let llm = LlmClassifier::new("test-model", Some("sk-test".to_string()))
+        .unwrap()
         .with_endpoint(format!("{}/v1/chat/completions", server.uri()));
     let message = huge("refactor: split the ledger ", 60_000);
     let ctx = CommitContext::new(&["src/a.rs".to_string()], 30, 2048, None, Some("Story"));

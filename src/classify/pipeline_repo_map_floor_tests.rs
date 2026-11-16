@@ -169,6 +169,7 @@ async fn run_with_llm(
     let mut engine = pipeline.build_rule_engine().expect("rule engine");
     engine.attach_llm(
         LlmClassifier::new("test-model", Some("sk-test".to_string()))
+            .unwrap()
             .with_endpoint(format!("{}/v1/chat/completions", server.uri())),
     );
     pipeline.run_with_engine(db, engine).await.expect("run")

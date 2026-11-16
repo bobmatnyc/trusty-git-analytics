@@ -50,6 +50,7 @@ async fn warm_cache_dedupes_ticket_key_across_distinct_messages() {
     };
     // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(jira)])
+        .unwrap()
         .with_jira_base_url(0, server.uri())
         .with_credentials([("JIRA_TOKEN_WARM_TEST", "test-token")]);
 
@@ -84,7 +85,7 @@ async fn warm_cache_is_noop_when_no_keys_present() {
         project_keys: vec![],
         field_mappings: JiraFieldMappings::default(),
     };
-    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)]);
+    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)]).unwrap();
     let messages = vec!["chore: tidy up formatting".to_string()];
     resolver.warm_cache(&messages, 8).await;
     assert!(resolver.resolve(&messages[0]).await.is_none());

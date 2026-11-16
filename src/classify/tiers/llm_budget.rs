@@ -236,6 +236,7 @@ mod tests {
 
         let server = wiremock::MockServer::start().await;
         let llm = LlmClassifier::new("m", Some("sk-test".to_string()))
+            .unwrap()
             .with_endpoint(format!("{}/v1/chat/completions", server.uri()))
             .with_max_input_tokens(Some(under.max_input_tokens()));
         let call = llm.classify_detailed("fix: a").await;

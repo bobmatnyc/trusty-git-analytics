@@ -55,7 +55,7 @@ impl LlmClassifier {
         }
         info!(model = JEV_MODEL, api_key_env = %key_env, "LLM provider: jev (TypeSafe decision model)");
         let jev = JevClassifier::from_options(key, &cfg.jev).map_err(|e| e.to_string())?;
-        let mut llm = Self::base(JEV_MODEL);
+        let mut llm = Self::base(JEV_MODEL).map_err(|e| e.to_string())?;
         llm.endpoint = String::new();
         llm.jev = Some(jev);
         Ok(llm)

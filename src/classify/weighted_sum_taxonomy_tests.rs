@@ -174,6 +174,7 @@ async fn a_dropped_weighted_sum_verdict_falls_through_to_the_llm() {
         .expect("custom set");
     engine.attach_llm(
         LlmClassifier::new("test-model", Some("sk-test".to_string()))
+            .unwrap()
             .with_endpoint(format!("{}/v1/chat/completions", server.uri()))
             .with_allowed_categories(categories),
     );

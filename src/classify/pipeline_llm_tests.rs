@@ -115,6 +115,7 @@ fn engine(pipeline: &ClassificationPipeline, server: &MockServer) -> Classificat
         .expect("custom-only");
     engine.attach_llm(
         LlmClassifier::new("test-model", Some("sk-test".to_string()))
+            .unwrap()
             .with_endpoint(format!("{}/v1/chat/completions", server.uri()))
             .with_allowed_categories(cats),
     );

@@ -587,6 +587,7 @@ async fn pipeline_external_sources_dedupe_and_apply() {
     };
     // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(jira)])
+        .unwrap()
         .with_jira_base_url(0, server.uri())
         .with_credentials([("JIRA_TOKEN_2719", "test-token")]);
 
@@ -678,6 +679,7 @@ async fn pipeline_external_sources_dedupe_distinct_messages_same_ticket() {
     };
     // #6405: the token is a parameter, not a process-wide `set_var`.
     let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(jira)])
+        .unwrap()
         .with_jira_base_url(0, server.uri())
         .with_credentials([("JIRA_TOKEN_2719_DISTINCT", "test-token")]);
 
