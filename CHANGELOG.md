@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.7.1] — 2026-11-16
+
+### Breaking
+
+- `LlmClassifier::new`, `LlmClassifier::build_anthropic` and `ExternalSourceResolver::new` now return `Result<_, ClassifyError>` instead of `Self`. Callers must handle or propagate the error, which is returned when the timed HTTP client cannot be built (for example, TLS backend initialisation failure). Previously a build failure silently fell back to an untimed client ([#255](https://github.com/bobmatnyc/trusty-git-analytics/issues/255)).
+- `tga::collect::github::resolve_github_repos` and `org_discovery::resolve_github_repos_with_discovered` now return `Result<Vec<(String, String)>, CollectError>` instead of `Vec`. A repository whose `github_repo` is not `owner/name` is an error, where it was previously dropped from collection silently. `tga collect` reports it as a failed GitHub stage ([#266](https://github.com/bobmatnyc/trusty-git-analytics/issues/266)).
+
+### Fixed
+
+- Every HTTP client (collect: GitHub, Bitbucket, JIRA, Linear, Azure DevOps, Notion; classify: LLM tier, JEV, external ticket sources) is now built through one shared builder with a 10 s connect timeout and a bounded total timeout (30 s for API calls, 120 s for LLM calls). The LLM tier and ticket-source lookups previously had no timeout, so a stalled endpoint could hang `tga classify` ([#255](https://github.com/bobmatnyc/trusty-git-analytics/issues/255)).
+- GitHub PR, review and deployment collection now takes each repository's `owner/name` from the clone's `origin` remote first, and falls back to `org` + `name` only when `origin` is missing or not GitHub, with a per-repo warning. A repository whose `name` differs from its GitHub repo (for example `duetto-repos` at `duettoresearch/duetto`) no longer 404s. A new optional per-repo `github_repo: owner/name` key overrides both, and `Config::load` rejects a value that is not `owner/name`. When `origin` matches the configured `org`/`name` in another letter case, the configured spelling is kept so stored PR rows keep their key, and targets are deduplicated case-insensitively ([#266](https://github.com/bobmatnyc/trusty-git-analytics/issues/266)).
+
 ## [10.7.0] — 2026-11-12
 
 ### Added
