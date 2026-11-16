@@ -97,49 +97,15 @@ fn build_github_http_client(token: Option<&str>) -> anyhow::Result<reqwest::Clie
 
 /// Resolve a `RepositoryConfig` to an `(owner, repo)` slug.
 ///
-/// Why: deployments need the same GitHub owner/repo derivation rules as
-/// the PR fetcher: explicit `repo.org` wins, otherwise we probe the
-/// local clone's `origin` remote.
-/// What: returns `Some((owner, name))` when one of those rules
-/// resolves; `None` means the repo cannot be addressed via the GitHub
-/// API and the caller must skip it.
-/// Test: covered by `resolve_repo_to_github_slug_*` unit tests.
+/// Why (#266): deployments and the PR fetcher must address the same GitHub
+/// repo; this module carried its own org-first copy of the rules.
+/// What: delegates to the shared resolver — `github_repo`, then `origin`,
+/// then `repo.org` + name. No `github.org` default applies here, as before.
+/// `None` means the caller must skip the repo.
+/// Test: `resolve_repo_to_github_slug_*` unit tests.
 pub(super) fn resolve_repo_to_github_slug(repo_cfg: &RepositoryConfig) -> Option<(String, String)> {
-    let repo_name = repo_cfg.name.clone().or_else(|| {
-        repo_cfg
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(str::to_string)
-    });
-
-    if let Some(owner) = &repo_cfg.org {
-        if let Some(name) = repo_name.clone() {
-            if !name.is_empty() {
-                return Some((owner.clone(), name));
-            }
-        }
-    }
-
-    // Fall back to reading the local clone's `origin` remote.
-    owner_repo_from_remote(&repo_cfg.path)
-}
-
-/// Try to read `origin`'s URL from a local git repo and extract a
-/// GitHub `owner/name` pair from it.
-///
-/// Why: per-repo entries often omit the `org:` field; the local clone's
-/// remote already encodes the canonical slug, so probing it is the
-/// cheapest correct fallback.
-/// What: opens the repo via `git2`, finds the `origin` remote, parses
-/// the URL via [`extract_owner_repo_from_url`].
-/// Test: disk-touching path exercised end-to-end via integration tests;
-/// the URL-string parser is covered by `extract_owner_repo_from_url_*`.
-fn owner_repo_from_remote(repo_path: &std::path::Path) -> Option<(String, String)> {
-    let repo = git2::Repository::open(repo_path).ok()?;
-    let remote = repo.find_remote("origin").ok()?;
-    let url = remote.url()?;
-    extract_owner_repo_from_url(url)
+    // #266: one shared resolver; the local origin probe is removed.
+    crate::collect::github::repo_resolver::resolve_repo_slug(repo_cfg, None)
 }
 
 /// Extract an `owner/name` pair from a GitHub remote URL string.
@@ -150,6 +116,8 @@ fn owner_repo_from_remote(repo_path: &std::path::Path) -> Option<(String, String
 /// What: re-exports `collect::github::repo_resolver`'s adapter, which
 /// delegates to `trusty_common::github_path::parse_remote_url`.
 /// Test: covered by `extract_owner_repo_from_url_handles_common_forms`.
+// #266: only the tests use it now; the resolver calls the shared parser.
+#[cfg(test)]
 pub(super) use crate::collect::github::repo_resolver::extract_owner_repo_from_url;
 
 /// Parse the `Link: <url>; rel="next"` header value, returning the URL of

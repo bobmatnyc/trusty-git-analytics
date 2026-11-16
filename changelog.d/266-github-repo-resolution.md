@@ -1,0 +1,2 @@
+Fixed
+- GitHub PR, review and deployment collection now takes each repository's `owner/name` from the clone's `origin` remote first, and falls back to `org` + `name` only when `origin` is missing or not GitHub, with a per-repo warning. A repository whose `name` differs from its GitHub repo (for example `duetto-repos` at `duettoresearch/duetto`) no longer 404s. A new optional per-repo `github_repo: owner/name` key overrides both (#266).

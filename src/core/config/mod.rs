@@ -352,6 +352,14 @@ pub struct RepositoryConfig {
     #[serde(default, alias = "owner")]
     pub org: Option<String>,
 
+    /// Explicit GitHub `owner/name` for this repository's API calls.
+    ///
+    /// #266: overrides the `origin` remote and `org` + `name`, for clones
+    /// whose label differs from their GitHub repo (`duetto-repos` lives at
+    /// `duettoresearch/duetto`). Same key as gitflow-analytics' YAML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+
     /// Per-repo opt-out of all-branch walking.
     ///
     /// Why: the 2.0.0 default changed to walk all local branches and remote
@@ -1851,6 +1859,17 @@ impl Config {
                 return Err(TgaError::ValidationError(
                     "repository.path must not be empty".into(),
                 ));
+            }
+            // #266: a malformed `github_repo` fails the load, never a silent fallback.
+            if let Some(slug) = &r.github_repo {
+                let ok = slug
+                    .split_once('/')
+                    .is_some_and(|(o, n)| !o.is_empty() && !n.is_empty() && !n.contains('/'));
+                if !ok {
+                    return Err(TgaError::ValidationError(format!(
+                        "repository.github_repo must be 'owner/name', got '{slug}'"
+                    )));
+                }
             }
         }
         if let Some(adzo_config) = self.azure_devops_config() {

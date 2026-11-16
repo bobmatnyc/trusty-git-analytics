@@ -8,7 +8,7 @@
 //! tests live in `github/client.rs` (in the `tests` module) because they
 //! exercise the full resolution pipeline end-to-end.
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::github::client::USER_AGENT_VALUE;
@@ -113,23 +113,39 @@ pub(crate) fn build_http_client_with_token(token: Option<&str>) -> Result<reqwes
     )
 }
 
-/// Try to read `origin`'s URL from a local git repository and extract an
-/// `owner/name` pair if it looks like a GitHub URL.
+/// What a clone's `origin` remote yields for GitHub addressing.
 ///
-/// Accepts both `https://github.com/owner/name(.git)?` and
-/// `git@github.com:owner/name(.git)?` forms. Returns `None` for non-GitHub
-/// remotes, missing `origin`, or anything that fails to parse.
+/// #266: each fallback outcome logs its own per-repo warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OriginProbe {
+    /// `origin` parsed to a GitHub `(owner, repo)`.
+    GitHub((String, String)),
+    /// `origin` exists, but its URL is not GitHub or does not parse.
+    NotGitHub(String),
+    /// The path is not a git repo, or it has no `origin` with a URL.
+    Missing,
+}
+
+/// Probe the `origin` remote of the clone at `repo_path`.
 ///
-/// Why: per-repo entries in `repositories[]` often don't declare an `org:`
-/// field; the local clone's remote already encodes the canonical
-/// `owner/name`, so probing it is the cheapest correct fallback.
-/// What: opens the repo via `git2`, finds the `origin` remote, parses the URL.
-/// Test: `extract_owner_repo_from_url` below covers the URL-parse path.
-pub fn owner_repo_from_remote(repo_path: &std::path::Path) -> Option<(String, String)> {
-    let repo = git2::Repository::open(repo_path).ok()?;
-    let remote = repo.find_remote("origin").ok()?;
-    let url = remote.url()?;
-    extract_owner_repo_from_url(url)
+/// Why (#266): origin is the canonical GitHub `owner/name`; the config
+/// `name` is a report label and can differ from it.
+/// What: opens the repo with `git2` and classifies `origin`'s URL.
+/// Test: `repo_resolver_tests::probe_origin_classifies_each_outcome`.
+pub(crate) fn probe_origin(repo_path: &std::path::Path) -> OriginProbe {
+    let Ok(repo) = git2::Repository::open(repo_path) else {
+        return OriginProbe::Missing;
+    };
+    let Ok(remote) = repo.find_remote("origin") else {
+        return OriginProbe::Missing;
+    };
+    let Some(url) = remote.url() else {
+        return OriginProbe::Missing;
+    };
+    match extract_owner_repo_from_url(url) {
+        Some(pair) => OriginProbe::GitHub(pair),
+        None => OriginProbe::NotGitHub(url.to_string()),
+    }
 }
 
 /// GitHub host this resolver accepts a remote from.
@@ -153,23 +169,81 @@ pub fn extract_owner_repo_from_url(url: &str) -> Option<(String, String)> {
     (remote.host == GITHUB_HOST).then_some((remote.owner, remote.repo))
 }
 
+/// Resolve one repository entry to the GitHub `(owner, repo)` its API calls
+/// target.
+///
+/// Why (#266): the config `name` is a report label. `duetto-repos` lives at
+/// `duettoresearch/duetto`, so `org + name` 404'd on every PR fetch.
+/// What: precedence, first match wins:
+/// 1. the entry's `github_repo: owner/name`;
+/// 2. the clone's `origin` remote, when it is a GitHub URL;
+/// 3. `repo.org` (else `default_org`) plus `name` (else the path basename).
+///
+/// A missing, non-GitHub or unparseable `origin` logs a per-repo warning
+/// before step 3. A malformed `github_repo` (which `Config::validate`
+/// rejects) logs a warning and resolves to `None` instead of falling back.
+/// Shared by the PR fetcher and `tga deployments`.
+/// Test: `repo_resolver_tests`.
+pub(crate) fn resolve_repo_slug(
+    repo_cfg: &RepositoryConfig,
+    default_org: Option<&str>,
+) -> Option<(String, String)> {
+    // #266: an explicit `github_repo` wins over origin and name.
+    if let Some(slug) = &repo_cfg.github_repo {
+        return match parse_slug(slug) {
+            Ok(pair) => Some(pair),
+            Err(e) => {
+                warn!(
+                    path = %repo_cfg.path.display(),
+                    error = %e,
+                    "repository github_repo is malformed; skipping it for GitHub API collection"
+                );
+                None
+            }
+        };
+    }
+
+    // #266: origin first; `name` is only the fallback.
+    match probe_origin(&repo_cfg.path) {
+        OriginProbe::GitHub(pair) => return Some(pair),
+        OriginProbe::NotGitHub(url) => warn!(
+            path = %repo_cfg.path.display(),
+            url = %url,
+            "origin remote is not a GitHub URL; falling back to org + name"
+        ),
+        OriginProbe::Missing => warn!(
+            path = %repo_cfg.path.display(),
+            "repository has no readable origin remote; falling back to org + name"
+        ),
+    }
+
+    let repo_name = repo_cfg.name.clone().or_else(|| {
+        repo_cfg
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+    })?;
+    let owner = repo_cfg.org.as_deref().or(default_org)?;
+    (!repo_name.is_empty()).then(|| (owner.to_string(), repo_name))
+}
+
 /// Resolve the set of `(owner, repo)` pairs the GitHub PR fetcher should
 /// scan, given the GitHub config and the project's repository list.
 ///
-/// Resolution rules, tried in order for each repository:
+/// Resolution rules:
 /// 1. `github.repo` (single-repo mode) — when set, returns a single-entry
 ///    list and ignores `repositories[]` / `github.org`.
-/// 2. For each `RepositoryConfig`:
-///    - if `repo.org` is set, derive `owner/name` from `org` + repo name;
-///    - else, try `git remote get-url origin` on `repo.path`;
-///    - else, fall back to `github.org` as the owner with the repo's name.
+/// 2. Each `RepositoryConfig` through [`resolve_repo_slug`] with
+///    `github.org` as the default owner: `github_repo`, then `origin`, then
+///    org + name.
 /// 3. Deduplicate; preserve first-seen order.
 ///
 /// Why: org-wide deployments (issue #87) need to drive PR collection from
-/// `repositories[]` rather than a single `github.repo`. Mirrors the ADO PR
-/// fetcher's per-repo expansion strategy.
-/// What: walks the three fallback paths above and returns a deduped vec.
-/// Test: `resolve_github_repos_*` cases in `client.rs` tests.
+/// `repositories[]` rather than a single `github.repo`.
+/// What: walks the rules above and returns a deduped vec.
+/// Test: `resolve_github_repos_*` cases in `client.rs` tests and
+/// `repo_resolver_tests`.
 pub fn resolve_github_repos(
     github: &GithubConfig,
     repositories: &[RepositoryConfig],
@@ -186,31 +260,8 @@ pub fn resolve_github_repos(
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
 
     for repo_cfg in repositories {
-        let repo_name = repo_cfg
-            .name
-            .clone()
-            .or_else(|| {
-                repo_cfg
-                    .path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
-
-        let owner_from_cfg = repo_cfg.org.clone().or_else(|| github.org.clone());
-
-        let pair = if let Some(owner) = &owner_from_cfg {
-            if repo_name.is_empty() {
-                owner_repo_from_remote(&repo_cfg.path)
-            } else {
-                Some((owner.clone(), repo_name.clone()))
-            }
-        } else {
-            owner_repo_from_remote(&repo_cfg.path)
-        };
-
-        if let Some(p) = pair {
+        // #266: one shared per-repo resolver for PRs and deployments.
+        if let Some(p) = resolve_repo_slug(repo_cfg, github.org.as_deref()) {
             if seen.insert(p.clone()) {
                 out.push(p);
             }
@@ -224,3 +275,7 @@ pub fn resolve_github_repos(
 
     out
 }
+
+#[cfg(test)]
+#[path = "repo_resolver_tests.rs"]
+mod repo_resolver_tests;

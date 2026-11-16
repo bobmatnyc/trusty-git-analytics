@@ -748,9 +748,25 @@ In floor mode:
 |-------|------|---------|-------------|
 | `name` | string | required | Display name for the repository |
 | `path` | path | required | Local filesystem path (supports `~`) |
-| `github_repo` | string | None | `owner/name` for GitHub API correlation |
+| `github_repo` | string | None | `owner/name` for GitHub API correlation. Overrides the `origin` remote and `org` + `name`. A value that is not `owner/name` fails config validation (#266) |
+| `org` (alias `owner`) | string | None | GitHub owner used when `origin` gives no GitHub repo |
 | `project_key` | string | None | JIRA project key prefix |
 | `branch` | string | None | Override default branch detection |
+
+**GitHub target resolution (#266).** PR, review and deployment collection
+pick each entry's GitHub `owner/name` in this order; the first that resolves
+wins:
+
+1. `github_repo`, when set.
+2. The clone's `origin` remote, when it is a GitHub URL
+   (`git@github.com:o/r.git`, `https://github.com/o/r(.git)`,
+   `ssh://git@github.com/o/r.git`).
+3. `org` (else `github.org`; deployments use only `org`) plus `name` (else
+   the path basename). A missing, non-GitHub or unparseable `origin` logs a
+   per-repo warning before this step.
+
+`name` is the report label only. `github.repo` (single-repo mode) still
+overrides the whole list. Stored PR rows key on the resolved `owner/name`.
 
 ### `github` — GitHubConfig
 

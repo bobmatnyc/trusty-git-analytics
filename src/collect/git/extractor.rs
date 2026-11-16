@@ -1184,6 +1184,7 @@ mod tests {
             since_date: None,
             until_date: None,
             org: None,
+            github_repo: None,
             head_only: false,
             fetch_timeout_secs: None,
         }
@@ -1204,6 +1205,7 @@ mod tests {
             since_date: since.map(str::to_string),
             until_date: until.map(str::to_string),
             org: None,
+            github_repo: None,
             head_only,
             fetch_timeout_secs: None,
         };
