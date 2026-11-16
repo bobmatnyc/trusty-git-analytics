@@ -233,25 +233,34 @@ pub fn effective_orgs(org: Option<&str>, orgs: &[String]) -> Vec<String> {
 /// Why: keeps the core per-repo resolution logic in `client.rs` (sync) while
 /// letting the async pipeline inject org-discovery results in one dedup pass.
 /// What: calls [`super::client::resolve_github_repos`](crate::collect::github::resolve_github_repos) for the repositories
-/// slice, then appends each `org_discovered` pair not already in the set.
+/// slice, then appends each `org_discovered` pair not already in the set,
+/// compared case-insensitively (#266).
+///
+/// # Errors
+///
+/// The per-repo resolver's [`crate::collect::errors::CollectError::Config`]
+/// for a malformed `github_repo` (#266).
+///
 /// Test: `resolve_github_repos_with_org_discovered_appends` below.
 pub fn resolve_github_repos_with_discovered(
     github: &GithubConfig,
     repositories: &[RepositoryConfig],
     org_discovered: &[(String, String)],
-) -> Vec<(String, String)> {
-    // Start with the per-repo resolution from client.rs.
-    let base = super::repo_resolver::resolve_github_repos(github, repositories);
-    let mut seen: std::collections::HashSet<(String, String)> = base.iter().cloned().collect();
+) -> crate::collect::errors::Result<Vec<(String, String)>> {
+    use super::repo_resolver::slug_key;
+    // Start with the per-repo resolution; #266: its error propagates.
+    let base = super::repo_resolver::resolve_github_repos(github, repositories)?;
+    // #266: case-insensitive, so `acme/api` and discovered `Acme/api` fetch once.
+    let mut seen: std::collections::HashSet<(String, String)> = base.iter().map(slug_key).collect();
     let mut out = base;
 
     // Append org-discovered repos not already in the set.
     for p in org_discovered {
-        if seen.insert(p.clone()) {
+        if seen.insert(slug_key(p)) {
             out.push(p.clone());
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -367,7 +376,8 @@ mod tests {
             ("acme".to_string(), "widget".to_string()),
             ("acme".to_string(), "gadget".to_string()),
         ];
-        let resolved = resolve_github_repos_with_discovered(&cfg, &[repo_cfg], &discovered);
+        let resolved =
+            resolve_github_repos_with_discovered(&cfg, &[repo_cfg], &discovered).expect("resolve");
         assert_eq!(
             resolved,
             vec![

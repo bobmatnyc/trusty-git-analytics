@@ -181,7 +181,7 @@ fn github_pr_commit_deserializes() {
 #[test]
 fn resolve_github_repos_single_repo_mode() {
     let cfg = gh(Some("acme/widget"), None);
-    let repos = resolve_github_repos(&cfg, &[]);
+    let repos = resolve_github_repos(&cfg, &[]).expect("resolve");
     assert_eq!(repos, vec![("acme".to_string(), "widget".to_string())]);
 }
 
@@ -196,7 +196,7 @@ fn resolve_github_repos_org_mode_uses_path_basename() {
         repo_cfg("/tmp/widget", None, None),
         repo_cfg("/tmp/gadget", None, None),
     ];
-    let resolved = resolve_github_repos(&cfg, &repos);
+    let resolved = resolve_github_repos(&cfg, &repos).expect("resolve");
     assert_eq!(
         resolved,
         vec![
@@ -216,7 +216,7 @@ fn resolve_github_repos_per_repo_org_overrides() {
         repo_cfg("/tmp/alpha", None, Some("specific-org")),
         repo_cfg("/tmp/beta", None, None),
     ];
-    let resolved = resolve_github_repos(&cfg, &repos);
+    let resolved = resolve_github_repos(&cfg, &repos).expect("resolve");
     assert_eq!(
         resolved,
         vec![
@@ -238,7 +238,7 @@ fn resolve_github_repos_uses_explicit_name() {
         Some("real-repo-name"),
         None,
     )];
-    let resolved = resolve_github_repos(&cfg, &repos);
+    let resolved = resolve_github_repos(&cfg, &repos).expect("resolve");
     assert_eq!(
         resolved,
         vec![("acme".to_string(), "real-repo-name".to_string())]
@@ -254,7 +254,7 @@ fn resolve_github_repos_uses_explicit_name() {
 fn resolve_github_repos_returns_empty_when_unresolvable() {
     let cfg = gh(None, None);
     let repos = vec![repo_cfg("/tmp/no-such-clone", None, None)];
-    let resolved = resolve_github_repos(&cfg, &repos);
+    let resolved = resolve_github_repos(&cfg, &repos).expect("resolve");
     assert!(resolved.is_empty(), "got: {resolved:?}");
 }
 
@@ -264,7 +264,7 @@ fn resolve_github_repos_returns_empty_when_unresolvable() {
 #[test]
 fn resolve_github_repos_empty_inputs() {
     let cfg = gh(None, None);
-    let resolved = resolve_github_repos(&cfg, &[]);
+    let resolved = resolve_github_repos(&cfg, &[]).expect("resolve");
     assert!(resolved.is_empty());
 }
 
@@ -279,7 +279,7 @@ fn resolve_github_repos_deduplicates() {
         repo_cfg("/clone-a/widget", None, None),
         repo_cfg("/clone-b/widget", None, None),
     ];
-    let resolved = resolve_github_repos(&cfg, &repos);
+    let resolved = resolve_github_repos(&cfg, &repos).expect("resolve");
     assert_eq!(resolved, vec![("acme".to_string(), "widget".to_string())]);
 }
 

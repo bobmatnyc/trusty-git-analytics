@@ -122,7 +122,7 @@ fn resolve_repo_to_github_slug_prefers_explicit_org() {
         ..Default::default()
     };
     assert_eq!(
-        resolve_repo_to_github_slug(&cfg),
+        resolve_repo_to_github_slug(&cfg).expect("resolve"),
         Some(("acme".to_string(), "widget".to_string()))
     );
 }
@@ -140,7 +140,7 @@ fn resolve_repo_to_github_slug_returns_none_when_unresolvable() {
         org: None,
         ..Default::default()
     };
-    assert_eq!(resolve_repo_to_github_slug(&cfg), None);
+    assert_eq!(resolve_repo_to_github_slug(&cfg).expect("resolve"), None);
 }
 
 /// Why: pagination correctness hinges on `Link: rel="next"` parsing;

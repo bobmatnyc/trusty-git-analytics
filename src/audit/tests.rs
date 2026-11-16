@@ -666,6 +666,7 @@ async fn a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines() {
             since_date: None,
             until_date: None,
             org: None,
+            github_repo: None,
             head_only: false,
             fetch_timeout_secs: None,
         });
@@ -832,6 +833,7 @@ async fn a_declared_absent_leg_is_named_in_the_gap_lines() {
             since_date: None,
             until_date: None,
             org: None,
+            github_repo: None,
             head_only: false,
             fetch_timeout_secs: None,
         });
@@ -907,6 +909,7 @@ async fn a_disabled_github_pr_leg_against_github_repos_is_named_in_the_gap_lines
             since_date: None,
             until_date: None,
             org: None,
+            github_repo: None,
             head_only: false,
             fetch_timeout_secs: None,
         });

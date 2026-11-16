@@ -648,12 +648,21 @@ impl CollectionPipeline {
             if gh_cfg.fetch_prs {
                 // Multi-repo resolution (#87, #742): union per-repo resolution
                 // with org-discovery results before constructing the client.
-                let repos =
+                let resolved =
                     crate::collect::github::org_discovery::resolve_github_repos_with_discovered(
                         gh_cfg,
                         &self.config.repositories,
                         org_discovered,
                     );
+                // #266: a resolution error fails the stage the run reports;
+                // no GitHub provider runs, other providers still do.
+                let repos = match resolved {
+                    Ok(r) => r,
+                    Err(e) => {
+                        stats.fail_stage(format!("GitHub repo resolution failed: {e}"));
+                        Vec::new()
+                    }
+                };
                 if repos.is_empty() {
                     info!(
                         "GitHub PR fetch skipped: no github.repo, no per-repo org, \
@@ -1286,3 +1295,7 @@ fn naive_date_end_utc(d: NaiveDate) -> DateTime<Utc> {
         .expect("23:59:59 is always a valid time");
     Utc.from_utc_datetime(&ndt)
 }
+
+#[cfg(test)]
+#[path = "collector_resolve_tests.rs"]
+mod collector_resolve_tests;

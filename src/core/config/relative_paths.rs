@@ -149,10 +149,15 @@ mod tests {
             (Path::new("."), None)
         );
         let github = cfg.github.as_ref().expect("github section");
-        let from_cwd =
-            crate::collect::github::repo_resolver::owner_repo_from_remote(Path::new("."));
+        // #266: the cwd's origin, read through the resolver's `probe_origin`.
+        use crate::collect::github::repo_resolver::{probe_origin, OriginProbe};
+        let from_cwd = match probe_origin(Path::new(".")) {
+            OriginProbe::GitHub(pair) => Some(pair),
+            OriginProbe::NotGitHub(_) | OriginProbe::Missing => None,
+        };
         assert_eq!(
-            crate::collect::github::resolve_github_repos(github, &cfg.repositories),
+            crate::collect::github::resolve_github_repos(github, &cfg.repositories)
+                .expect("resolve"),
             from_cwd.into_iter().collect::<Vec<_>>()
         );
     }

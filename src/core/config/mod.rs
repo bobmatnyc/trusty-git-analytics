@@ -352,6 +352,14 @@ pub struct RepositoryConfig {
     #[serde(default, alias = "owner")]
     pub org: Option<String>,
 
+    /// Explicit GitHub `owner/name` for this repository's API calls.
+    ///
+    /// #266: overrides the `origin` remote and `org` + `name`, for clones
+    /// whose label differs from their GitHub repo (`duetto-repos` lives at
+    /// `duettoresearch/duetto`). Same key as gitflow-analytics' YAML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+
     /// Per-repo opt-out of all-branch walking.
     ///
     /// Why: the 2.0.0 default changed to walk all local branches and remote
@@ -388,6 +396,18 @@ impl RepositoryConfig {
             ..Self::default()
         }
     }
+}
+
+/// Split a GitHub `owner/name` slug into its two parts.
+///
+/// Why (#266): config load and the collector's `parse_slug` must accept the
+/// same slugs, so the rule lives once, in `core`.
+/// What: splits at the first `/`; `None` when there is no `/` or either
+/// part is empty.
+/// Test: `repo_resolver_tests::load_rejects_malformed_github_repo`.
+pub fn split_github_slug(slug: &str) -> Option<(&str, &str)> {
+    let (owner, repo) = slug.split_once('/')?;
+    (!owner.is_empty() && !repo.is_empty()).then_some((owner, repo))
 }
 
 /// Team roster and identity aliases.
@@ -1647,12 +1667,35 @@ impl Config {
         }
         cfg.source_path = Some(resolved);
         cfg.validate_ticket_regexes()?;
+        // #266: every load path checks `github_repo` with the one slug rule.
+        cfg.validate_github_repos()?;
         // #178: a budget too small to hold a commit fails the load.
         cfg.llm
             .as_ref()
             .map(LlmConfig::validate_input_budget)
             .transpose()?;
         Ok(cfg)
+    }
+
+    /// Reject any `repositories[].github_repo` that is not `owner/name`.
+    ///
+    /// Why (#266): a malformed override must fail the load, not drop the
+    /// repo from GitHub collection at run time.
+    /// What: checks each set value with [`split_github_slug`], the rule the
+    /// collector's `parse_slug` also uses.
+    /// Test: `repo_resolver_tests::load_rejects_malformed_github_repo`.
+    fn validate_github_repos(&self) -> Result<()> {
+        for r in &self.repositories {
+            if let Some(slug) = &r.github_repo {
+                if split_github_slug(slug).is_none() {
+                    return Err(TgaError::ConfigError(format!(
+                        "repositories[].github_repo must be 'owner/name', got '{slug}' (path {})",
+                        r.path.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Validate every user-supplied `ticket_regex` in the config.
