@@ -748,7 +748,7 @@ In floor mode:
 |-------|------|---------|-------------|
 | `name` | string | required | Display name for the repository |
 | `path` | path | required | Local filesystem path (supports `~`) |
-| `github_repo` | string | None | `owner/name` for GitHub API correlation. Overrides the `origin` remote and `org` + `name`. A value that is not `owner/name` fails config validation (#266) |
+| `github_repo` | string | None | `owner/name` for GitHub API correlation. Overrides the `origin` remote and `org` + `name`. `tga` refuses to load a config whose value is not `owner/name` (#266) |
 | `org` (alias `owner`) | string | None | GitHub owner used when `origin` gives no GitHub repo |
 | `project_key` | string | None | JIRA project key prefix |
 | `branch` | string | None | Override default branch detection |
@@ -766,7 +766,32 @@ wins:
    per-repo warning before this step.
 
 `name` is the report label only. `github.repo` (single-repo mode) still
-overrides the whole list. Stored PR rows key on the resolved `owner/name`.
+overrides the whole list.
+
+Stored PR rows key on the resolved `owner/name`, compared case-sensitively.
+To keep existing rows on one key:
+
+- When `origin` equals the configured `org`/`name` ignoring letter case, the
+  configured spelling is used. `org: Acme, name: Widgets` with origin
+  `acme/widgets` keys as `Acme/Widgets`.
+- When they differ, origin wins and `collect` warns, naming both.
+- Targets are deduplicated case-insensitively, so origin `acme/api` and an
+  org-discovered `Acme/api` are fetched once.
+
+**Renamed repositories.** A repo renamed on GitHub keeps redirecting its old
+name. Config `org/oldname` with origin `org/newname` now keys new PR rows
+under `org/newname`; rows stored before the change stay under
+`org/oldname`. `tga` does not migrate them. Either pin
+`github_repo: org/oldname` to keep the old key, or move the old rows once:
+
+```sql
+UPDATE pull_requests SET repository = 'org/newname'
+WHERE provider = 'github' AND repository = 'org/oldname';
+```
+
+Run the `UPDATE` before the first collect under the new key. After that
+collect, rows exist under both keys and the `UNIQUE(provider, repository,
+pr_number)` index rejects the move.
 
 ### `github` — GitHubConfig
 

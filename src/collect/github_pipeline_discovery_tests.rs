@@ -70,7 +70,7 @@ async fn listed_repos_without_discover_orgs_make_no_discovery_request() {
     );
     assert!(discovered.is_empty(), "{discovered:?}");
     assert_eq!(
-        resolve_github_repos_with_discovered(&cfg, &listed_repos(), &discovered),
+        resolve_github_repos_with_discovered(&cfg, &listed_repos(), &discovered).expect("resolve"),
         vec![("acme".to_string(), "widget".to_string())],
         "only the listed repo is fetched"
     );
@@ -86,7 +86,7 @@ async fn discover_orgs_true_still_discovers_org_repos() {
 
     assert_eq!(discovery_requests(&server).await, 1);
     assert_eq!(
-        resolve_github_repos_with_discovered(&cfg, &listed_repos(), &discovered),
+        resolve_github_repos_with_discovered(&cfg, &listed_repos(), &discovered).expect("resolve"),
         vec![
             ("acme".to_string(), "widget".to_string()),
             ("acme".to_string(), "other".to_string()),

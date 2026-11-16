@@ -101,11 +101,16 @@ fn build_github_http_client(token: Option<&str>) -> anyhow::Result<reqwest::Clie
 /// repo; this module carried its own org-first copy of the rules.
 /// What: delegates to the shared resolver — `github_repo`, then `origin`,
 /// then `repo.org` + name. No `github.org` default applies here, as before.
-/// `None` means the caller must skip the repo.
+/// `Ok(None)` means the caller must skip the repo; a malformed
+/// `github_repo` is an error the caller propagates.
 /// Test: `resolve_repo_to_github_slug_*` unit tests.
-pub(super) fn resolve_repo_to_github_slug(repo_cfg: &RepositoryConfig) -> Option<(String, String)> {
+pub(super) fn resolve_repo_to_github_slug(
+    repo_cfg: &RepositoryConfig,
+) -> anyhow::Result<Option<(String, String)>> {
     // #266: one shared resolver; the local origin probe is removed.
-    crate::collect::github::repo_resolver::resolve_repo_slug(repo_cfg, None)
+    Ok(crate::collect::github::repo_resolver::resolve_repo_slug(
+        repo_cfg, None,
+    )?)
 }
 
 /// Extract an `owner/name` pair from a GitHub remote URL string.
@@ -215,7 +220,7 @@ pub(super) async fn ingest_github_releases(
                     .unwrap_or("(unknown)")
                     .to_string()
             });
-            let Some((owner, name)) = resolve_repo_to_github_slug(repo_cfg) else {
+            let Some((owner, name)) = resolve_repo_to_github_slug(repo_cfg)? else {
                 warn!(repo = %repo_name, "could not resolve owner/repo; skipping github_releases");
                 continue;
             };
@@ -362,7 +367,7 @@ pub(super) async fn ingest_github_actions(
                     .unwrap_or("(unknown)")
                     .to_string()
             });
-            let Some((owner, name)) = resolve_repo_to_github_slug(repo_cfg) else {
+            let Some((owner, name)) = resolve_repo_to_github_slug(repo_cfg)? else {
                 warn!(repo = %repo_name, "could not resolve owner/repo; skipping github_actions");
                 continue;
             };

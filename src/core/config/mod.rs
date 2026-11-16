@@ -398,6 +398,18 @@ impl RepositoryConfig {
     }
 }
 
+/// Split a GitHub `owner/name` slug into its two parts.
+///
+/// Why (#266): config load and the collector's `parse_slug` must accept the
+/// same slugs, so the rule lives once, in `core`.
+/// What: splits at the first `/`; `None` when there is no `/` or either
+/// part is empty.
+/// Test: `repo_resolver_tests::load_rejects_malformed_github_repo`.
+pub fn split_github_slug(slug: &str) -> Option<(&str, &str)> {
+    let (owner, repo) = slug.split_once('/')?;
+    (!owner.is_empty() && !repo.is_empty()).then_some((owner, repo))
+}
+
 /// Team roster and identity aliases.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -1655,12 +1667,35 @@ impl Config {
         }
         cfg.source_path = Some(resolved);
         cfg.validate_ticket_regexes()?;
+        // #266: every load path checks `github_repo` with the one slug rule.
+        cfg.validate_github_repos()?;
         // #178: a budget too small to hold a commit fails the load.
         cfg.llm
             .as_ref()
             .map(LlmConfig::validate_input_budget)
             .transpose()?;
         Ok(cfg)
+    }
+
+    /// Reject any `repositories[].github_repo` that is not `owner/name`.
+    ///
+    /// Why (#266): a malformed override must fail the load, not drop the
+    /// repo from GitHub collection at run time.
+    /// What: checks each set value with [`split_github_slug`], the rule the
+    /// collector's `parse_slug` also uses.
+    /// Test: `repo_resolver_tests::load_rejects_malformed_github_repo`.
+    fn validate_github_repos(&self) -> Result<()> {
+        for r in &self.repositories {
+            if let Some(slug) = &r.github_repo {
+                if split_github_slug(slug).is_none() {
+                    return Err(TgaError::ConfigError(format!(
+                        "repositories[].github_repo must be 'owner/name', got '{slug}' (path {})",
+                        r.path.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Validate every user-supplied `ticket_regex` in the config.
@@ -1859,17 +1894,6 @@ impl Config {
                 return Err(TgaError::ValidationError(
                     "repository.path must not be empty".into(),
                 ));
-            }
-            // #266: a malformed `github_repo` fails the load, never a silent fallback.
-            if let Some(slug) = &r.github_repo {
-                let ok = slug
-                    .split_once('/')
-                    .is_some_and(|(o, n)| !o.is_empty() && !n.is_empty() && !n.contains('/'));
-                if !ok {
-                    return Err(TgaError::ValidationError(format!(
-                        "repository.github_repo must be 'owner/name', got '{slug}'"
-                    )));
-                }
             }
         }
         if let Some(adzo_config) = self.azure_devops_config() {

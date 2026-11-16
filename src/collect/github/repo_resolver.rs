@@ -27,14 +27,10 @@ use crate::collect::env_expand::expand_env_var_with;
 /// What: splits on `/`, validates both parts are non-empty.
 /// Test: `parse_slug_validates_input` in `client.rs` tests.
 pub fn parse_slug(slug: &str) -> Result<(String, String)> {
-    let (owner, repo) = slug.split_once('/').ok_or_else(|| {
+    // #266: one slug rule, shared with config load.
+    let (owner, repo) = crate::core::config::split_github_slug(slug).ok_or_else(|| {
         CollectError::Config(format!("github repo must be 'owner/name', got '{slug}'"))
     })?;
-    if owner.is_empty() || repo.is_empty() {
-        return Err(CollectError::Config(format!(
-            "github repo must be 'owner/name', got '{slug}'"
-        )));
-    }
     Ok((owner.to_string(), repo.to_string()))
 }
 
@@ -158,7 +154,7 @@ const GITHUB_HOST: &str = "github.com";
 /// Returns `None` for non-GitHub URLs or malformed input.
 ///
 /// Why: separating the pure URL-parse logic from the disk-touching
-/// `owner_repo_from_remote` makes the URL-parse path independently testable.
+/// [`probe_origin`] makes the URL-parse path independently testable.
 /// What: delegates to `trusty_common::github_path::parse_remote_url` — the
 /// workspace's one git-remote-URL parser (#6657) — and keeps only the
 /// GitHub-host filter this crate needs. HTTPS, SSH scp-syntax, `ssh://`, and
@@ -167,6 +163,31 @@ const GITHUB_HOST: &str = "github.com";
 pub fn extract_owner_repo_from_url(url: &str) -> Option<(String, String)> {
     let remote = trusty_common::github_path::parse_remote_url(url).ok()?;
     (remote.host == GITHUB_HOST).then_some((remote.owner, remote.repo))
+}
+
+/// Case-folded `(owner, repo)` used to dedup GitHub targets within a run.
+///
+/// #266: GitHub slugs are case-insensitive, so origin `acme/api` and a
+/// discovered `Acme/api` are one repository and must be fetched once.
+pub(crate) fn slug_key(pair: &(String, String)) -> (String, String) {
+    (pair.0.to_lowercase(), pair.1.to_lowercase())
+}
+
+/// The `(owner, repo)` the config itself names: `repo.org` (else
+/// `default_org`) plus `name` (else the path basename).
+fn configured_pair(
+    repo_cfg: &RepositoryConfig,
+    default_org: Option<&str>,
+) -> Option<(String, String)> {
+    let repo_name = repo_cfg.name.clone().or_else(|| {
+        repo_cfg
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+    })?;
+    let owner = repo_cfg.org.as_deref().or(default_org)?;
+    (!repo_name.is_empty()).then(|| (owner.to_string(), repo_name))
 }
 
 /// Resolve one repository entry to the GitHub `(owner, repo)` its API calls
@@ -179,53 +200,61 @@ pub fn extract_owner_repo_from_url(url: &str) -> Option<(String, String)> {
 /// 2. the clone's `origin` remote, when it is a GitHub URL;
 /// 3. `repo.org` (else `default_org`) plus `name` (else the path basename).
 ///
-/// A missing, non-GitHub or unparseable `origin` logs a per-repo warning
-/// before step 3. A malformed `github_repo` (which `Config::validate`
-/// rejects) logs a warning and resolves to `None` instead of falling back.
-/// Shared by the PR fetcher and `tga deployments`.
+/// When origin equals the configured org + name ignoring case, the
+/// configured spelling is returned, so stored PR rows keep their key. When
+/// they differ, one warning names both. A missing, non-GitHub or unparseable
+/// `origin` logs a per-repo warning before step 3. `Ok(None)` means nothing
+/// resolves. Shared by the PR fetcher and `tga deployments`.
+///
+/// # Errors
+///
+/// [`CollectError::Config`] when `github_repo` is not `owner/name`. Config
+/// load rejects that first; this arm keeps a hand-built config from
+/// dropping the repo silently.
+///
 /// Test: `repo_resolver_tests`.
 pub(crate) fn resolve_repo_slug(
     repo_cfg: &RepositoryConfig,
     default_org: Option<&str>,
-) -> Option<(String, String)> {
-    // #266: an explicit `github_repo` wins over origin and name.
+) -> Result<Option<(String, String)>> {
+    // #266: an explicit `github_repo` wins; a malformed one is an error.
     if let Some(slug) = &repo_cfg.github_repo {
-        return match parse_slug(slug) {
-            Ok(pair) => Some(pair),
-            Err(e) => {
-                warn!(
-                    path = %repo_cfg.path.display(),
-                    error = %e,
-                    "repository github_repo is malformed; skipping it for GitHub API collection"
-                );
-                None
-            }
-        };
+        return parse_slug(slug).map(Some);
     }
 
+    let configured = configured_pair(repo_cfg, default_org);
     // #266: origin first; `name` is only the fallback.
     match probe_origin(&repo_cfg.path) {
-        OriginProbe::GitHub(pair) => return Some(pair),
-        OriginProbe::NotGitHub(url) => warn!(
-            path = %repo_cfg.path.display(),
-            url = %url,
-            "origin remote is not a GitHub URL; falling back to org + name"
-        ),
-        OriginProbe::Missing => warn!(
-            path = %repo_cfg.path.display(),
-            "repository has no readable origin remote; falling back to org + name"
-        ),
+        OriginProbe::GitHub(origin) => match configured {
+            // #266: same repo, legacy spelling — keep the stored key.
+            Some(cfg) if slug_key(&cfg) == slug_key(&origin) => Ok(Some(cfg)),
+            Some(cfg) => {
+                warn!(
+                    path = %repo_cfg.path.display(),
+                    origin = %format!("{}/{}", origin.0, origin.1),
+                    configured = %format!("{}/{}", cfg.0, cfg.1),
+                    "origin remote differs from configured org + name; using origin"
+                );
+                Ok(Some(origin))
+            }
+            None => Ok(Some(origin)),
+        },
+        OriginProbe::NotGitHub(url) => {
+            warn!(
+                path = %repo_cfg.path.display(),
+                url = %url,
+                "origin remote is not a GitHub URL; falling back to org + name"
+            );
+            Ok(configured)
+        }
+        OriginProbe::Missing => {
+            warn!(
+                path = %repo_cfg.path.display(),
+                "repository has no readable origin remote; falling back to org + name"
+            );
+            Ok(configured)
+        }
     }
-
-    let repo_name = repo_cfg.name.clone().or_else(|| {
-        repo_cfg
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(str::to_string)
-    })?;
-    let owner = repo_cfg.org.as_deref().or(default_org)?;
-    (!repo_name.is_empty()).then(|| (owner.to_string(), repo_name))
 }
 
 /// Resolve the set of `(owner, repo)` pairs the GitHub PR fetcher should
@@ -237,20 +266,26 @@ pub(crate) fn resolve_repo_slug(
 /// 2. Each `RepositoryConfig` through [`resolve_repo_slug`] with
 ///    `github.org` as the default owner: `github_repo`, then `origin`, then
 ///    org + name.
-/// 3. Deduplicate; preserve first-seen order.
+/// 3. Deduplicate case-insensitively; preserve first-seen order and spelling.
 ///
 /// Why: org-wide deployments (issue #87) need to drive PR collection from
 /// `repositories[]` rather than a single `github.repo`.
 /// What: walks the rules above and returns a deduped vec.
+///
+/// # Errors
+///
+/// #266: [`CollectError::Config`] when any entry's `github_repo` is
+/// malformed. The caller fails the stage; no repo drops out silently.
+///
 /// Test: `resolve_github_repos_*` cases in `client.rs` tests and
 /// `repo_resolver_tests`.
 pub fn resolve_github_repos(
     github: &GithubConfig,
     repositories: &[RepositoryConfig],
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>> {
     if let Some(slug) = &github.repo {
         if let Ok(pair) = parse_slug(slug) {
-            return vec![pair];
+            return Ok(vec![pair]);
         } else {
             tracing::warn!(slug = %slug, "github.repo is malformed; falling back to repositories[]");
         }
@@ -261,8 +296,9 @@ pub fn resolve_github_repos(
 
     for repo_cfg in repositories {
         // #266: one shared per-repo resolver for PRs and deployments.
-        if let Some(p) = resolve_repo_slug(repo_cfg, github.org.as_deref()) {
-            if seen.insert(p.clone()) {
+        if let Some(p) = resolve_repo_slug(repo_cfg, github.org.as_deref())? {
+            // #266: case-insensitive dedup.
+            if seen.insert(slug_key(&p)) {
                 out.push(p);
             }
         } else {
@@ -273,7 +309,7 @@ pub fn resolve_github_repos(
         }
     }
 
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
