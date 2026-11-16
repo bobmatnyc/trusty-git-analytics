@@ -88,9 +88,9 @@ impl NotionClient {
                     .to_string(),
             ));
         }
-        let http = Client::builder()
+        // #255: shared builder adds a connect timeout to the 30 s total.
+        let http = crate::core::http::client_builder(crate::core::http::DEFAULT_TOTAL_TIMEOUT)
             .user_agent(concat!("tga/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self {
             http,

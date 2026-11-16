@@ -111,9 +111,9 @@ impl LinearClient {
     /// - [`CollectError::Http`] if the HTTP client cannot be built.
     pub fn new(config: &LinearConfig) -> Result<Self> {
         let api_key = resolve_api_key(config)?;
-        let client = Client::builder()
+        // #255: shared builder adds a connect timeout to the 30 s total.
+        let client = crate::core::http::client_builder(crate::core::http::DEFAULT_TOTAL_TIMEOUT)
             .user_agent(USER_AGENT_VALUE)
-            .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(CollectError::Http)?;
         let retry = RetryPolicy::default();

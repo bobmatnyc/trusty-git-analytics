@@ -153,7 +153,8 @@ impl LlmClassifier {
     /// the fields their provider needs.
     pub(super) fn base(model: &str) -> Self {
         Self {
-            client: Client::new(),
+            // #255: LLM calls were untimed; use the shared connect + total bound.
+            client: crate::core::http::timed_client(crate::core::http::LLM_TOTAL_TIMEOUT),
             model: model.to_string(),
             api_key: None,
             endpoint: DEFAULT_ENDPOINT.to_string(),

@@ -1,0 +1,2 @@
+Fixed
+- Every HTTP client (collect: GitHub, Bitbucket, JIRA, Linear, Azure DevOps, Notion; classify: LLM tier, JEV, external ticket sources) is now built through one shared builder with a 10 s connect timeout and a bounded total timeout (30 s for API calls, 120 s for LLM calls). The LLM tier and ticket-source lookups previously had no timeout, so a stalled endpoint could hang `tga classify` (#255).

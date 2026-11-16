@@ -211,3 +211,38 @@ async fn resolver_returns_github_signal_for_bug_label() {
     assert_eq!(signal.category, "bug_fix");
     assert!(signal.source.contains("bug"));
 }
+
+/// Why: #255 — the resolver's client was `Client::new()` with no timeout, so
+/// a ticket server that accepts and never answers hung classify forever.
+/// What: a local listener accepts and holds every socket; `resolve` must
+/// return (with no signal) inside the shared 30 s total timeout plus slack.
+/// Test: pre-fix this hits the 45 s guard and fails.
+#[tokio::test]
+async fn resolver_times_out_on_stalled_server_255() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hold = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+    let config = JiraSourceConfig {
+        base_url: format!("http://{addr}"),
+        token_env: "JIRA_API_TOKEN_TEST_STALL".to_string(),
+        username: None,
+        email_env: None,
+        project_keys: vec![],
+        field_mappings: JiraFieldMappings::default(),
+    };
+    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(config)])
+        .with_jira_base_url(0, format!("http://{addr}"))
+        .with_credentials([("JIRA_API_TOKEN_TEST_STALL", "test-token")]);
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        resolver.resolve("PROJ-1 stalled lookup"),
+    )
+    .await;
+    hold.abort();
+    assert!(out.is_ok(), "resolver hung past the #255 timeout bound");
+}

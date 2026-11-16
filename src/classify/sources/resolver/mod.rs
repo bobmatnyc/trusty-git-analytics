@@ -110,7 +110,8 @@ impl ExternalSourceResolver {
     /// `reqwest::Client` across all sources.
     /// Test: see `tests::resolver_builds_from_empty_sources`.
     pub fn new(sources: &[SourceConfig]) -> Self {
-        let client = reqwest::Client::new();
+        // #255: source lookups were untimed; use the shared connect + total bound.
+        let client = crate::core::http::timed_client(crate::core::http::DEFAULT_TOTAL_TIMEOUT);
         let states = sources
             .iter()
             .map(|cfg| match cfg {
