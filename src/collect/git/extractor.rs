@@ -17,7 +17,8 @@ use crate::collect::ai_markers::{detect, CommitSignals, DETECTOR_VERSION};
 use crate::collect::collector::{FetchOutcome, PerRepoFetch};
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::git::diff::{compute_commit_diff, CommitDiff};
-use crate::collect::git::fetch::{fetch_and_record, fetch_remote};
+use crate::collect::git::fetch::{fetch_and_record_with_retry, fetch_remote};
+use crate::collect::git::retry::{RetryBudget, RetryPolicy};
 use crate::collect::git::walk_state;
 use crate::collect::ticket::{extract_ticket_id, is_ticketed};
 use crate::core::config::{expand_path, RepositoryConfig};
@@ -71,6 +72,9 @@ pub struct GitCollector {
     /// watchdog.  When `None` (the default), the system / git2 transport
     /// defaults apply.  See issue #334 and `RepositoryConfig::fetch_timeout_secs`.
     fetch_timeout_secs: Option<u64>,
+    /// #262: retry policy for the pre-walk fetch, from `fetch_retries` and
+    /// `fetch_retry_base_secs`.
+    fetch_retry_policy: RetryPolicy,
     /// #5197: the pipeline's live-progress sink, used here only as the signal
     /// that somebody else owns the terminal. Defaults to
     /// [`ProgressBus::disabled`], which keeps the CLI's spinner exactly as it
@@ -119,6 +123,11 @@ impl GitCollector {
             head_only: config.head_only,
             explicit_branches: Vec::new(),
             fetch_timeout_secs: config.fetch_timeout_secs,
+            // #262: optional keys; unset means the default policy.
+            fetch_retry_policy: RetryPolicy::from_config(
+                config.fetch_retries,
+                config.fetch_retry_base_secs,
+            ),
             progress: ProgressBus::disabled(),
         })
     }
@@ -239,13 +248,30 @@ impl GitCollector {
     /// Test: see `fetch::tests::fetch_outcome_skipped_for_local_repo` and
     /// the `no_fetch_returns_skipped` test in `extractor::tests`.
     pub fn perform_fetch(&self) -> PerRepoFetch {
+        self.perform_fetch_with_budget(&mut RetryBudget::default())
+            .0
+    }
+
+    /// [`Self::perform_fetch`] sharing a per-run [`RetryBudget`] (#262).
+    ///
+    /// Why: the pipeline's sequential repo loop owns one budget, so that after
+    /// ten consecutive repos exhaust their retries the rest of the run makes a
+    /// single attempt each.
+    /// What: same outcomes as `perform_fetch`; a transient connect failure is
+    /// retried per this repo's policy. Returns the record and the attempt
+    /// count (`0` when the fetch was skipped or the repo did not open).
+    /// Test: `collector::tests::exhausted_fetch_retries_stay_failed`.
+    pub fn perform_fetch_with_budget(&self, budget: &mut RetryBudget) -> (PerRepoFetch, u32) {
         if self.no_fetch {
-            return PerRepoFetch {
-                repo: self.name.clone(),
-                outcome: FetchOutcome::Skipped {
-                    reason: "--no-fetch".to_string(),
+            return (
+                PerRepoFetch {
+                    repo: self.name.clone(),
+                    outcome: FetchOutcome::Skipped {
+                        reason: "--no-fetch".to_string(),
+                    },
                 },
-            };
+                0,
+            );
         }
         if let Some(t) = self.fetch_timeout_secs {
             tracing::debug!(
@@ -257,16 +283,26 @@ impl GitCollector {
         let repo = match Repository::open(&self.path) {
             Ok(r) => r,
             Err(e) => {
-                return PerRepoFetch {
-                    repo: self.name.clone(),
-                    outcome: FetchOutcome::Failed {
-                        remote: self.remote_name.clone(),
-                        error: format!("failed to open repo for fetch: {e}"),
+                // #262: an open failure is never retried.
+                return (
+                    PerRepoFetch {
+                        repo: self.name.clone(),
+                        outcome: FetchOutcome::Failed {
+                            remote: self.remote_name.clone(),
+                            error: format!("failed to open repo for fetch: {e}"),
+                        },
                     },
-                };
+                    0,
+                );
             }
         };
-        fetch_and_record(&repo, &self.name, &self.remote_name)
+        fetch_and_record_with_retry(
+            &repo,
+            &self.name,
+            &self.remote_name,
+            self.fetch_retry_policy,
+            budget,
+        )
     }
 
     /// Walk the repository and insert commits into the database.
@@ -1187,6 +1223,7 @@ mod tests {
             github_repo: None,
             head_only: false,
             fetch_timeout_secs: None,
+            ..Default::default()
         }
     }
 
@@ -1208,6 +1245,7 @@ mod tests {
             github_repo: None,
             head_only,
             fetch_timeout_secs: None,
+            ..Default::default()
         };
         GitCollector::new(&cfg)
             .expect("collector::new")

@@ -7,6 +7,7 @@ pub mod diff;
 pub mod extractor;
 pub mod fetch;
 pub mod reachability;
+pub mod retry;
 pub mod walk_state;
 
 pub use diff::{compute_commit_diff, diff_for_commit, CommitDiff, FileDiff, DIFF_BYTE_CAP};

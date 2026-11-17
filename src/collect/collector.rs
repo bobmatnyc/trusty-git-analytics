@@ -125,6 +125,10 @@ pub struct CollectionStats {
     /// Populated in the per-repo loop; used by the CLI to print the
     /// end-of-collect fetch summary.
     pub fetch_outcomes: Vec<PerRepoFetch>,
+    /// #262: repositories whose fetch took more than one attempt, as
+    /// `(repo display name, attempts)`. Their final outcome is in
+    /// [`Self::fetch_outcomes`]; this only says a retry happened.
+    pub fetch_retried: Vec<(String, u32)>,
 }
 
 /// Top-level Stage 1 orchestrator.
@@ -385,6 +389,9 @@ impl CollectionPipeline {
 
         let resolver = IdentityResolver::from_config(&self.config);
 
+        // #262: one retry budget for the whole sequential repo loop.
+        let mut fetch_budget = crate::collect::git::retry::RetryBudget::default();
+
         // #5197: one progress row per configured repository, in walk order.
         for repo_cfg in self.config.repositories.iter() {
             let repo_label = repo_cfg
@@ -432,7 +439,14 @@ impl CollectionPipeline {
                 }
             };
             // Perform the one-shot fetch and record the outcome (#334).
-            let fetch_result = pre_fetch_collector.perform_fetch();
+            // #262: transient connect failures are retried inside this call.
+            let (fetch_result, attempts) =
+                pre_fetch_collector.perform_fetch_with_budget(&mut fetch_budget);
+            if attempts > 1 {
+                stats
+                    .fetch_retried
+                    .push((fetch_result.repo.clone(), attempts));
+            }
             stats.fetch_outcomes.push(fetch_result);
 
             // Walk collector always has no_fetch=true: the fetch was either just

@@ -386,6 +386,20 @@ pub struct RepositoryConfig {
     /// Test: exercised indirectly by end-to-end tests that pass `no_fetch=true`.
     #[serde(default)]
     pub fetch_timeout_secs: Option<u64>,
+
+    /// Retries after the first pre-walk `git fetch` attempt (#262).
+    ///
+    /// Only a transient connect failure (timeout, refused, reset) is retried.
+    /// `None` means the default of 2 (3 attempts); `0` disables retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_retries: Option<u32>,
+
+    /// Backoff before the first fetch retry, in seconds (#262).
+    ///
+    /// Doubles per retry, capped at 30 s, plus up to 25% jitter. `None`
+    /// means the default of 2 s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_retry_base_secs: Option<u64>,
 }
 
 impl RepositoryConfig {

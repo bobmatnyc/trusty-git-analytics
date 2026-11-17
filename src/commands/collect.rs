@@ -238,7 +238,12 @@ pub async fn run_reporting_fetch(
     }
 
     // Issue #334: print per-repo fetch summary to stderr.
-    print_fetch_summary(&stats.fetch_outcomes, args.verbose_fetch);
+    // #262: the summary names repos whose fetch was retried.
+    print_fetch_summary(
+        &stats.fetch_outcomes,
+        &stats.fetch_retried,
+        args.verbose_fetch,
+    );
 
     // Since tga 2.6.0, fetch failures are fatal by default (strict_fetch=true
     // unless --allow-stale or --no-fetch was passed).  Collect all failures
@@ -323,13 +328,40 @@ fn stage_failure_report(stats: &tga::collect::CollectionStats) -> Option<String>
 /// Public alias so `commands::analyze` can call it without duplicating the
 /// formatting logic.
 pub fn print_fetch_summary_pub(outcomes: &[tga::collect::collector::PerRepoFetch], verbose: bool) {
-    print_fetch_summary(outcomes, verbose);
+    print_fetch_summary(outcomes, &[], verbose);
 }
 
-fn print_fetch_summary(outcomes: &[tga::collect::collector::PerRepoFetch], verbose: bool) {
+/// [`print_fetch_summary_pub`] that also reports retried fetches (#262).
+///
+/// `retried` is [`tga::collect::CollectionStats::fetch_retried`]: one
+/// `(repo, attempts)` pair per repository whose fetch took more than one try.
+pub fn print_fetch_summary_with_retries(
+    outcomes: &[tga::collect::collector::PerRepoFetch],
+    retried: &[(String, u32)],
+    verbose: bool,
+) {
+    print_fetch_summary(outcomes, retried, verbose);
+}
+
+/// The `, N retried` header suffix; empty when nothing was retried (#262).
+fn retried_suffix(retried: &[(String, u32)]) -> String {
+    if retried.is_empty() {
+        String::new()
+    } else {
+        format!(", {} retried", retried.len())
+    }
+}
+
+fn print_fetch_summary(
+    outcomes: &[tga::collect::collector::PerRepoFetch],
+    retried: &[(String, u32)],
+    verbose: bool,
+) {
     if outcomes.is_empty() {
         return;
     }
+    // #262: "N retried" in the header, then one line per retried repo.
+    let retry_note = retried_suffix(retried);
 
     let total = outcomes.len();
     let successes: Vec<_> = outcomes
@@ -350,7 +382,7 @@ fn print_fetch_summary(outcomes: &[tga::collect::collector::PerRepoFetch], verbo
 
     if failed > 0 {
         eprintln!(
-            "Fetch summary: {fetched} / {total} repos updated ({failed} failure(s), {} skipped)",
+            "Fetch summary: {fetched} / {total} repos updated ({failed} failure(s), {} skipped{retry_note})",
             skipped.len()
         );
         for f in &failures {
@@ -360,9 +392,12 @@ fn print_fetch_summary(outcomes: &[tga::collect::collector::PerRepoFetch], verbo
         }
     } else {
         eprintln!(
-            "Fetch summary: {fetched} / {total} repos updated (0 failures, {} skipped)",
+            "Fetch summary: {fetched} / {total} repos updated (0 failures, {} skipped{retry_note})",
             skipped.len()
         );
+    }
+    for (repo, attempts) in retried {
+        eprintln!("  ~ {repo}: fetch retried ({attempts} attempts)");
     }
 
     if verbose {
@@ -417,8 +452,8 @@ mod tests {
             },
         ];
         // Should not panic.
-        print_fetch_summary(&outcomes, false);
-        print_fetch_summary(&outcomes, true);
+        print_fetch_summary(&outcomes, &[], false);
+        print_fetch_summary(&outcomes, &[("r".to_string(), 2)], true);
     }
 
     /// The #5655 regression: a stage whose data never landed used to print as a
@@ -511,7 +546,7 @@ mod tests {
     #[test]
     fn fetch_summary_empty_outcomes_is_noop() {
         // Must not panic.
-        print_fetch_summary(&[], false);
+        print_fetch_summary(&[], &[], false);
     }
 
     /// Why: `--no-fetch` must emit a visible warning so users know data may be stale.
@@ -558,5 +593,77 @@ mod tests {
         assert!(pipeline.verbose_fetch(), "verbose_fetch must be true");
         // no_fetch is validated end-to-end by the `no_fetch_returns_skipped`
         // extractor test which calls perform_fetch() directly.
+    }
+
+    /// #262: a repo whose fetch exhausts its retries must still be `Failed`
+    /// in `fetch_outcomes` and must still trip the stale-data refusal;
+    /// `--allow-stale` keeps today's behaviour.
+    #[tokio::test]
+    async fn exhausted_fetch_retries_stay_failed() {
+        use tga::core::config::RepositoryConfig;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_path = dir.path().join("refused");
+        std::fs::create_dir_all(&repo_path).expect("mkdir");
+        let repo = git2::Repository::init(&repo_path).expect("init");
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().expect("addr").port()
+        };
+        repo.remote("origin", &format!("http://127.0.0.1:{port}/o/r.git"))
+            .expect("origin");
+        let sig = git2::Signature::now("T", "t@example.com").expect("sig");
+        let tree = repo
+            .find_tree(repo.index().expect("index").write_tree().expect("tree"))
+            .expect("find tree");
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .expect("commit");
+        let cfg = || Config {
+            repositories: vec![RepositoryConfig {
+                path: repo_path.clone(),
+                name: Some("refused".into()),
+                fetch_retry_base_secs: Some(0),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let mut db = tga::core::db::Database::open_in_memory().expect("db");
+        let err = run_reporting_fetch(
+            cfg(),
+            &mut db,
+            CollectArgs::default(),
+            &ProgressBus::disabled(),
+        )
+        .await
+        .expect_err("an exhausted fetch must keep the stale-data refusal");
+        let msg = err.to_string();
+        assert!(msg.contains("refusing to analyze stale data"), "{msg}");
+        assert!(msg.contains("(after 3 attempts)"), "{msg}");
+
+        let mut db = tga::core::db::Database::open_in_memory().expect("db");
+        let args = CollectArgs {
+            allow_stale: true,
+            ..Default::default()
+        };
+        let outcomes = run_reporting_fetch(cfg(), &mut db, args, &ProgressBus::disabled())
+            .await
+            .expect("--allow-stale proceeds on local refs");
+        assert_eq!(outcomes.len(), 1);
+        match &outcomes[0].outcome {
+            FetchOutcome::Failed { error, .. } => {
+                assert!(error.ends_with("(after 3 attempts)"), "{error}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// #262: the summary header carries "N retried" only when a retry happened.
+    #[test]
+    fn retried_suffix_counts_retried_repos() {
+        assert_eq!(retried_suffix(&[]), "");
+        assert_eq!(
+            retried_suffix(&[("a".into(), 2), ("b".into(), 3)]),
+            ", 2 retried"
+        );
     }
 }

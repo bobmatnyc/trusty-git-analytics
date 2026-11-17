@@ -95,7 +95,12 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
         .await;
         // Print fetch summary to stderr before the commit count so fetch
         // failures are visible even when the counts look normal.
-        crate::commands::collect::print_fetch_summary_pub(&collect_stats.fetch_outcomes, false);
+        // #262: report retried fetches too.
+        crate::commands::collect::print_fetch_summary_with_retries(
+            &collect_stats.fetch_outcomes,
+            &collect_stats.fetch_retried,
+            false,
+        );
 
         // Since tga 2.6.0, fetch failures abort the pipeline by default.
         if effective_strict {
