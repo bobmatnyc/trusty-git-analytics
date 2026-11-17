@@ -669,6 +669,7 @@ async fn a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines() {
             github_repo: None,
             head_only: false,
             fetch_timeout_secs: None,
+            ..Default::default()
         });
 
     let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
@@ -836,6 +837,7 @@ async fn a_declared_absent_leg_is_named_in_the_gap_lines() {
             github_repo: None,
             head_only: false,
             fetch_timeout_secs: None,
+            ..Default::default()
         });
 
     let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
@@ -912,6 +914,7 @@ async fn a_disabled_github_pr_leg_against_github_repos_is_named_in_the_gap_lines
             github_repo: None,
             head_only: false,
             fetch_timeout_secs: None,
+            ..Default::default()
         });
 
     let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");

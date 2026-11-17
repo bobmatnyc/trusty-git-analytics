@@ -32,6 +32,7 @@ use tracing::{info, warn};
 
 use crate::collect::collector::{FetchOutcome, PerRepoFetch};
 use crate::collect::errors::Result;
+use crate::collect::git::retry::{fetch_with_retry, RetryBudget, RetryPolicy};
 
 /// Fetch all refs from the configured remote before walking.
 ///
@@ -131,25 +132,57 @@ pub fn fetch_remote_with_outcome(repo: &Repository, remote_name: &str) -> Result
 ///
 /// Why: wraps `fetch_remote_with_outcome` with the repo display name so the
 /// returned value is ready to push into [`crate::collect::collector::CollectionStats::fetch_outcomes`].
-/// What: opens the repo, runs `fetch_remote_with_outcome`, and packages the
-/// result with `repo_name`.  If opening the repo fails, returns a Failed
-/// outcome rather than propagating the error (consistent with the soft-fail
-/// policy for all per-repo operations).
+/// What: runs the fetch with the default [`RetryPolicy`] and a fresh
+/// [`RetryBudget`] (#262), then packages the result with `repo_name`.
+/// Errors become a `Failed` outcome rather than propagating (consistent with
+/// the soft-fail policy for all per-repo operations).
 /// Test: covered by the integration test in `collector::tests`.
 pub fn fetch_and_record(repo: &Repository, repo_name: &str, remote_name: &str) -> PerRepoFetch {
-    match fetch_remote_with_outcome(repo, remote_name) {
-        Ok(outcome) => PerRepoFetch {
+    fetch_and_record_with_retry(
+        repo,
+        repo_name,
+        remote_name,
+        RetryPolicy::default(),
+        &mut RetryBudget::default(),
+    )
+    .0
+}
+
+/// [`fetch_and_record`] with an explicit retry policy and per-run budget.
+///
+/// Why (#262): one connect stall used to fail a repo, and the stale-data
+/// refusal then failed the whole collect. The pipeline shares one
+/// [`RetryBudget`] across its sequential repo loop.
+/// What: retries the single `remote.fetch` via [`fetch_with_retry`], sleeping
+/// on the calling thread between attempts. Returns the record and the number
+/// of attempts made.
+/// Test: `retry::tests::real_connection_refused_is_retried_to_exhaustion`.
+pub fn fetch_and_record_with_retry(
+    repo: &Repository,
+    repo_name: &str,
+    remote_name: &str,
+    policy: RetryPolicy,
+    budget: &mut RetryBudget,
+) -> (PerRepoFetch, u32) {
+    // #262: the retry loop wraps exactly one fetch per attempt.
+    let (outcome, attempts) = fetch_with_retry(
+        || {
+            fetch_remote_with_outcome(repo, remote_name).unwrap_or_else(|e| FetchOutcome::Failed {
+                remote: remote_name.to_string(),
+                error: e.to_string(),
+            })
+        },
+        policy,
+        budget,
+        std::thread::sleep,
+    );
+    (
+        PerRepoFetch {
             repo: repo_name.to_string(),
             outcome,
         },
-        Err(e) => PerRepoFetch {
-            repo: repo_name.to_string(),
-            outcome: FetchOutcome::Failed {
-                remote: remote_name.to_string(),
-                error: e.to_string(),
-            },
-        },
-    }
+        attempts,
+    )
 }
 
 /// One non-interactive place a credential can come from.
