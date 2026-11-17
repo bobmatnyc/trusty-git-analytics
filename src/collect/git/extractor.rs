@@ -260,7 +260,8 @@ impl GitCollector {
     /// What: same outcomes as `perform_fetch`; a transient connect failure is
     /// retried per this repo's policy. Returns the record and the attempt
     /// count (`0` when the fetch was skipped or the repo did not open).
-    /// Test: `collector::tests::exhausted_fetch_retries_stay_failed`.
+    /// Test: `commands::collect::tests::exhausted_fetch_retries_stay_failed`,
+    /// `retry::tests::budget_stops_retries_after_consecutive_exhausted_repos`.
     pub fn perform_fetch_with_budget(&self, budget: &mut RetryBudget) -> (PerRepoFetch, u32) {
         if self.no_fetch {
             return (
