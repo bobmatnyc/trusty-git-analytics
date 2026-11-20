@@ -5,6 +5,7 @@
 use super::*;
 use tga::collect::linear::bulk::tests::{mock_client, node, page_response};
 use tga::collect::linear::issue::tests::full_node;
+use tga::collect::linear::issue::ISSUE_FIELDS_VERSION;
 use tga::core::db::get_linear_cursor;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -422,22 +423,63 @@ async fn older_field_set_refetches_full_history_once() {
     tga::core::db::set_linear_cursor(db.connection(), "ENG", "2026-01-01T00:01:00+00:00", 1)
         .expect("seed cursor");
 
-    run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+    let outcomes = run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
         .await
         .expect("refresh");
+    // #272 (D94): the refresh announces the versions and planned page count.
+    let notice = outcomes[0]
+        .refresh_notice
+        .as_deref()
+        .expect("refresh notice");
+    assert!(notice.contains("(ENG)"), "{notice}");
+    assert!(
+        notice.contains(&format!("v0 -> v{ISSUE_FIELDS_VERSION}")),
+        "{notice}"
+    );
+    assert!(notice.contains("about 1 issue page(s)"), "{notice}");
     let refresh = last_request(&server).await;
     assert!(
         !refresh.contains("\"gte\""),
         "the refresh must not bound updatedAt: {refresh}"
     );
 
-    run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
+    let outcomes = run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
         .await
         .expect("incremental");
+    assert_eq!(outcomes[0].refresh_notice, None, "no notice once current");
     let incremental = last_request(&server).await;
     assert!(
         incremental.contains("\"gte\""),
         "the run after the refresh resumes from the cursor: {incremental}"
+    );
+}
+
+/// #272: an issue with more attachments than the cap is counted in the
+/// sync summary, so the loss is visible outside the trace log.
+#[tokio::test]
+async fn attachment_truncation_is_counted_in_the_summary() {
+    let server = MockServer::start().await;
+    let mut over = node("ENG-1", "2026-01-01T00:01:00.000Z", None);
+    over["attachments"] = serde_json::json!({"nodes": [], "pageInfo": {"hasNextPage": true}});
+    let under = node("ENG-2", "2026-01-01T00:02:00.000Z", None);
+    mount_issues(&server, "ENG", vec![over, under]).await;
+    let mut db = Database::open_in_memory().expect("db");
+
+    let outcomes = run_sync_with(
+        &mock_client(&server.uri()),
+        &Config::default(),
+        &mut db,
+        &args(Some("ENG")),
+    )
+    .await
+    .expect("sync");
+    assert_eq!(outcomes[0].attachments_truncated, 1);
+    assert!(
+        outcomes[0]
+            .summary_line(false)
+            .contains("1 issue(s) over the attachment cap"),
+        "{}",
+        outcomes[0].summary_line(false)
     );
 }
 

@@ -498,10 +498,6 @@ mod tests {
         );
     }
 
-    /// #5655: every fault this pipeline records is a stage failure — each arm
-    /// means the Linear corpus is absent, not that one issue was skipped. The
-    /// dropped-`commits` query is the arm reachable without a Linear API round
-    /// trip; `store work_items failed` is built by the same constructor.
     /// The issue identifiers a mock Linear server was asked for.
     async fn requested_ids(server: &wiremock::MockServer) -> Vec<String> {
         let mut ids: Vec<String> = server
@@ -577,6 +573,10 @@ mod tests {
         }
     }
 
+    /// #5655: every fault this pipeline records is a stage failure — each arm
+    /// means the Linear corpus is absent, not that one issue was skipped. The
+    /// dropped-`commits` query is the arm reachable without a Linear API round
+    /// trip; `store work_items failed` is built by the same constructor.
     #[tokio::test]
     async fn linear_stage_faults_are_recorded_as_stage_failures() {
         use crate::core::config::LinearConfig;

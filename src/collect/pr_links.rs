@@ -100,17 +100,19 @@ fn load_attachments(conn: &Connection) -> Result<Vec<(String, String)>> {
         .map_err(TgaError::from)
 }
 
-/// Link stored pull requests to work items; return the rows written.
+/// Rebuild the PR-to-work-item links; return how many the table now holds.
 ///
 /// Why/What: see the module doc for the sources and the repository match.
 /// Key sources link to every `work_items` row with that id, across sources,
 /// as [`crate::collect::correlate_commits`] does; a key with no work item is
-/// not linked. Attachment links use `work_item_source = 'linear'`. All
-/// writes run in one transaction with `INSERT OR IGNORE`, so a re-run adds
-/// nothing.
+/// not linked. Attachment links use `work_item_source = 'linear'`. One
+/// transaction deletes every `pr_work_items` row and inserts the current set
+/// (`INSERT OR IGNORE` drops duplicate evidence), so a re-run yields the same
+/// rows and evidence that no longer holds is removed (#272).
 /// Test: `attachment_alone_links_a_pr`, `title_alone_links_a_pr`,
 /// `attachment_repository_matches_case_insensitively`,
-/// `relinking_is_idempotent`.
+/// `relinking_is_idempotent`, `removed_attachment_drops_its_link`,
+/// `changed_title_drops_the_old_title_link`.
 ///
 /// # Errors
 ///
@@ -130,6 +132,10 @@ pub fn link_pull_requests(conn: &mut Connection) -> Result<u64> {
     }
 
     let tx = conn.transaction()?;
+    // #272: every row is derived from the current attachments, PRs and
+    // commits, so the pass rebuilds the table. A removed attachment or a
+    // changed title, branch or commit key leaves no stale link behind.
+    tx.execute("DELETE FROM pr_work_items", [])?;
     let mut written = 0u64;
     {
         let mut lookup =
@@ -362,7 +368,66 @@ mod tests {
             "https://github.com/pacerevenue/rates/pull/7",
         );
         assert_eq!(link_pull_requests(db.connection_mut()).expect("first"), 1);
-        assert_eq!(link_pull_requests(db.connection_mut()).expect("second"), 0);
+        assert_eq!(link_pull_requests(db.connection_mut()).expect("second"), 1);
         assert_eq!(links(&db).len(), 1);
+    }
+
+    /// #272: an attachment removed in Linear drops its link on the next pass.
+    #[test]
+    fn removed_attachment_drops_its_link() {
+        let mut db = Database::open_in_memory().expect("db");
+        insert_pr(db.connection(), "pacerevenue/rates", 7, "misc", "misc");
+        insert_linear_issue(
+            db.connection(),
+            "uuid-1",
+            "PLA-1",
+            "https://github.com/pacerevenue/rates/pull/7",
+        );
+        assert_eq!(link_pull_requests(db.connection_mut()).expect("first"), 1);
+
+        db.connection()
+            .execute("DELETE FROM linear_issue_attachments", [])
+            .expect("remove attachment");
+        assert_eq!(link_pull_requests(db.connection_mut()).expect("second"), 0);
+        assert!(links(&db).is_empty(), "stale link: {:?}", links(&db));
+    }
+
+    /// #272: a PR retitled to another key drops the old title link.
+    #[test]
+    fn changed_title_drops_the_old_title_link() {
+        let mut db = Database::open_in_memory().expect("db");
+        insert_pr(db.connection(), "pacerevenue/rates", 8, "PLA-3: fix", "x");
+        for id in ["PLA-3", "PLA-4"] {
+            upsert_work_item(db.connection(), &work_item(id)).expect("work item");
+        }
+        link_pull_requests(db.connection_mut()).expect("first");
+
+        db.connection()
+            .execute("UPDATE pull_requests SET title = 'PLA-4: fix'", [])
+            .expect("retitle");
+        assert_eq!(link_pull_requests(db.connection_mut()).expect("second"), 1);
+        assert_eq!(
+            links(&db),
+            vec![(
+                "pacerevenue/rates".into(),
+                8,
+                "PLA-4".into(),
+                "title".into()
+            )]
+        );
+    }
+
+    fn work_item(id: &str) -> WorkItemRow {
+        WorkItemRow {
+            id: id.into(),
+            source: "linear".into(),
+            title: "t".into(),
+            status: "Done".into(),
+            item_type: "Issue".into(),
+            tags: None,
+            project: None,
+            url: None,
+            raw_json: None,
+        }
     }
 }

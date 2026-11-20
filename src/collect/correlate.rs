@@ -76,8 +76,8 @@ pub struct CorrelationOutcome {
     pub from_pr_body: u64,
     /// Commits whose key came from their pull request's title (#272).
     pub from_pr_title: u64,
-    /// New `pr_work_items` rows written by [`crate::collect::pr_links`]
-    /// during this pass (#272).
+    /// `pr_work_items` rows held after [`crate::collect::pr_links`] rebuilt
+    /// them during this pass (#272).
     pub pr_links: u64,
 }
 
