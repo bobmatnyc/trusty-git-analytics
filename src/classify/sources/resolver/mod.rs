@@ -202,10 +202,10 @@ impl ExternalSourceResolver {
     /// Why: #272 — a key for the wrong workspace must fail the run, not
     /// degrade to "no Linear signal". Per-commit lookups return `Option`, so
     /// the pipeline calls this first to turn a refusal into an error.
-    /// What: no-op without a guard or without a Linear source. Otherwise reads
-    /// the first Linear source's token and verifies the workspace against
-    /// its endpoint; the verdict is cached for every later lookup. A missing
-    /// token is a failed check, not a skipped one.
+    /// What: no-op without a guard or without a Linear source. Otherwise
+    /// verifies EVERY Linear source's token against its endpoint; the guard
+    /// caches one verdict per token for every later lookup. A missing token
+    /// is a failed check, not a skipped one.
     /// Test: `resolver_tests::resolver_workspace_guard_fails_closed`.
     ///
     /// # Errors
@@ -215,24 +215,30 @@ impl ExternalSourceResolver {
         let Some(guard) = &self.linear_guard else {
             return Ok(());
         };
-        let Some((config, base)) = self.sources.iter().find_map(|s| match s {
-            SourceState::Linear {
+        // #272: every Linear source, so a second token cannot ride on the
+        // first one's pass.
+        for state in &self.sources {
+            let SourceState::Linear {
                 config,
                 api_base_override,
                 ..
-            } => Some((config, api_base_override.as_deref())),
-            _ => None,
-        }) else {
-            return Ok(());
-        };
-        let token = self.creds.get(&config.api_key_env).ok_or_else(|| {
-            crate::collect::linear::WorkspaceGuardError::Unverified {
-                expected: guard.expected().to_string(),
-                reason: format!("Linear API key env var `{}` is not set", config.api_key_env),
-            }
-        })?;
-        let url = format!("{}/graphql", base.unwrap_or("https://api.linear.app"));
-        guard.verify(&self.client, &url, &token).await?;
+            } = state
+            else {
+                continue;
+            };
+            let token = self.creds.get(&config.api_key_env).ok_or_else(|| {
+                crate::collect::linear::WorkspaceGuardError::Unverified {
+                    expected: guard.expected().to_string(),
+                    reason: format!("Linear API key env var `{}` is not set", config.api_key_env),
+                }
+            })?;
+            let base = api_base_override
+                .as_deref()
+                .unwrap_or("https://api.linear.app");
+            guard
+                .verify(&self.client, &format!("{base}/graphql"), &token)
+                .await?;
+        }
         Ok(())
     }
 

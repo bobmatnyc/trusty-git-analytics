@@ -303,3 +303,99 @@ async fn resolver_workspace_guard_fails_closed() {
         assert_eq!(sent, org_queries, "org {org}");
     }
 }
+
+/// Why: #272 review — with two Linear sources, a pass for the first token
+/// must not answer for a second token from another workspace.
+/// What: token A belongs to `pace`, token B to `other`. The up-front check
+/// fails naming `other`, and a guarded per-commit lookup with token B sends
+/// no issue query, even after token A has passed.
+/// Test: this test itself.
+#[tokio::test]
+async fn second_linear_token_from_other_workspace_is_refused() {
+    use crate::classify::sources::{linear, LinearSourceConfig};
+    use crate::collect::linear::WorkspaceGuard;
+    use wiremock::matchers::{body_string_contains, header};
+
+    let server = MockServer::start().await;
+    for (token, org) in [("token-a", "pace"), ("token-b", "other")] {
+        Mock::given(method("POST"))
+            .and(header("Authorization", token))
+            .and(body_string_contains("organization"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": {"organization": {"urlKey": org}}})),
+            )
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(body_string_contains("issue(id:"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"issue": {"identifier": "PLA-12", "type": null,
+                               "labels": {"nodes": []}, "cycle": null}}
+        })))
+        .mount(&server)
+        .await;
+    let source = |env: &str| LinearSourceConfig {
+        api_key_env: env.to_string(),
+        ..LinearSourceConfig::default()
+    };
+
+    // Up front: every Linear source's token is checked.
+    let resolver = ExternalSourceResolver::new(&[
+        SourceConfig::Linear(source("LINEAR_A")),
+        SourceConfig::Linear(source("LINEAR_B")),
+    ])
+    .unwrap()
+    .with_linear_api_base(0, server.uri())
+    .with_linear_api_base(1, server.uri())
+    .with_credentials([("LINEAR_A", "token-a"), ("LINEAR_B", "token-b")]) // pragma: allowlist secret
+    .with_linear_workspace(Some("pace"));
+    let err = resolver
+        .verify_linear_workspace()
+        .await
+        .expect_err("token B belongs to `other` and must be refused");
+    assert!(err.to_string().contains("`other`"), "{err}");
+
+    // Per commit: a pass cached for token A does not admit token B.
+    let guard = WorkspaceGuard::new("pace");
+    let client = reqwest::Client::new();
+    let creds = crate::core::creds::CredentialSource::fixed([
+        ("LINEAR_A", "token-a"),
+        ("LINEAR_B", "token-b"),
+    ]); // pragma: allowlist secret
+    let base = server.uri();
+    let a = linear::fetch_issue_with_creds(
+        &client,
+        &source("LINEAR_A"),
+        "PLA-12",
+        Some(&base),
+        &creds,
+        Some(&guard),
+    )
+    .await;
+    assert!(a.is_some(), "token A is in `pace`");
+    let b = linear::fetch_issue_with_creds(
+        &client,
+        &source("LINEAR_B"),
+        "PLA-12",
+        Some(&base),
+        &creds,
+        Some(&guard),
+    )
+    .await;
+    assert!(b.is_none(), "token B must not read from `other`");
+    let token_b_issue_queries = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| {
+            r.headers
+                .get("Authorization")
+                .is_some_and(|v| v.as_bytes() == b"token-b")
+                && String::from_utf8_lossy(&r.body).contains("issue(id:")
+        })
+        .count();
+    assert_eq!(token_b_issue_queries, 0);
+}

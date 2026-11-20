@@ -4,16 +4,18 @@
 //! names the one workspace tga may read (`linear.workspace`), a key for any
 //! other workspace must not read a single issue. Linear access is also
 //! read-only by policy, so no GraphQL mutation may leave this process.
-//! What: [`WorkspaceGuard`] reads `organization { urlKey }` once per guard
-//! (one guard per client or resolver, so once per run) and caches the
-//! verdict, failure included, so every later request fails closed without
-//! re-asking. [`ensure_read_only`] rejects any GraphQL document that is not a
+//! What: [`WorkspaceGuard`] reads `organization { urlKey }` once per API key
+//! per guard (one guard per Linear client or resolver) and caches the
+//! verdict under a BLAKE3 hash of the key, failure included, so every later
+//! request with that key fails closed without re-asking, and a request with
+//! any other key is checked on its own. [`ensure_read_only`] rejects any GraphQL document that is not a
 //! query; every Linear send site calls it.
 //! Test: `guard_passes_on_matching_url_key`,
 //! `guard_fails_closed_on_other_url_key`, `guard_fails_closed_on_query_failure`,
 //! `guard_queries_once`, `read_only_check_rejects_mutations`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::OnceCell;
 use trusty_common::credentials::scrub_secrets;
@@ -84,15 +86,21 @@ pub fn ensure_read_only(document: &str) -> Result<(), WorkspaceGuardError> {
 #[derive(Debug)]
 pub struct WorkspaceGuard {
     expected: String,
-    verdict: OnceCell<Result<(), WorkspaceGuardError>>,
+    /// #272: one verdict per API key, keyed by the key's BLAKE3 hash — the
+    /// key itself is never stored here. A pass for one key never answers for
+    /// another.
+    verdicts: Mutex<HashMap<[u8; 32], Arc<Verdict>>>,
 }
+
+/// A lazily filled verdict for one API key.
+type Verdict = OnceCell<Result<(), WorkspaceGuardError>>;
 
 impl WorkspaceGuard {
     /// A guard expecting the workspace `expected` (a Linear urlKey).
     pub fn new(expected: impl Into<String>) -> Self {
         Self {
             expected: expected.into().trim().to_string(),
-            verdict: OnceCell::new(),
+            verdicts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -110,7 +118,7 @@ impl WorkspaceGuard {
         &self.expected
     }
 
-    /// Verify the workspace, asking Linear on the first call only.
+    /// Verify the workspace, asking Linear on the first call per API key.
     ///
     /// Why: every Linear request of the run must pass through here before it
     /// is sent, so the first request pays for the check and the rest reuse it.
@@ -133,8 +141,19 @@ impl WorkspaceGuard {
         endpoint: &str,
         api_key: &str,
     ) -> Result<(), WorkspaceGuardError> {
-        self.verdict
-            .get_or_init(|| self.query_organization(client, endpoint, api_key))
+        let id: [u8; 32] = blake3::hash(api_key.as_bytes()).into();
+        let cell = {
+            // A poisoned lock fails closed: no verdict, no request.
+            let mut map = self
+                .verdicts
+                .lock()
+                .map_err(|_| WorkspaceGuardError::Unverified {
+                    expected: self.expected.clone(),
+                    reason: "workspace verdict cache is poisoned".into(),
+                })?;
+            Arc::clone(map.entry(id).or_default())
+        };
+        cell.get_or_init(|| self.query_organization(client, endpoint, api_key))
             .await
             .clone()
     }
