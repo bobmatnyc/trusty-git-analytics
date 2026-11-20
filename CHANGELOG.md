@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.8.0] — 2026-11-20
+
+### Breaking
+
+- `classify::sources::linear::fetch_issue` and `fetch_issues_batch` take a new last parameter, `guard: Option<&WorkspaceGuard>`; pass `None` for the previous behaviour (#272).
+- `collect::correlate::TicketSource` has a new variant, `PrTitle`, ranked between `BranchName` and `PrBody`; an exhaustive `match` on it needs a new arm (#272).
+- `commands::linear::LinearSyncArgs` has a new public field, `plan: bool`; a struct literal that names every field needs it (or `..Default::default()`) (#272).
+
+### Added
+
+- Linear issue attachments are collected (`attachments(first: 25)`) and stored in the new `linear_issue_attachments` table (migration v41). The `tga linear sync` summary line counts the issues over the 25-attachment cap, whose extra attachments are not read (#272).
+- `ISSUE_FIELDS_VERSION` moves to 2, so the next `tga linear sync` (including `sync_on_collect` and the audit sweep) re-reads every stored team once, about 597 issue-page calls for FLYR. Before the first request of a refresh, each team prints a notice on stderr naming the team, the old and new field-set versions and the planned page count (#272).
+- New `pr_work_items` table (migration v41) links pull requests to work items from Linear PR attachments and from keys in the branch, PR title, PR body and the PR's commits. The correlation pass rebuilds it each run, so a removed attachment or a changed key drops its link; attachment URLs match `pull_requests.repository` case-insensitively and keep the stored spelling (#272).
+- The PR title is a ticket-key source for commit correlation, ranked after the branch and before the PR body (#272).
+- New `fact_linear_closed_weekly` table (migration v42): closed Linear issues (`state_type = 'completed'` with a `completed_at`; canceled issues excluded) per developer, team and ISO week of `completed_at` in UTC, with the issue keys. Linear assignees map to tga's canonical developer (`authors`) by email, then stored aliases, then the configured identity aliases, with no fuzzy guess and no new `authors` row; an unmatched assignee keeps a row under its Linear name. Every non-dry `tga linear sync` rebuilds it in one transaction (#272).
+- `tga linear match-report [--since] [--until] [--format text|json]`: PRs in Linear-bound repos with and without a ticket link (with a per-source breakdown), per-engineer PRs, PRs with a ticket and closed issues, and unmatched identities on both sides. Read-only, names only (#272).
+- `tga linear sync --plan` (alias `--count-only`) prints the planned API call count per team and exits without fetching any issue. A sync that reads a team's whole history (backfill, first sync, field-set refresh) or runs `--history` prints the same count on stderr before its first issue request (#272).
+- `linear.workspace`: optional expected Linear workspace `urlKey`. When set, every Linear client (`tga linear *`, collect lookups and bulk sync, the classify `linear` source) reads `organization { urlKey }` once per API key per Linear client or resolver and fails the command, naming both urlKeys, if the key belongs to another workspace or the check fails. Every Linear GraphQL document is checked to be a read-only query before it is sent (#272).
+- `linear.repos`: bind repositories, by label or owner, to Linear. A bound repo's ticket keys are no longer looked up by the JIRA, GitHub or Azure DevOps work-item adapters, so `PLA-12` in a Linear repo cannot resolve to a JIRA issue (#272).
+
+### Fixed
+
+- The `tga linear sync` pre-flight notice names the real reason for a full read. A team's first sync no longer reports a field-set re-read, and a `--since` run no longer claims to re-read the full history (#272).
+
 ## [10.7.2] — 2026-11-17
 
 ### Fixed
