@@ -216,6 +216,20 @@ pull.
 | `--entities` | false | After the issues, also sync the workspace's teams, users, labels, projects, project milestones and cycles (see below) |
 | `--history` | false | After each team's issues, read the workflow-state history of each due issue into `fact_linear_transitions` (see below) |
 | `--comments` | false | After each team's issues, read the team's comments updated since its comment cursor (every comment on the first run), and every comment of issues that moved into the team, into `fact_linear_comment_detail`; with `--backfill`, walk each issue's comments instead. Bodies are never stored (see below) |
+| `--plan` (alias `--count-only`) | false | Print the planned API call count per team and exit without fetching any issue. With `--all-teams` the team list is read (one query); otherwise no request is sent (#272) |
+
+Call plan (#272, owner ruling D94): before the first issue request of a team
+whose run reads the whole history (`--backfill`, a first sync, or a field-set
+refresh) or runs `--history`, the sync prints the planned call count on
+stderr: 1 for the team, plus `ceil(stored issues / 50)` issue pages, plus one
+history walk per stored issue with `--history`; `--all-teams` adds the
+team-list query. A first sync has no stored issues, so its count is a lower
+bound and the notice says so. A `--since` run claims no full read.
+
+After a non-dry run, the sync rebuilds `fact_linear_closed_weekly` (closed
+issues per developer per ISO week; see
+[database-schema.md](database-schema.md#fact_linear_closed_weekly)) and prints
+one line with the rows written and the unmatched and unassigned issue counts.
 
 Rows are keyed by Linear's issue `id` (UUID); `identifier` (ENG-123) is a
 separate indexed column. An issue that moves team gets a new identifier and
@@ -468,6 +482,26 @@ command with the row named.
 ```text
 tga linear stats --json --as-of 2026-10-01
 ```
+
+### `tga linear match-report`
+
+Read-only report over the stored PRs, `pr_work_items`, Linear issues and
+authors (#272). No network call; names only, never an email or a key. Opens
+the database read-only.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--since <YYYY-MM-DD>` | unbounded | Window start (inclusive, midnight UTC) |
+| `--until <YYYY-MM-DD>` | unbounded | Window end (exclusive, midnight UTC) |
+| `--format text\|json` | `text` | Output format |
+
+It prints: PRs (by `created_at`) in Linear-bound repos (`linear.repos`) with at
+least one ticket link against PRs with none, and the PRs linked per source;
+per engineer, PRs, PRs with a ticket and closed Linear issues (by
+`completed_at`) in the window; Linear assignees with no tga developer; and tga
+authors with commits in bound repos that match no Linear user. A PR is
+credited to the developer its author login matches as a stored or configured
+alias, else to the author of most of its commits, else to the raw login.
 
 ### `tga override`
 

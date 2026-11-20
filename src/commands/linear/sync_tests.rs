@@ -427,16 +427,14 @@ async fn older_field_set_refetches_full_history_once() {
         .await
         .expect("refresh");
     // #272 (D94): the refresh announces the versions and planned page count.
-    let notice = outcomes[0]
-        .refresh_notice
-        .as_deref()
-        .expect("refresh notice");
+    let notice = outcomes[0].plan_notice.as_deref().expect("refresh notice");
     assert!(notice.contains("(ENG)"), "{notice}");
     assert!(
         notice.contains(&format!("v0 -> v{ISSUE_FIELDS_VERSION}")),
         "{notice}"
     );
-    assert!(notice.contains("about 1 issue page(s)"), "{notice}");
+    // #272: 0 stored issues: 1 team + 0 issue pages.
+    assert!(notice.contains("planned API calls: about 1 "), "{notice}");
     let refresh = last_request(&server).await;
     assert!(
         !refresh.contains("\"gte\""),
@@ -446,7 +444,7 @@ async fn older_field_set_refetches_full_history_once() {
     let outcomes = run_sync_with(&client, &Config::default(), &mut db, &args(Some("ENG")))
         .await
         .expect("incremental");
-    assert_eq!(outcomes[0].refresh_notice, None, "no notice once current");
+    assert_eq!(outcomes[0].plan_notice, None, "no notice once current");
     let incremental = last_request(&server).await;
     assert!(
         incremental.contains("\"gte\""),

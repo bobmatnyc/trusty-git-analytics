@@ -275,6 +275,12 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "linear_attachments_pr_links",
         sql: include_str!("../sql/0041_linear_attachments_pr_links.sql"),
     },
+    // #272: closed Linear issues per developer per ISO week.
+    Migration {
+        version: 42,
+        name: "linear_closed_weekly",
+        sql: include_str!("../sql/0042_linear_closed_weekly.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

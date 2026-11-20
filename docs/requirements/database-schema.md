@@ -284,6 +284,87 @@ Many-to-many join between commits and work items. Migration `0005_work_items.sql
 
 ---
 
+### `linear_issue_attachments`
+
+Linear issue attachments, written by `tga linear sync` with each issue (#272).
+Migration `0041_linear_attachments_pr_links.sql`. A store replaces an issue's
+rows in one transaction, so a removed attachment disappears on the next sync.
+At most 25 attachments are read per issue; the sync summary counts issues over
+the cap.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `issue_id` | TEXT | no | PK part 1 — Linear's stable issue id (`linear_issues.linear_id`) |
+| `url` | TEXT | no | PK part 2 — attachment URL (a GitHub PR URL for the GitHub integration) |
+| `source_type` | TEXT | yes | Linear's attachment source type (e.g. `github`) |
+| `title` | TEXT | yes | Attachment title Linear shows — free text |
+
+**PK**: (`issue_id`, `url`).
+
+---
+
+### `pr_work_items`
+
+Pull request ↔ work item links, one row per piece of evidence (#272). Migration
+`0041_linear_attachments_pr_links.sql`. Rebuilt in one transaction by the
+correlation pass (`collect::pr_links::link_pull_requests`) every run, so a
+removed attachment or a changed key drops its link.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `provider` | TEXT | no | `pull_requests.provider` |
+| `repository` | TEXT | no | `pull_requests.repository`, in the stored row's spelling (an attachment URL matches it case-insensitively) |
+| `pr_number` | INTEGER | no | `pull_requests.pr_number` |
+| `work_item_id` | TEXT | no | `work_items.id` (e.g. `PLA-12`) |
+| `work_item_source` | TEXT | no | `work_items.source`; `linear` for attachment links |
+| `source` | TEXT | no | Evidence: `attachment`, `branch`, `title`, `body` or `commit` (CHECK) |
+
+**PK**: all six columns. **Index**: INDEX(`work_item_id`, `work_item_source`).
+
+---
+
+### `fact_linear_closed_weekly`
+
+Closed Linear issues per developer, team and ISO week (#272), the table
+cto-reports reads for ticket throughput per engineer. Migration
+`0042_linear_closed_weekly.sql`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `canonical_developer_id` | INTEGER | yes | `authors.id` of the matched developer; NULL when the assignee matches none |
+| `developer_name` | TEXT | no | `authors.canonical_name`, or the Linear assignee name when unmatched |
+| `team_key` | TEXT | no | Linear team key |
+| `iso_week` | TEXT | no | ISO 8601 week of `completed_at` in UTC, `YYYY-Www` (`2026-W53`) |
+| `week_start` | TEXT | no | Monday of that week, `YYYY-MM-DD` |
+| `closed_count` | INTEGER | no | Closed issues in the bucket |
+| `closed_issue_keys` | TEXT | no | JSON array of the issue identifiers, sorted |
+
+**Indexes**: INDEX(`canonical_developer_id`, `iso_week`), INDEX(`iso_week`).
+
+Rules:
+
+- A closed issue has `state_type = 'completed'` and a non-NULL `completed_at`.
+  **Canceled issues (`state_type = 'canceled'`) are excluded.** Archived
+  completed issues count.
+- The ISO year can differ from the calendar year: 2027-01-03 falls in
+  `2026-W53`, 2025-12-29 in `2026-W01`.
+- The issue is credited to its stored assignee (email and name from the issue
+  row, else from `linear_users`). tga keeps no assignee history, so a
+  reassignment after completion moves the credit. An issue with no assignee is
+  not written; the sync summary counts it.
+- Identity: the assignee maps to an `authors` row by email (case-insensitive),
+  then a stored email alias (`authors.aliases`), then the configured identity
+  aliases (exact entries only, no fuzzy match), then a stored non-email alias
+  matching the name. No `authors` row is created. An unmatched assignee keeps a
+  row under its Linear name with a NULL `canonical_developer_id`.
+
+Refresh: every non-dry `tga linear sync` (including `linear.sync_on_collect`
+inside `tga collect`) rebuilds the table at the end of the run, in one
+transaction (DELETE, then INSERT), from the stored issues, users and authors.
+A re-run writes the same rows.
+
+---
+
 ### `classification_overrides`
 
 Manual Tier 0 overrides. Entries here take absolute priority over all rule-based and
@@ -948,6 +1029,8 @@ Migrations live in `src/core/db/sql/` and are registered in
 | 37 | `0037_linear_comment_cursor.sql` | `linear_comment_cursor` table (#190) |
 | 38 | `0038_linear_comment_due.sql` | `linear_comment_due` table (#190) |
 | 40 | `0040_notion_activity.sql` | `fact_notion_activity` and `notion_sync_cursor` tables (#252) |
+| 41 | `0041_linear_attachments_pr_links.sql` | `linear_issue_attachments` and `pr_work_items` tables (#272) |
+| 42 | `0042_linear_closed_weekly.sql` | `fact_linear_closed_weekly` table (#272) |
 
 Migrations 17 and 21 carry a `PRAGMA table_info` pre-flight guard, because a pre-release
 build may already have added their columns and SQLite has no
@@ -956,4 +1039,4 @@ module — `v17.rs` and `v21.rs` — so their `.sql` files are read as reference
 executed. Migration 21's registry entry carries an empty `sql` string to make that
 explicit.
 
-Future migrations continue from `0041_*.sql`. Rows 28–35 and 39 are not yet listed here; each SQL file's header describes it.
+Future migrations continue from `0043_*.sql`. Rows 28–35 and 39 are not yet listed here; each SQL file's header describes it.

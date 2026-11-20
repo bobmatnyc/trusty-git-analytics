@@ -13,6 +13,10 @@ pub mod activity;
 pub mod attachment;
 pub mod bulk;
 pub mod client;
+// #272: closed issues per developer per ISO week.
+pub mod closed_weekly;
+// #272: Linear identity to tga canonical developer.
+pub mod developer;
 pub mod entities;
 pub mod issue;
 pub(crate) mod projection;
