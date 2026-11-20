@@ -74,6 +74,11 @@ pub struct CorrelationOutcome {
     pub from_branch: u64,
     /// Commits whose key came from their pull request's body (#5734).
     pub from_pr_body: u64,
+    /// Commits whose key came from their pull request's title (#272).
+    pub from_pr_title: u64,
+    /// New `pr_work_items` rows written by [`crate::collect::pr_links`]
+    /// during this pass (#272).
+    pub pr_links: u64,
 }
 
 impl CorrelationOutcome {
@@ -83,19 +88,23 @@ impl CorrelationOutcome {
     /// two harvest counts unconditionally — printing them only when non-zero
     /// would make "this source found nothing" and "this source was never
     /// consulted" the same output.
-    /// What: the four dispositions, then `"N via branch, N via PR body"`.
+    /// What: the four dispositions, then `"N via branch, N via PR title, N
+    /// via PR body"` (#272 adds the title), then the PR link count.
     /// Test: `tests::summary_names_every_disposition`,
     /// `tests::summary_reports_a_zero_harvest_rather_than_omitting_it`.
     pub fn summary(&self) -> String {
         format!(
             "{} linked, {} already linked, {} ticket without board item, \
-             {} without ticket ({} via branch, {} via PR body)",
+             {} without ticket ({} via branch, {} via PR title, {} via PR body), \
+             {} PR links",
             self.linked,
             self.already_linked,
             self.no_work_item,
             self.no_ticket,
             self.from_branch,
-            self.from_pr_body
+            self.from_pr_title,
+            self.from_pr_body,
+            self.pr_links
         )
     }
 }
@@ -153,7 +162,10 @@ fn load_candidates(conn: &Connection) -> Result<Vec<Candidate>> {
 /// 2. [`Self::BranchName`] — authored once as a work identifier and shared by
 ///    every commit on the branch. Coarser than a subject, but it is a
 ///    deliberate identifier rather than prose.
-/// 3. [`Self::PrBody`] — prose written last, routinely citing several issues.
+/// 3. [`Self::PrTitle`] (#272) — one line written about the whole PR. A
+///    title names the PR's work like a branch does, but it is free text, so
+///    it ranks below the branch and above the body.
+/// 4. [`Self::PrBody`] — prose written last, routinely citing several issues.
 ///    Weakest, and the only source measured to need an action keyword before
 ///    it can be believed at all.
 ///
@@ -164,6 +176,8 @@ pub enum TicketSource {
     CommitText,
     /// The head-ref of the pull request that carried the commit.
     BranchName,
+    /// A key in that pull request's title (#272).
+    PrTitle,
     /// The `Closes #N` reference in that pull request's body.
     PrBody,
 }
@@ -172,11 +186,13 @@ pub enum TicketSource {
 ///
 /// Why: see [`TicketSource`] — the precedence is data, so it can be read in one
 /// place and asserted directly by a test.
-/// What: the three variants in declaration order.
+/// What: the four variants in declaration order.
 /// Test: `tests::precedence_order_matches_the_declared_variant_order`.
-const SOURCE_ORDER: [TicketSource; 3] = [
+// #272: PR title added between branch and body.
+const SOURCE_ORDER: [TicketSource; 4] = [
     TicketSource::CommitText,
     TicketSource::BranchName,
+    TicketSource::PrTitle,
     TicketSource::PrBody,
 ];
 
@@ -192,8 +208,21 @@ const SOURCE_ORDER: [TicketSource; 3] = [
 struct PrKeys {
     /// Key read from the PR's head ref by [`branch_ticket_key`].
     branch: Option<String>,
+    /// Key read from the PR's title by [`title_ticket_key`] (#272).
+    title: Option<String>,
     /// Key extracted from the PR body at fetch time.
     body: Option<String>,
+}
+
+/// The ticket key a pull request title names (#272).
+///
+/// Why: a PR title such as `PLA-12: fix rates` names the PR's work, and the
+/// commit and PR link passes must read it the same way.
+/// What: [`extract_ticket_id`] over the title, the same rule as a commit
+/// subject, so a key in title prose is not believed.
+/// Test: `tests::pr_title_supplies_a_key_the_subject_and_branch_lack`.
+pub(crate) fn title_ticket_key(title: &str) -> Option<String> {
+    extract_ticket_id(title)
 }
 
 /// Map every commit SHA a pull request produced to that PR's harvested keys.
@@ -217,8 +246,8 @@ struct PrKeys {
 fn load_pr_keys(conn: &Connection) -> Result<HashMap<String, PrKeys>> {
     let mut stmt = conn
         .prepare(
-            "SELECT commit_shas, head_ref, body_ticket_id FROM pull_requests \
-             WHERE (head_ref IS NOT NULL AND head_ref != '') OR body_ticket_id IS NOT NULL",
+            // #272: the title is read for every PR, so no WHERE filter.
+            "SELECT commit_shas, head_ref, body_ticket_id, title FROM pull_requests",
         )
         .map_err(TgaError::from)?;
     let mapped = stmt
@@ -227,15 +256,17 @@ fn load_pr_keys(conn: &Connection) -> Result<HashMap<String, PrKeys>> {
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,
                 r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })
         .map_err(TgaError::from)?;
 
     let mut out: HashMap<String, PrKeys> = HashMap::new();
     for row in mapped {
-        let (shas_json, head_ref, body_key) = row.map_err(TgaError::from)?;
+        let (shas_json, head_ref, body_key, title) = row.map_err(TgaError::from)?;
         let branch = head_ref.as_deref().and_then(branch_ticket_key);
-        if branch.is_none() && body_key.is_none() {
+        let title = title_ticket_key(&title);
+        if branch.is_none() && title.is_none() && body_key.is_none() {
             continue;
         }
         // #5734: a provider-written JSON column; a malformed one skips this PR.
@@ -247,6 +278,7 @@ fn load_pr_keys(conn: &Connection) -> Result<HashMap<String, PrKeys>> {
                 sha,
                 PrKeys {
                     branch: branch.clone(),
+                    title: title.clone(),
                     body: body_key.clone(),
                 },
             );
@@ -284,6 +316,8 @@ fn ticket_key(
                 .map(str::to_string)
                 .or_else(|| extract_ticket_id(message)),
             TicketSource::BranchName => pr.and_then(|p| p.branch.clone()),
+            // #272: PR title, between branch and body.
+            TicketSource::PrTitle => pr.and_then(|p| p.title.clone()),
             TicketSource::PrBody => pr.and_then(|p| p.body.clone()),
         };
         key.map(|k| (k, source))
@@ -300,7 +334,8 @@ fn ticket_key(
 /// `commit_work_items` row for every `work_items` entry with that id, across
 /// all sources. All writes run in one transaction and go through
 /// [`link_commit_work_item`]'s `INSERT OR IGNORE`, so re-running the pass
-/// changes nothing. Progress is published to `bus` at start, every
+/// changes nothing. Then (#272) [`crate::collect::pr_links::link_pull_requests`]
+/// writes `pr_work_items`. Progress is published to `bus` at start, every
 /// [`PROGRESS_EVERY`] commits, and at the end; with
 /// [`ProgressBus::disabled`] every one of those emits is a no-op.
 ///
@@ -338,6 +373,7 @@ pub fn correlate_commits(conn: &mut Connection, bus: &ProgressBus) -> Result<Cor
                         match from {
                             TicketSource::CommitText => {}
                             TicketSource::BranchName => outcome.from_branch += 1,
+                            TicketSource::PrTitle => outcome.from_pr_title += 1,
                             TicketSource::PrBody => outcome.from_pr_body += 1,
                         }
                         let sources: Vec<String> = lookup
@@ -367,6 +403,8 @@ pub fn correlate_commits(conn: &mut Connection, bus: &ProgressBus) -> Result<Cor
         }
     }
     tx.commit().map_err(TgaError::from)?;
+    // #272: PR-to-work-item links, from attachments and the same key sources.
+    outcome.pr_links = crate::collect::pr_links::link_pull_requests(conn)?;
 
     bus.emit(
         ProgressEvent::completed(Stage::Correlate, TARGET, outcome.scanned)
@@ -576,6 +614,8 @@ mod tests {
             no_work_item: 1,
             from_branch: 2,
             from_pr_body: 3,
+            from_pr_title: 5,
+            pr_links: 6,
         };
         let s = out.summary();
         assert!(s.contains("1 linked"));
@@ -584,6 +624,8 @@ mod tests {
         assert!(s.contains("1 without ticket"));
         assert!(s.contains("2 via branch"));
         assert!(s.contains("3 via PR body"));
+        assert!(s.contains("5 via PR title"));
+        assert!(s.contains("6 PR links"));
     }
 
     #[test]
@@ -673,6 +715,27 @@ mod tests {
         assert_eq!(out.from_branch, 0);
     }
 
+    /// #272: a key in the PR title links a commit whose subject and branch
+    /// carry none.
+    #[test]
+    fn pr_title_supplies_a_key_the_subject_and_branch_lack() {
+        let mut db = Database::open_in_memory().expect("open");
+        insert_commit(db.connection(), "aaa", "chore: tidy up", None);
+        insert_pr(db.connection(), 1, "aaa", Some("tidy"), None);
+        db.connection()
+            .execute(
+                "UPDATE pull_requests SET title = 'PLA-9: tidy up' WHERE pr_number = 1",
+                [],
+            )
+            .expect("title");
+        upsert_work_item(db.connection(), &work_item("PLA-9", "linear")).expect("upsert");
+
+        let out = correlate_commits(db.connection_mut(), &ProgressBus::disabled()).expect("run");
+        assert_eq!(out.linked, 1);
+        assert_eq!(out.from_pr_title, 1);
+        assert_eq!(title_ticket_key("PLA-9: tidy up").as_deref(), Some("PLA-9"));
+    }
+
     /// Why: #5734 — 323 of this repository's merged commits have a subject key
     /// and a PR-body key that DIFFER, so which source wins is not academic.
     /// #5199 made subject position authoritative and a new source must not
@@ -684,6 +747,7 @@ mod tests {
     fn precedence_prefers_commit_text_then_branch_then_body() {
         let pr = PrKeys {
             branch: Some("BRANCH-2".into()),
+            title: Some("TITLE-4".into()),
             body: Some("#3".into()),
         };
         assert_eq!(
@@ -696,9 +760,19 @@ mod tests {
             Some(("BRANCH-2".into(), TicketSource::BranchName)),
             "a deliberate branch identifier outranks PR prose"
         );
-        let body_only = PrKeys {
-            branch: None,
+        // #272: the title ranks below the branch and above the body.
+        let title_and_body = PrKeys {
+            title: Some("TITLE-4".into()),
             body: Some("#3".into()),
+            ..PrKeys::default()
+        };
+        assert_eq!(
+            ticket_key(None, "chore: nothing", Some(&title_and_body)),
+            Some(("TITLE-4".into(), TicketSource::PrTitle))
+        );
+        let body_only = PrKeys {
+            body: Some("#3".into()),
+            ..PrKeys::default()
         };
         assert_eq!(
             ticket_key(None, "chore: nothing", Some(&body_only)),

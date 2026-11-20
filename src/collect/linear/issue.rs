@@ -31,7 +31,19 @@ pub const ISSUE_FIELDS: &str = "id identifier title description url priority est
      state { name type } team { id name key } \
      assignee { id name displayName email } creator { id name } \
      project { id } cycle { id } parent { id identifier } \
-     labelIds labels(first: 50) { nodes { id name } }";
+     labelIds labels(first: 50) { nodes { id name } } \
+     attachments(first: 25) { nodes { url sourceType title } pageInfo { hasNextPage } }";
+
+/// How many attachments one issue query reads per issue (#272).
+///
+/// Why: attachments are a nested connection, so each one multiplies the
+/// query's complexity by the issue page size. 25 keeps a 50-issue page inside
+/// Linear's per-query complexity limit; an issue rarely carries more PR links.
+/// What: the cap is not paginated. An issue with more attachments logs a
+/// `warn` naming it ([`LinearIssue::attachments_truncated`]) and keeps the
+/// first 25.
+/// Test: `parse_issue_node_reads_attachments_and_the_truncation_flag`.
+pub const ATTACHMENTS_PER_ISSUE: usize = 25;
 
 /// The version of [`ISSUE_FIELDS`] and of the `work_items` projection built
 /// from it (#190 step 3).
@@ -44,10 +56,25 @@ pub const ISSUE_FIELDS: &str = "id identifier title description url priority est
 /// `work_items`, so a projection-only change needs a bump too. Version 0 is
 /// every cursor written before this constant existed; version 1 adds
 /// `description` and `previousIdentifiers` and the projection that fills
-/// `tags` and `project` and keys rows by `stable_id`.
+/// `tags` and `project` and keys rows by `stable_id`. Version 2 (#272) adds
+/// `attachments`; the bump costs one full re-read of every stored team
+/// (about 597 issue-page calls for the FLYR workspace).
 /// Test: `issue_fields_version_tracks_the_field_set`,
 /// `commands::linear::sync_tests::older_field_set_refetches_full_history_once`.
-pub const ISSUE_FIELDS_VERSION: i64 = 1;
+// #272: 2 adds `attachments`.
+pub const ISSUE_FIELDS_VERSION: i64 = 2;
+
+/// One attachment on a Linear issue (#272): a link Linear shows on the
+/// issue, such as the GitHub pull request an integration attached.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearAttachment {
+    /// The attachment's URL.
+    pub url: String,
+    /// Linear's `sourceType` (e.g. `github`), when reported.
+    pub source_type: Option<String>,
+    /// The attachment title, when reported.
+    pub title: Option<String>,
+}
 
 /// A Linear issue fetched from the API.
 ///
@@ -146,6 +173,15 @@ pub struct LinearIssue {
     /// When the issue was archived. `Some` means the issue is archived.
     #[serde(default)]
     pub archived_at: Option<DateTime<Utc>>,
+    /// The issue's attachments (#272). `None` when the node carried no
+    /// `attachments` field (a payload from before #272), so a store leaves
+    /// earlier rows alone; `Some(vec![])` means Linear reported none.
+    #[serde(default)]
+    pub attachments: Option<Vec<LinearAttachment>>,
+    /// Whether Linear reported more attachments than
+    /// [`ATTACHMENTS_PER_ISSUE`] (#272).
+    #[serde(default)]
+    pub attachments_truncated: bool,
     /// The GraphQL issue node exactly as Linear returned it. Written to
     /// `raw_json` so the provider-aware extractors read Linear's own field
     /// names. Never serialized into itself.
@@ -202,6 +238,29 @@ pub fn parse_issue_node(identifier_fallback: &str, node: &serde_json::Value) -> 
         .as_array()
         .map(|a| a.iter().filter_map(|l| text(&l["name"])).collect())
         .unwrap_or_default();
+    // #272: attachments. An entry without a URL string is skipped: data
+    // filtering of a malformed node, not an error path.
+    let attachments = node["attachments"]["nodes"].as_array().map(|a| {
+        a.iter()
+            .filter_map(|n| {
+                Some(LinearAttachment {
+                    url: n["url"].as_str()?.to_string(),
+                    source_type: text(&n["sourceType"]),
+                    title: text(&n["title"]),
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let attachments_truncated = node["attachments"]["pageInfo"]["hasNextPage"]
+        .as_bool()
+        .unwrap_or(false);
+    if attachments_truncated {
+        tracing::warn!(
+            identifier = node["identifier"].as_str().unwrap_or(identifier_fallback),
+            cap = ATTACHMENTS_PER_ISSUE,
+            "Linear issue has more attachments than the per-issue cap; the rest are not read"
+        );
+    }
     LinearIssue {
         linear_id: text(&node["id"]),
         identifier: node["identifier"]
@@ -241,6 +300,8 @@ pub fn parse_issue_node(identifier_fallback: &str, node: &serde_json::Value) -> 
         completed_at: parse_dt("completedAt"),
         canceled_at: parse_dt("canceledAt"),
         archived_at: parse_dt("archivedAt"),
+        attachments,
+        attachments_truncated,
         raw: Some(node.clone()),
     }
 }
@@ -274,7 +335,8 @@ pub(crate) mod tests {
             "parent": {"id": "parent-uuid", "identifier": format!("{team_key}-1")},
             "previousIdentifiers": [],
             "labelIds": ["label-1", "label-2"],
-            "labels": {"nodes": [{"id": "label-1", "name": "bug"}, {"id": "label-2", "name": "api"}]}
+            "labels": {"nodes": [{"id": "label-1", "name": "bug"}, {"id": "label-2", "name": "api"}]},
+            "attachments": {"nodes": [], "pageInfo": {"hasNextPage": false}}
         })
     }
 
@@ -326,11 +388,32 @@ pub(crate) mod tests {
         assert_eq!(
             (ISSUE_FIELDS_VERSION, pinned.as_str()),
             (
-                1,
-                "6acd4ce5170e20f26fb35d082114b4a8f79331bc92b5b4fff44079106cf21e45"
+                2,
+                "91ad963dae7d7c178bb012626edccddfb93fe0ec73dff58a4ff29ff039775de6"
             ),
             "ISSUE_FIELDS changed: bump ISSUE_FIELDS_VERSION and re-pin the hash"
         );
+    }
+
+    /// #272: attachments parse; an entry with no URL is dropped; the
+    /// `hasNextPage` flag marks a truncated list.
+    #[test]
+    fn parse_issue_node_reads_attachments_and_the_truncation_flag() {
+        let mut node = full_node("uuid-8", "ENG-8", "ENG");
+        node["attachments"] = serde_json::json!({
+            "nodes": [
+                {"url": "https://github.com/acme/widgets/pull/7", "sourceType": "github", "title": "PR 7"},
+                {"sourceType": "github"}
+            ],
+            "pageInfo": {"hasNextPage": true}
+        });
+        let issue = parse_issue_node("", &node);
+        let atts = issue.attachments.expect("attachments present");
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].url, "https://github.com/acme/widgets/pull/7");
+        assert_eq!(atts[0].source_type.as_deref(), Some("github"));
+        assert!(issue.attachments_truncated);
+        assert!(ISSUE_FIELDS.contains("attachments(first: 25)"));
     }
 
     #[test]
@@ -341,5 +424,6 @@ pub(crate) mod tests {
         assert_eq!(issue.estimate, None);
         assert!(issue.label_ids.is_empty());
         assert_eq!(issue.state, "Unknown");
+        assert_eq!(issue.attachments, None);
     }
 }
