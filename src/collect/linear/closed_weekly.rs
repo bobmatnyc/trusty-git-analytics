@@ -19,7 +19,7 @@
 //! every non-dry run, `sync_on_collect` included.
 //! Test: `closed_weekly_tests`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use rusqlite::{params, Connection};
@@ -125,9 +125,17 @@ pub fn closed_issues(
             r.get::<_, Option<String>>(5)?,
         ))
     })?;
+    // #272 (D1f/D09): one Linear user resolves to one identity, whichever of
+    // their issues carries the email, so one person never gets two rows.
+    let users = assignee_identities(conn)?;
+    let mut matched: HashMap<String, Option<DeveloperMatch>> = HashMap::new();
     let mut out = ClosedIssues::default();
     for row in rows {
         let (identifier, team_key, completed, email, name, assignee_id) = row?;
+        let (email, name) = match assignee_id.as_ref().and_then(|id| users.get(id)) {
+            Some((e, n)) => (e.clone(), n.clone()),
+            None => (email, name),
+        };
         let completed_at = DateTime::parse_from_rfc3339(&completed)
             .map_err(|e| {
                 TgaError::ValidationError(format!(
@@ -144,7 +152,13 @@ pub fn closed_issues(
             out.unassigned += 1;
             continue;
         }
-        let developer = index.match_identity(email.as_deref(), name.as_deref());
+        let developer = match &assignee_id {
+            Some(id) => matched
+                .entry(id.clone())
+                .or_insert_with(|| index.match_identity(email.as_deref(), name.as_deref()))
+                .clone(),
+            None => index.match_identity(email.as_deref(), name.as_deref()),
+        };
         out.issues.push(ClosedIssue {
             identifier,
             team_key,
@@ -153,6 +167,59 @@ pub fn closed_issues(
             assignee_name: name.or(assignee_id),
             developer,
         });
+    }
+    Ok(out)
+}
+
+/// `(email, name)` of one Linear assignee.
+pub type AssigneeIdentity = (Option<String>, Option<String>);
+
+/// One identity per Linear `assignee_id`: the first non-empty email and name
+/// across all of that user's issues (in row order), each filled from
+/// `linear_users` when no issue carries it (#272).
+///
+/// # Errors
+///
+/// [`TgaError::DbError`] on a failed read.
+pub fn assignee_identities(conn: &Connection) -> Result<HashMap<String, AssigneeIdentity>> {
+    fn first(slot: &mut Option<String>, value: Option<String>) {
+        if slot.is_none() {
+            *slot = value.filter(|v| !v.trim().is_empty());
+        }
+    }
+    let mut out: HashMap<String, AssigneeIdentity> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT assignee_id, assignee_email, COALESCE(assignee_name, assignee) \
+         FROM linear_issues WHERE assignee_id IS NOT NULL ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, email, name) = row?;
+        let slot = out.entry(id).or_default();
+        first(&mut slot.0, email);
+        first(&mut slot.1, name);
+    }
+    let mut users =
+        conn.prepare("SELECT id, email, COALESCE(name, display_name) FROM linear_users")?;
+    let rows = users.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, email, name) = row?;
+        if let Some(slot) = out.get_mut(&id) {
+            first(&mut slot.0, email);
+            first(&mut slot.1, name);
+        }
     }
     Ok(out)
 }

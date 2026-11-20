@@ -26,10 +26,10 @@ fn resolver(map: &[(&str, &[&str])]) -> IdentityResolver {
 #[test]
 fn matches_by_email_ignoring_case() {
     let db = Database::open_in_memory().expect("db");
-    let ada = insert_author(db.connection(), "Ada Lovelace", "ada@flyr.com", "[]");
+    let ada = insert_author(db.connection(), "Ada Lovelace", "ada@example.com", "[]");
     let index = DeveloperIndex::load(db.connection(), resolver(&[])).expect("index");
     let hit = index
-        .match_identity(Some("ADA@Flyr.com"), Some("Ada L"))
+        .match_identity(Some("ADA@example.com"), Some("Ada L"))
         .expect("match");
     assert_eq!((hit.id, hit.rule), (ada, MatchRule::Email));
     assert_eq!(hit.name, "Ada Lovelace");
@@ -43,22 +43,22 @@ fn matches_by_stored_and_configured_alias() {
     let ada = insert_author(
         db.connection(),
         "Ada Lovelace",
-        "ada@flyr.com",
-        r#"["ada@pace.io", "ada-gh"]"#,
+        "ada@example.com",
+        r#"["ada@example.org", "ada-gh"]"#,
     );
-    let bob = insert_author(db.connection(), "Bob Smith", "bob@flyr.com", "[]");
+    let bob = insert_author(db.connection(), "Bob Smith", "bob@example.com", "[]");
     let index = DeveloperIndex::load(
         db.connection(),
-        resolver(&[("Bob Smith", &["bob@flyr.com", "robert@pace.io"])]),
+        resolver(&[("Bob Smith", &["bob@example.com", "robert@example.org"])]),
     )
     .expect("index");
 
     let stored = index
-        .match_identity(Some("Ada@Pace.io"), None)
+        .match_identity(Some("Ada@example.org"), None)
         .expect("stored alias");
     assert_eq!((stored.id, stored.rule), (ada, MatchRule::Alias));
     let configured = index
-        .match_identity(Some("robert@pace.io"), Some("Robert"))
+        .match_identity(Some("robert@example.org"), Some("Robert"))
         .expect("configured alias");
     assert_eq!((configured.id, configured.rule), (bob, MatchRule::Alias));
     // A provider login stored as a non-email alias.
@@ -70,14 +70,14 @@ fn matches_by_stored_and_configured_alias() {
 #[test]
 fn unmatched_identity_is_not_guessed() {
     let db = Database::open_in_memory().expect("db");
-    insert_author(db.connection(), "Ada Lovelace", "ada@flyr.com", "[]");
+    insert_author(db.connection(), "Ada Lovelace", "ada@example.com", "[]");
     let index = DeveloperIndex::load(
         db.connection(),
-        resolver(&[("Ada Lovelace", &["ada@flyr.com"])]),
+        resolver(&[("Ada Lovelace", &["ada@example.com"])]),
     )
     .expect("index");
     assert_eq!(
-        index.match_identity(Some("adah@flyr.com"), Some("Ada Lovelase")),
+        index.match_identity(Some("adah@example.com"), Some("Ada Lovelase")),
         None
     );
     let authors: i64 = db
@@ -92,7 +92,7 @@ fn unmatched_identity_is_not_guessed() {
 #[test]
 fn malformed_aliases_fail_the_load() {
     let db = Database::open_in_memory().expect("db");
-    let id = insert_author(db.connection(), "Ada", "ada@flyr.com", "not json");
+    let id = insert_author(db.connection(), "Ada", "ada@example.com", "not json");
     let Err(err) = DeveloperIndex::load(db.connection(), resolver(&[])) else {
         panic!("a malformed aliases list must fail the load");
     };

@@ -75,8 +75,9 @@ impl DeveloperIndex {
     /// when an author's `aliases` is not a JSON array of strings (the error
     /// names the row).
     pub fn load(conn: &Connection, resolver: IdentityResolver) -> Result<Self> {
-        let mut stmt =
-            conn.prepare("SELECT id, canonical_name, canonical_email, aliases FROM authors")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, canonical_name, canonical_email, aliases FROM authors ORDER BY id",
+        )?; // #272: deterministic first claimant
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,

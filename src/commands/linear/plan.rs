@@ -73,6 +73,16 @@ impl TeamPlan {
         1 + self.issue_pages() + self.history_walks()
     }
 
+    /// The call count as printed. #272 (D94): a first sync has no stored
+    /// issues to count, so its figure is a floor, never "about 1".
+    pub(crate) fn calls_label(&self) -> String {
+        if self.full_read == Some(FullRead::FirstSync) {
+            format!("unknown (at least {})", self.calls())
+        } else {
+            format!("about {}", self.calls())
+        }
+    }
+
     /// The stderr notice a sync prints before its first issue request, or
     /// `None` when the run reads neither the whole history nor `--history`.
     ///
@@ -92,10 +102,10 @@ impl TeamPlan {
             None => return None,
         };
         Some(format!(
-            "Linear sync ({}): {reason}; planned API calls: about {} \
+            "Linear sync ({}): {reason}; planned API calls: {} \
              (1 team + {} issue page(s) for {} stored issue(s), {ISSUES_PAGE_SIZE} per page{}).",
             self.team_key,
-            self.calls(),
+            self.calls_label(),
             self.issue_pages(),
             self.stored_issues,
             if self.history {
@@ -165,9 +175,18 @@ impl SyncPlan {
 
     /// The report `tga linear sync --plan` prints.
     pub(crate) fn render(&self) -> String {
+        // #272 (D94): any first-sync team makes the total a floor.
+        let total = if self
+            .teams
+            .iter()
+            .any(|t| t.full_read == Some(FullRead::FirstSync))
+        {
+            format!("unknown (at least {})", self.total_calls())
+        } else {
+            format!("about {}", self.total_calls())
+        };
         let mut out = format!(
-            "Linear sync plan: about {} API call(s) across {} team(s){}.\n",
-            self.total_calls(),
+            "Linear sync plan: {total} API call(s) across {} team(s){}.\n",
             self.teams.len(),
             if self.team_list_queries > 0 {
                 ", including 1 team-list query"
@@ -188,7 +207,7 @@ impl SyncPlan {
                 "  {:<10} {mode}: {} call(s) = 1 team + {} issue page(s) ({} stored issue(s)) \
                  + {} history walk(s)\n",
                 t.team_key,
-                t.calls(),
+                t.calls_label(),
                 t.issue_pages(),
                 t.stored_issues,
                 t.history_walks()

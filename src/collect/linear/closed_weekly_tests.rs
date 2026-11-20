@@ -58,8 +58,8 @@ fn rows(db: &Database) -> Vec<Row> {
 #[test]
 fn weeks_cross_the_year_boundary() {
     let mut db = Database::open_in_memory().expect("db");
-    let ada = insert_author(db.connection(), "Ada", "ada@flyr.com", "[]");
-    let a = Some(("Ada", "ada@flyr.com"));
+    let ada = insert_author(db.connection(), "Ada", "ada@example.com", "[]");
+    let a = Some(("Ada", "ada@example.com"));
     let c = db.connection();
     insert_issue(c, "PLA-1", "completed", Some("2025-12-29T10:00:00Z"), a);
     insert_issue(
@@ -118,8 +118,8 @@ fn weeks_cross_the_year_boundary() {
 #[test]
 fn canceled_issues_are_excluded() {
     let mut db = Database::open_in_memory().expect("db");
-    insert_author(db.connection(), "Ada", "ada@flyr.com", "[]");
-    let a = Some(("Ada", "ada@flyr.com"));
+    insert_author(db.connection(), "Ada", "ada@example.com", "[]");
+    let a = Some(("Ada", "ada@example.com"));
     let c = db.connection();
     insert_issue(c, "PLA-1", "completed", Some("2026-03-02T00:00:00Z"), a);
     insert_issue(c, "PLA-2", "canceled", Some("2026-03-02T00:00:00Z"), a);
@@ -130,7 +130,7 @@ fn canceled_issues_are_excluded() {
         "PLA-5",
         "completed",
         Some("2026-03-02T00:00:00Z"),
-        Some(("Zed Stranger", "zed@elsewhere.io")),
+        Some(("Zed Stranger", "zed@example.org")),
     );
 
     let idx = index(&db);
@@ -164,8 +164,8 @@ fn canceled_issues_are_excluded() {
 #[test]
 fn rebuild_is_idempotent() {
     let mut db = Database::open_in_memory().expect("db");
-    insert_author(db.connection(), "Ada", "ada@flyr.com", "[]");
-    let a = Some(("Ada", "ada@flyr.com"));
+    insert_author(db.connection(), "Ada", "ada@example.com", "[]");
+    let a = Some(("Ada", "ada@example.com"));
     insert_issue(
         db.connection(),
         "PLA-1",
@@ -199,13 +199,43 @@ fn rebuild_is_idempotent() {
     assert_eq!(rows(&db)[0].4, r#"["PLA-1"]"#);
 }
 
+/// #272 (D1f/D09): two issues of one Linear user, one carrying the email and
+/// one not, resolve once and credit one row.
+#[test]
+fn one_assignee_id_gives_one_row() {
+    let mut db = Database::open_in_memory().expect("db");
+    insert_author(db.connection(), "Ada Lovelace", "ada@example.com", "[]");
+    let c = db.connection();
+    insert_issue(
+        c,
+        "PLA-1",
+        "completed",
+        Some("2026-03-02T00:00:00Z"),
+        Some(("Ada", "ada@example.com")),
+    );
+    insert_issue(c, "PLA-2", "completed", Some("2026-03-03T00:00:00Z"), None);
+    c.execute(
+        "UPDATE linear_issues SET assignee_id = 'user-Ada', assignee_name = 'Ada' \
+         WHERE identifier = 'PLA-2'",
+        [],
+    )
+    .expect("same user, no email");
+
+    let idx = index(&db);
+    rebuild_closed_weekly(db.connection_mut(), &idx).expect("rebuild");
+    let got = rows(&db);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].1, "Ada Lovelace");
+    assert_eq!(got[0].4, r#"["PLA-1","PLA-2"]"#);
+}
+
 /// #272 (Fail-Open check): an unparseable `completed_at` fails the rebuild,
 /// names the issue, and leaves the previous rows in place.
 #[test]
 fn unparseable_completed_at_fails_and_keeps_rows() {
     let mut db = Database::open_in_memory().expect("db");
-    insert_author(db.connection(), "Ada", "ada@flyr.com", "[]");
-    let a = Some(("Ada", "ada@flyr.com"));
+    insert_author(db.connection(), "Ada", "ada@example.com", "[]");
+    let a = Some(("Ada", "ada@example.com"));
     insert_issue(
         db.connection(),
         "PLA-1",

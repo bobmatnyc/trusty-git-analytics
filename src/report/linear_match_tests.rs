@@ -58,9 +58,9 @@ fn commit(conn: &Connection, sha: &str, repo: &str, author_id: i64) {
 pub(crate) fn seeded() -> Database {
     let db = Database::open_in_memory().expect("db");
     let c = db.connection();
-    insert_author(c, "Ada Lovelace", "ada@flyr.com", r#"["ada-gh"]"#);
-    let bob = insert_author(c, "Bob Smith", "bob@flyr.com", "[]");
-    let cy = insert_author(c, "Cy Young", "cy@flyr.com", "[]");
+    insert_author(c, "Ada Lovelace", "ada@example.com", r#"["ada-gh"]"#);
+    let bob = insert_author(c, "Bob Smith", "bob@example.com", "[]");
+    let cy = insert_author(c, "Cy Young", "cy@example.com", "[]");
     // Ada: 2 PRs by login, one linked by attachment and title.
     insert_pr(
         c,
@@ -111,7 +111,7 @@ pub(crate) fn seeded() -> Database {
     // Cy commits in a bound repo and has no Linear user.
     commit(c, "s2", "rates", cy);
     // Closed issues: Ada (email), a stranger, one unassigned, one canceled.
-    let a = Some(("Ada L.", "ADA@flyr.com"));
+    let a = Some(("Ada L.", "ADA@example.com"));
     insert_issue(c, "PLA-1", "completed", Some("2026-03-03T00:00:00Z"), a);
     insert_issue(c, "PLA-3", "canceled", Some("2026-03-03T00:00:00Z"), a);
     insert_issue(
@@ -119,7 +119,7 @@ pub(crate) fn seeded() -> Database {
         "PLA-4",
         "completed",
         Some("2026-03-03T00:00:00Z"),
-        Some(("Zed Stranger", "zed@elsewhere.io")),
+        Some(("Zed Stranger", "zed@example.org")),
     );
     insert_issue(c, "PLA-5", "completed", Some("2026-03-03T00:00:00Z"), None);
     db

@@ -41,8 +41,25 @@ fn plan_arithmetic() {
     };
     assert_eq!(plan.total_calls(), 1 + (1 + 3 + 120) + (1 + 2));
     let text = plan.render();
-    assert!(text.starts_with("Linear sync plan: about 128 API call(s) across 2 team(s)"));
+    assert!(
+        text.starts_with("Linear sync plan: unknown (at least 128) API call(s) across 2 team(s)")
+    );
     assert!(text.contains("No issue was fetched"));
+}
+
+/// #272 (D94): a first sync's plan is a floor; it never prints "about 1".
+#[test]
+fn first_sync_plan_is_unknown_not_about_one() {
+    let plan = SyncPlan {
+        team_list_queries: 0,
+        teams: vec![team("PLA", 0, false, Some(FullRead::FirstSync))],
+    };
+    let text = plan.render();
+    assert!(!text.contains("about 1"), "{text}");
+    assert!(text.contains("unknown (at least 1)"), "{text}");
+    let notice = plan.teams[0].notice().expect("notice");
+    assert!(!notice.contains("about 1"), "{notice}");
+    assert!(notice.contains("at least"), "{notice}");
 }
 
 fn args(team: &str) -> LinearSyncArgs {
@@ -157,7 +174,7 @@ async fn sync_rebuilds_the_weekly_table() {
     let mut done = node("ENG-1", "2026-03-02T00:00:00.000Z", None);
     done["state"] = serde_json::json!({"name": "Done", "type": "completed"});
     done["completedAt"] = serde_json::json!("2026-03-02T00:00:00.000Z");
-    done["assignee"] = serde_json::json!({"id": "u1", "name": "Ada", "email": "ada@flyr.com"});
+    done["assignee"] = serde_json::json!({"id": "u1", "name": "Ada", "email": "ada@example.com"});
     Mock::given(method("POST"))
         .and(body_string_contains("\"eq\":\"ENG\""))
         .respond_with(page_response(vec![done], false, None))
@@ -166,7 +183,7 @@ async fn sync_rebuilds_the_weekly_table() {
     let mut db = Database::open_in_memory().expect("db");
     db.connection()
         .execute(
-            "INSERT INTO authors (canonical_name, canonical_email) VALUES ('Ada', 'ada@flyr.com')",
+            "INSERT INTO authors (canonical_name, canonical_email) VALUES ('Ada', 'ada@example.com')",
             [],
         )
         .expect("author");

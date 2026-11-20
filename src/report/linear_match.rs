@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::collect::linear::closed_weekly::closed_issues;
+use crate::collect::linear::closed_weekly::{assignee_identities, closed_issues};
 use crate::collect::linear::developer::DeveloperIndex;
 use crate::collect::pm_adapter::scope::bound_source;
 use crate::core::config::{split_github_slug, Config};
@@ -298,12 +298,17 @@ fn linear_identities(
 ) -> Result<(HashSet<i64>, Vec<String>)> {
     let mut matched = HashSet::new();
     let mut unmatched = BTreeSet::new();
+    // #272 (D1f/D09): an assignee with a Linear user id resolves once, the
+    // same way the weekly table does; rows without one use their own fields.
+    let mut identities: Vec<(Option<String>, Option<String>, i64)> = assignee_identities(conn)?
+        .into_values()
+        .map(|(e, n)| (e, n, 1))
+        .collect();
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT COALESCE(li.assignee_email, lu.email), \
-                COALESCE(li.assignee_name, lu.name, lu.display_name, li.assignee), 1 \
-         FROM linear_issues li LEFT JOIN linear_users lu ON lu.id = li.assignee_id \
-         WHERE li.assignee_id IS NOT NULL OR li.assignee_email IS NOT NULL \
-            OR li.assignee_name IS NOT NULL OR li.assignee IS NOT NULL \
+        "SELECT DISTINCT assignee_email, COALESCE(assignee_name, assignee), 1 \
+         FROM linear_issues WHERE assignee_id IS NULL \
+            AND (assignee_email IS NOT NULL OR assignee_name IS NOT NULL \
+                 OR assignee IS NOT NULL) \
          UNION \
          SELECT DISTINCT email, COALESCE(name, display_name), 0 FROM linear_users",
     )?;
@@ -315,7 +320,9 @@ fn linear_identities(
         ))
     })?;
     for row in rows {
-        let (email, name, is_assignee) = row?;
+        identities.push(row?);
+    }
+    for (email, name, is_assignee) in identities {
         match index.match_identity(email.as_deref(), name.as_deref()) {
             Some(m) => {
                 matched.insert(m.id);
