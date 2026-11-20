@@ -14,23 +14,20 @@
 //!    `github_repo`);
 //! 3. no match: the repo is unbound and every adapter scans it, as before.
 //!
-//! A bound repo is scanned only by its bound source's adapter.
+//! A bound repo is scanned only by its bound source's adapter, and the
+//! classify resolver queries only that source's sources for it.
 //! Test: `bound_repo_resolves_pla_to_linear_only`,
 //! `unbound_repo_keeps_todays_behaviour`, `binding_matches_label_or_owner`.
 
 use crate::collect::pm_adapter::PmSource;
 use crate::core::config::{split_github_slug, Config, RepositoryConfig};
 
-/// A repository's label as stored in `commits.repository`: `name`, else the
-/// path's basename, else the whole path.
+/// A repository's label as stored in `commits.repository`.
+///
+/// Delegates to [`crate::report::repo_name`], the one rule the extractor
+/// writes `commits.repository` with (#5453), so a binding matches stored rows.
 pub fn repo_label(repo: &RepositoryConfig) -> String {
-    repo.name.clone().unwrap_or_else(|| {
-        let path = crate::core::config::expand_path(&repo.path);
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| path.display().to_string())
-    })
+    crate::report::repo_name(repo.name.as_deref(), &repo.path)
 }
 
 /// The PM source `repository` is bound to, or `None` when it is unbound.

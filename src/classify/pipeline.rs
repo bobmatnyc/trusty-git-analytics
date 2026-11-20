@@ -709,12 +709,23 @@ impl ClassificationPipeline {
         // win).
         if let Some(res) = &resolver {
             let signals =
-                super::pipeline_external::resolve_external_signals(&commits, &overrides, res).await;
+                // #272: keyed by (PM scope, message); see `pipeline_external`.
+                super::pipeline_external::resolve_external_signals(
+                    &self.config,
+                    &commits,
+                    &overrides,
+                    res,
+                )
+                .await;
             for (idx, commit) in commits.iter().enumerate() {
                 if overrides.contains_key(&commit.id) {
                     continue;
                 }
-                if let Some(signal) = signals.get(commit.message.as_str()) {
+                let key = (
+                    super::pipeline_external::commit_scope(&self.config, &commit.repository),
+                    commit.message.clone(),
+                );
+                if let Some(signal) = signals.get(&key) {
                     let top_level = engine.taxonomy().resolve(&signal.category);
                     results[idx] = ClassificationResult {
                         category: signal.category.clone(),

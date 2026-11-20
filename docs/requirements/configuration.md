@@ -1044,15 +1044,13 @@ JIRA and Linear keys share the `KEY-N` shape, so a repo tracked in Linear can
 carry keys (`PLA-`, `DP-`, `FD-`) that collide with JIRA project prefixes.
 `linear.repos` binds repos to Linear. A bound repo's commits are scanned by
 the Linear lookup only; the JIRA, GitHub and Azure DevOps work-item adapters
-skip them. Precedence, first match wins:
+skip them, and the classify-stage external sources (`classification.sources`)
+query only Linear sources for them. Precedence, first match wins:
 
 1. an entry equal to the repository label (`name`, else the path basename);
 2. an entry equal to the repo's owner (`org`, else the owner half of
    `github_repo`), compared case-insensitively;
 3. no match: the repo is unbound and keeps today's behaviour.
-
-The classify-stage external sources (`classification.sources`) do not read
-this binding yet.
 
 ```yaml
 linear:

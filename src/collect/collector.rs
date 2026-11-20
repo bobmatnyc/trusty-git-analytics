@@ -600,15 +600,8 @@ impl CollectionPipeline {
         let conn = db.connection();
         for repo_cfg in &self.config.repositories {
             let path = expand_path(&repo_cfg.path);
-            let name = repo_cfg
-                .name
-                .clone()
-                .or_else(|| {
-                    path.file_name()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| path.display().to_string());
+            // #272: one label rule, shared with the per-repo PM scope.
+            let name = crate::collect::pm_adapter::scope::repo_label(repo_cfg);
 
             info!(repo = %name, "running reachability scan");
             match scan_and_persist(&path, conn, cfg, Some(&name)) {

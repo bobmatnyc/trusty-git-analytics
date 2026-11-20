@@ -78,6 +78,28 @@ enum SourceState {
     },
 }
 
+impl SourceState {
+    /// The PM system this source reads, or `None` for a non-PM source
+    /// (Confluence, Datadog).
+    fn pm_source(&self) -> Option<crate::collect::PmSource> {
+        use crate::collect::PmSource;
+        match self {
+            SourceState::Jira { .. } => Some(PmSource::Jira),
+            SourceState::GithubIssues { .. } => Some(PmSource::GitHub),
+            SourceState::Linear { .. } => Some(PmSource::Linear),
+            SourceState::Shortcut { .. }
+            | SourceState::Confluence { .. }
+            | SourceState::Datadog { .. } => None,
+        }
+    }
+
+    /// Whether this source may run under scope `only` (#272): always when
+    /// `only` is `None`, else only a source of that PM system.
+    fn allowed(&self, only: Option<crate::collect::PmSource>) -> bool {
+        only.is_none() || self.pm_source() == only
+    }
+}
+
 /// Per-run resolver that dispatches commit messages to configured external
 /// sources and caches the results.
 ///
@@ -262,7 +284,22 @@ impl ExternalSourceResolver {
     /// Test: covered by `tests::resolver_returns_jira_signal_when_configured`
     /// and `tests::resolver_returns_none_when_no_keys`.
     pub async fn resolve(&self, message: &str) -> Option<ExternalSignal> {
-        for state in &self.sources {
+        self.resolve_in_scope(message, None).await
+    }
+
+    /// [`Self::resolve`], limited to the sources of one PM system.
+    ///
+    /// Why: #272 — a repo bound to Linear (`linear.repos`) must resolve its
+    /// keys against Linear only; its `PLA-12` must never reach JIRA.
+    /// What: `only = None` walks every source, as [`Self::resolve`] does;
+    /// `Some(source)` skips every source whose PM system is not `source`.
+    /// Test: `pipeline_tests::pipeline_bound_repo_never_reaches_jira`.
+    pub async fn resolve_in_scope(
+        &self,
+        message: &str,
+        only: Option<crate::collect::PmSource>,
+    ) -> Option<ExternalSignal> {
+        for state in self.sources.iter().filter(|s| s.allowed(only)) {
             if let Some(signal) = self.resolve_source(message, state).await {
                 return Some(signal);
             }

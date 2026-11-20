@@ -52,8 +52,19 @@ impl ExternalSourceResolver {
     /// is now bounded-concurrent within each source).
     /// Test: `resolver_tests::warm_cache_dedupes_ticket_key_across_distinct_messages`.
     pub async fn warm_cache(&self, messages: &[String], concurrency: usize) {
+        self.warm_cache_in_scope(messages, concurrency, None).await;
+    }
+
+    /// [`Self::warm_cache`], limited to the sources of one PM system (#272);
+    /// see [`ExternalSourceResolver::resolve_in_scope`].
+    pub async fn warm_cache_in_scope(
+        &self,
+        messages: &[String],
+        concurrency: usize,
+        only: Option<crate::collect::PmSource>,
+    ) {
         let concurrency = concurrency.max(1);
-        for state in &self.sources {
+        for state in self.sources.iter().filter(|s| s.allowed(only)) {
             warm_source(
                 &self.client,
                 state,
