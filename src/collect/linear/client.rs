@@ -13,6 +13,7 @@
 //! network (#5664).
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use reqwest::Client;
 use trusty_common::credentials::scrub_secrets;
@@ -23,6 +24,7 @@ pub use super::bulk::LinearIssuesPage;
 pub use super::issue::LinearIssue;
 use super::issue::{parse_issue_node, ISSUE_FIELDS};
 pub use super::store::store_linear_issues;
+use super::workspace::{ensure_read_only, WorkspaceGuard};
 use crate::collect::errors::{CollectError, Result};
 // #7139: shared with JIRA — see the `retry`/`budget` field doc on
 // `LinearClient` for why this is reuse, not a JIRA-specific dependency.
@@ -66,6 +68,9 @@ pub struct LinearClient {
     /// Whole-run backoff allowance shared by every bulk-page request this
     /// client makes. See [`crate::collect::jira::retry::RetryBudget`].
     pub(super) budget: RetryBudget,
+    /// #272: the `linear.workspace` guard, checked before every request;
+    /// `None` when the key is unset.
+    pub(super) guard: Option<Arc<WorkspaceGuard>>,
 }
 
 /// What [`LinearClient`]'s `Debug` prints in place of the API key.
@@ -124,7 +129,32 @@ impl LinearClient {
             endpoint: LINEAR_GRAPHQL_URL.to_string(),
             retry,
             budget,
+            // #272: one guard per client, so one org query per run.
+            guard: WorkspaceGuard::from_config(config.workspace.as_deref()),
         })
+    }
+
+    /// Check a GraphQL document before it is sent.
+    ///
+    /// Why: #272 — every Linear request must be read-only and, when
+    /// `linear.workspace` is set, go to the configured workspace only.
+    /// What: rejects a non-query document, then runs the workspace guard
+    /// (one org query per client; the cached verdict afterwards).
+    /// Test: `fetch_issue_is_guarded_and_fails_closed_on_mismatch`,
+    /// `read_only_check_rejects_mutations`.
+    ///
+    /// # Errors
+    ///
+    /// [`CollectError::LinearWorkspace`] when the document is not a query,
+    /// the workspace differs, or the org query fails.
+    pub(super) async fn preflight(&self, document: &str) -> Result<()> {
+        ensure_read_only(document)?;
+        if let Some(guard) = &self.guard {
+            guard
+                .verify(&self.client, &self.endpoint, &self.api_key)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Override the retry schedule used by bulk-page reads.
@@ -180,6 +210,8 @@ impl LinearClient {
         // carries `linear_id` and the raw node too.
         let query = format!(r#"query {{ issue(id: "{identifier}") {{ {ISSUE_FIELDS} }} }}"#);
 
+        // #272: read-only and workspace guard before the request.
+        self.preflight(&query).await?;
         let body = serde_json::json!({ "query": query });
 
         let resp = self
@@ -690,6 +722,7 @@ mod tests {
             endpoint: PROBE_ENDPOINT.to_string(),
             retry,
             budget,
+            guard: None,
         }
     }
 

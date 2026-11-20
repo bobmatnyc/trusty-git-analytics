@@ -805,6 +805,8 @@ impl PmAdapter for AzureDevOpsAdapter {
 
 mod factory;
 pub use factory::build_adapters;
+// #272: per-repo PM scope (`linear.repos`).
+pub mod scope;
 use factory::{azdo_err_to_pm, collect_err_to_pm};
 
 #[cfg(test)]

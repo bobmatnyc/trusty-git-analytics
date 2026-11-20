@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 use crate::collect::collector::CollectionStats;
-use crate::collect::pm_adapter::{build_adapters, PmAdapter, PmSource, PmTicket};
+use crate::collect::pm_adapter::{build_adapters, scope, PmAdapter, PmSource, PmTicket};
 use crate::core::config::Config;
 use crate::core::db::{Database, WorkItemRow};
 
@@ -101,19 +101,45 @@ pub(super) async fn fetch_and_persist_work_items(
     };
 
     for adapter in &adapters {
-        run_one_adapter(db, adapter.as_ref(), &commits, stats).await;
+        // #272: a repo bound to another PM source is not this adapter's.
+        let scoped = scope_commits(config, &commits, adapter.source());
+        run_one_adapter(db, adapter.as_ref(), &scoped, stats).await;
     }
 }
 
-/// Every `(sha, message)` pair in the `commits` table.
+/// The `(sha, message)` pairs an adapter for `source` may resolve.
+///
+/// Why: #272 — a repo bound to Linear (`linear.repos`) must not have its
+/// `PLA-12` looked up in JIRA. What: drops commits whose repository
+/// [`scope::in_scope`] rejects for `source`; an unbound repo keeps every
+/// commit, as before.
+/// Test: `a_bound_repo_is_hidden_from_jira_only`.
+fn scope_commits(
+    config: &Config,
+    commits: &[(String, String, String)],
+    source: PmSource,
+) -> Vec<(String, String)> {
+    commits
+        .iter()
+        .filter(|(_, _, repo)| scope::in_scope(config, repo, source))
+        .map(|(sha, message, _)| (sha.clone(), message.clone()))
+        .collect()
+}
+
+/// Every `(sha, message, repository)` triple in the `commits` table.
 ///
 /// The SHA is what `commit_work_items` needs; reading messages alone would make
-/// a per-commit link impossible even once the tickets were known.
-fn read_commits(db: &Database) -> crate::core::Result<Vec<(String, String)>> {
+/// a per-commit link impossible even once the tickets were known. The
+/// repository drives the #272 per-repo PM scope.
+fn read_commits(db: &Database) -> crate::core::Result<Vec<(String, String, String)>> {
     let conn = db.connection();
-    let mut stmt = conn.prepare("SELECT sha, message FROM commits")?;
+    let mut stmt = conn.prepare("SELECT sha, message, repository FROM commits")?;
     let mapped = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
     let mut out = Vec::new();
     for row in mapped {
@@ -920,5 +946,28 @@ pm:
         fetch_and_persist_work_items(&mut db, &config, &mut stats).await;
 
         assert!(stats.errors.is_empty(), "faults: {:?}", stats.errors);
+    }
+
+    /// #272: `PLA-12` in a Linear-bound repo never reaches the JIRA adapter;
+    /// the same key in an unbound repo still does, and Linear sees both.
+    #[test]
+    fn a_bound_repo_is_hidden_from_jira_only() {
+        let config: Config = serde_yaml::from_str(
+            "repositories:\n  - path: /src/pla-app\n    org: pacerevenue\n\
+             linear:\n  repos: [pacerevenue]\n",
+        )
+        .expect("yaml parses");
+        let commits = vec![
+            ("s1".into(), "PLA-12 fix".into(), "pla-app".into()),
+            ("s2".into(), "PLA-12 fix".into(), "duetto".into()),
+        ];
+        let shas = |source| -> Vec<String> {
+            scope_commits(&config, &commits, source)
+                .into_iter()
+                .map(|(sha, _)| sha)
+                .collect()
+        };
+        assert_eq!(shas(PmSource::Jira), vec!["s2".to_string()]);
+        assert_eq!(shas(PmSource::Linear), vec!["s1".to_string(), "s2".into()]);
     }
 }

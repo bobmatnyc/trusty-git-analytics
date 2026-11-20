@@ -79,6 +79,8 @@ impl fmt::Debug for LinearConfig {
             ticket_regex,
             stats,
             sync_on_collect,
+            workspace,
+            repos,
         } = self;
         f.debug_struct("LinearConfig")
             .field("api_key", &mask(api_key.as_ref()))
@@ -87,6 +89,8 @@ impl fmt::Debug for LinearConfig {
             .field("ticket_regex", ticket_regex)
             .field("stats", stats)
             .field("sync_on_collect", sync_on_collect)
+            .field("workspace", workspace)
+            .field("repos", repos)
             .finish()
     }
 }

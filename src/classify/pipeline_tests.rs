@@ -807,3 +807,92 @@ fn source_aware_default_model_selection() {
         );
     }
 }
+
+/// Why: #272 — a repo bound to Linear (`linear.repos`) must resolve its
+/// ticket keys against Linear only. FLYR's `PLA-` collides with a JIRA prefix.
+/// What: a JIRA source is configured; `PLA-12` in the bound repo `pla-app`
+/// must never be fetched from JIRA (`expect(0)`), while `PLA-13` in the
+/// unbound repo `duetto` still is (`expect(1)`), as before.
+/// Test: in-memory DB + wiremock; no LLM tier.
+#[tokio::test]
+async fn pipeline_bound_repo_never_reaches_jira() {
+    use crate::classify::sources::{
+        ExternalSourceResolver, JiraFieldMappings, JiraSourceConfig, SourceConfig,
+    };
+    use std::collections::HashMap;
+
+    let server = MockServer::start().await;
+    let issue = |key: &str| {
+        serde_json::json!({
+            "key": key,
+            "fields": { "issuetype": {"name": "Bug"}, "labels": [], "components": [] }
+        })
+    };
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PLA-12"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(issue("PLA-12")))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PLA-13"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(issue("PLA-13")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let jira = JiraSourceConfig {
+        base_url: server.uri(),
+        token_env: "JIRA_TOKEN_272".to_string(),
+        username: None,
+        email_env: None,
+        project_keys: vec![],
+        field_mappings: JiraFieldMappings {
+            issue_type: HashMap::from([("Bug".to_string(), "bug_fix".to_string())]),
+            labels: HashMap::new(),
+            components: HashMap::new(),
+        },
+    };
+    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(jira)])
+        .unwrap()
+        .with_jira_base_url(0, server.uri())
+        .with_credentials([("JIRA_TOKEN_272", "test-token")]);
+
+    let db_insert = |db: &Database, sha: &str, message: &str, repo: &str| {
+        db.connection()
+            .execute(
+                "INSERT INTO commits \
+                 (sha, author_name, author_email, timestamp, message, repository) \
+                 VALUES (?1, 'a', 'a@x', '2024-01-01T00:00:00Z', ?2, ?3)",
+                params![sha, message, repo],
+            )
+            .expect("insert commit");
+    };
+    let mut db = Database::open_in_memory().expect("db");
+    db_insert(&db, "sha-bound", "PLA-12 tune the rates", "pla-app");
+    db_insert(&db, "sha-free", "PLA-13 tune the rates", "duetto");
+
+    let config: Config =
+        serde_yaml::from_str("linear:\n  repos: [pla-app]\n").expect("yaml parses");
+    let engine = ClassificationEngine::new(default_rules(), ClassificationEngineConfig::default())
+        .expect("engine");
+    ClassificationPipeline::new(config)
+        .run_with_engine_and_resolver(&mut db, engine, Some(resolver))
+        .await
+        .expect("run with resolver");
+
+    let method_of = |sha: &str| -> String {
+        db.connection()
+            .query_row(
+                "SELECT cl.method FROM classifications cl \
+                 JOIN commits c ON c.classification_id = cl.id WHERE c.sha = ?1",
+                params![sha],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|e| panic!("query {sha}: {e}"))
+    };
+    assert_ne!(method_of("sha-bound"), "external_source");
+    assert_eq!(method_of("sha-free"), "external_source");
+    // Dropping the server asserts PLA-12 was fetched 0 times, PLA-13 once.
+    drop(server);
+}

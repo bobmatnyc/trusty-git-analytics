@@ -20,7 +20,7 @@
 //! mock-HTTP integration tests.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tracing::{debug, warn};
 
@@ -30,6 +30,7 @@ use super::{
     jira, linear, shortcut, ExternalSignal, SourceConfig,
 };
 use crate::classify::errors::ClassifyError;
+use crate::collect::linear::WorkspaceGuard;
 use crate::core::creds::CredentialSource;
 
 mod warm;
@@ -77,6 +78,28 @@ enum SourceState {
     },
 }
 
+impl SourceState {
+    /// The PM system this source reads, or `None` for a non-PM source
+    /// (Confluence, Datadog).
+    fn pm_source(&self) -> Option<crate::collect::PmSource> {
+        use crate::collect::PmSource;
+        match self {
+            SourceState::Jira { .. } => Some(PmSource::Jira),
+            SourceState::GithubIssues { .. } => Some(PmSource::GitHub),
+            SourceState::Linear { .. } => Some(PmSource::Linear),
+            SourceState::Shortcut { .. }
+            | SourceState::Confluence { .. }
+            | SourceState::Datadog { .. } => None,
+        }
+    }
+
+    /// Whether this source may run under scope `only` (#272): always when
+    /// `only` is `None`, else only a source of that PM system.
+    fn allowed(&self, only: Option<crate::collect::PmSource>) -> bool {
+        only.is_none() || self.pm_source() == only
+    }
+}
+
 /// Per-run resolver that dispatches commit messages to configured external
 /// sources and caches the results.
 ///
@@ -100,6 +123,9 @@ pub struct ExternalSourceResolver {
     /// #6405: where every source's token comes from. The process environment
     /// in production; a fixed table in tests, so no test has to `set_var`.
     creds: CredentialSource,
+    /// #272: the `linear.workspace` guard shared by every Linear lookup;
+    /// `None` when the key is unset.
+    linear_guard: Option<Arc<WorkspaceGuard>>,
 }
 
 impl ExternalSourceResolver {
@@ -158,7 +184,67 @@ impl ExternalSourceResolver {
             sources: states,
             github_budget: crate::collect::github::budget::FetchBudget::new(),
             creds: CredentialSource::from_env(),
+            linear_guard: None,
         })
+    }
+
+    /// Guard every Linear lookup with `linear.workspace` (#272).
+    ///
+    /// `None` or a blank value leaves the resolver unguarded, as before.
+    #[must_use]
+    pub fn with_linear_workspace(mut self, workspace: Option<&str>) -> Self {
+        self.linear_guard = WorkspaceGuard::from_config(workspace);
+        self
+    }
+
+    /// Run the Linear workspace guard once, before any lookup.
+    ///
+    /// Why: #272 — a key for the wrong workspace must fail the run, not
+    /// degrade to "no Linear signal". Per-commit lookups return `Option`, so
+    /// the pipeline calls this first to turn a refusal into an error.
+    /// What: no-op without a guard or without a Linear source. Otherwise
+    /// verifies EVERY Linear source's token against its endpoint; the guard
+    /// caches one verdict per token for every later lookup. A missing token
+    /// is a failed check, not a skipped one.
+    /// Test: `resolver_tests::resolver_workspace_guard_fails_closed`.
+    ///
+    /// # Errors
+    ///
+    /// [`ClassifyError::LinearWorkspace`] on a mismatch or a failed check.
+    pub async fn verify_linear_workspace(&self) -> Result<(), ClassifyError> {
+        let Some(guard) = &self.linear_guard else {
+            return Ok(());
+        };
+        // #272: every Linear source, so a second token cannot ride on the
+        // first one's pass.
+        for state in &self.sources {
+            let SourceState::Linear {
+                config,
+                api_base_override,
+                ..
+            } = state
+            else {
+                continue;
+            };
+            let token = self.creds.get(&config.api_key_env).ok_or_else(|| {
+                crate::collect::linear::WorkspaceGuardError::Unverified {
+                    expected: guard.expected().to_string(),
+                    reason: format!("Linear API key env var `{}` is not set", config.api_key_env),
+                }
+            })?;
+            let base = api_base_override
+                .as_deref()
+                .unwrap_or("https://api.linear.app");
+            guard
+                .verify(&self.client, &format!("{base}/graphql"), &token)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The Linear workspace guard, if any (#272).
+    pub(crate) fn linear_guard(&self) -> Option<&WorkspaceGuard> {
+        self.linear_guard.as_deref()
     }
 
     /// The GitHub fetch budget this resolver's sources share (#6084).
@@ -204,7 +290,22 @@ impl ExternalSourceResolver {
     /// Test: covered by `tests::resolver_returns_jira_signal_when_configured`
     /// and `tests::resolver_returns_none_when_no_keys`.
     pub async fn resolve(&self, message: &str) -> Option<ExternalSignal> {
-        for state in &self.sources {
+        self.resolve_in_scope(message, None).await
+    }
+
+    /// [`Self::resolve`], limited to the sources of one PM system.
+    ///
+    /// Why: #272 — a repo bound to Linear (`linear.repos`) must resolve its
+    /// keys against Linear only; its `PLA-12` must never reach JIRA.
+    /// What: `only = None` walks every source, as [`Self::resolve`] does;
+    /// `Some(source)` skips every source whose PM system is not `source`.
+    /// Test: `pipeline_tests::pipeline_bound_repo_never_reaches_jira`.
+    pub async fn resolve_in_scope(
+        &self,
+        message: &str,
+        only: Option<crate::collect::PmSource>,
+    ) -> Option<ExternalSignal> {
+        for state in self.sources.iter().filter(|s| s.allowed(only)) {
             if let Some(signal) = self.resolve_source(message, state).await {
                 return Some(signal);
             }
@@ -382,6 +483,8 @@ impl ExternalSourceResolver {
                     &filtered,
                     api_base_override.as_deref(),
                     &self.creds,
+                    // #272: the per-commit path is guarded too.
+                    self.linear_guard(),
                 )
                 .await;
 

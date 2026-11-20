@@ -1,0 +1,3 @@
+Added
+- `linear.workspace`: optional expected Linear workspace `urlKey`. When set, every Linear client (`tga linear *`, collect lookups and bulk sync, the classify `linear` source) reads `organization { urlKey }` once per API key per Linear client or resolver and fails the command, naming both urlKeys, if the key belongs to another workspace or the check fails. Every Linear GraphQL document is checked to be a read-only query before it is sent (#272).
+- `linear.repos`: bind repositories, by label or owner, to Linear. A bound repo's ticket keys are no longer looked up by the JIRA, GitHub or Azure DevOps work-item adapters, so `PLA-12` in a Linear repo cannot resolve to a JIRA issue (#272).

@@ -211,7 +211,9 @@ pub(super) fn report_coverage(stats: &ClassificationStats, threshold_pct: f64) {
 }
 
 /// Minimal projection of a commit row needed for classification.
+// #272: `Clone` so external resolution can group rows by PM scope.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub(super) struct CommitRow {
     pub(super) id: i64,
     pub(super) sha: String,

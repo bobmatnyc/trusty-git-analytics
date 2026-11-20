@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::{ExternalSignal, LinearSourceConfig, EXTERNAL_SOURCE_CONFIDENCE};
+use crate::collect::linear::{ensure_read_only, WorkspaceGuard};
 use crate::core::creds::CredentialSource;
 
 /// Linear-specific confidence — same as the global constant (issue type is
@@ -224,13 +225,16 @@ pub fn classify_issue(issue: &LinearIssue, config: &LinearSourceConfig) -> Optio
 /// What: issues a `POST {base_url}/graphql` with a Personal API Key in the
 /// `Authorization` header and a minimal GraphQL query for the issue fields
 /// used by classification. Returns `None` on any error or when the token env
-/// var is unset.
-/// Test: integration-tested via the resolver with wiremock.
+/// var is unset. With a `guard` (#272), no issue query is sent unless the
+/// key's workspace matches; a mismatch or failed check returns `None`.
+/// Test: integration-tested via the resolver with wiremock;
+/// `resolver_tests::classify_fetch_issue_is_guarded`.
 pub async fn fetch_issue(
     client: &reqwest::Client,
     config: &LinearSourceConfig,
     key: &str,
     base_url_override: Option<&str>,
+    guard: Option<&WorkspaceGuard>,
 ) -> Option<LinearIssue> {
     fetch_issue_with_creds(
         client,
@@ -238,6 +242,7 @@ pub async fn fetch_issue(
         key,
         base_url_override,
         &CredentialSource::from_env(),
+        guard,
     )
     .await
 }
@@ -255,6 +260,7 @@ pub(crate) async fn fetch_issue_with_creds(
     key: &str,
     base_url_override: Option<&str>,
     creds: &CredentialSource,
+    guard: Option<&WorkspaceGuard>,
 ) -> Option<LinearIssue> {
     let token = match creds.get(&config.api_key_env) {
         Some(t) => t,
@@ -272,6 +278,20 @@ pub(crate) async fn fetch_issue_with_creds(
     let url = format!("{base}/graphql");
 
     let body = issue_query(key);
+
+    // #272: read-only, then the workspace guard, before the issue query. The
+    // pipeline already failed the run on a refused guard; this arm keeps the
+    // per-commit path from reading another workspace if called directly.
+    if let Err(e) = ensure_read_only(body["query"].as_str().unwrap_or_default()) {
+        warn!(key, error = %e, "Linear request refused");
+        return None;
+    }
+    if let Some(guard) = guard {
+        if let Err(e) = guard.verify(client, &url, &token).await {
+            warn!(key, error = %e, "Linear workspace guard refused the lookup");
+            return None;
+        }
+    }
 
     let resp = match client
         .post(&url)
@@ -326,6 +346,7 @@ pub async fn fetch_issues_batch(
     config: &LinearSourceConfig,
     keys: &[String],
     base_url_override: Option<&str>,
+    guard: Option<&WorkspaceGuard>,
 ) -> HashMap<String, Option<ExternalSignal>> {
     fetch_issues_batch_with_creds(
         client,
@@ -333,6 +354,7 @@ pub async fn fetch_issues_batch(
         keys,
         base_url_override,
         &CredentialSource::from_env(),
+        guard,
     )
     .await
 }
@@ -345,13 +367,15 @@ pub(crate) async fn fetch_issues_batch_with_creds(
     keys: &[String],
     base_url_override: Option<&str>,
     creds: &CredentialSource,
+    guard: Option<&WorkspaceGuard>,
 ) -> HashMap<String, Option<ExternalSignal>> {
     let mut out = HashMap::new();
     for key in keys {
         if out.contains_key(key) {
             continue;
         }
-        let issue = fetch_issue_with_creds(client, config, key, base_url_override, creds).await;
+        let issue =
+            fetch_issue_with_creds(client, config, key, base_url_override, creds, guard).await;
         let signal = issue.and_then(|iss| classify_issue(&iss, config));
         out.insert(key.clone(), signal);
     }
@@ -638,9 +662,16 @@ field_mappings:
         };
 
         let client = reqwest::Client::new();
-        let issue = fetch_issue_with_creds(&client, &config, "ENG-99", Some(&server.uri()), &creds)
-            .await
-            .expect("fetch should succeed");
+        let issue = fetch_issue_with_creds(
+            &client,
+            &config,
+            "ENG-99",
+            Some(&server.uri()),
+            &creds,
+            None,
+        )
+        .await
+        .expect("fetch should succeed");
 
         let signal = classify_issue(&issue, &config).expect("should classify");
         assert_eq!(signal.category, "bug_fix");
@@ -666,9 +697,70 @@ field_mappings:
             },
         };
         let client = reqwest::Client::new();
-        let issue =
-            fetch_issue_with_creds(&client, &config, "ENG-1", None, &CredentialSource::empty())
-                .await;
+        let issue = fetch_issue_with_creds(
+            &client,
+            &config,
+            "ENG-1",
+            None,
+            &CredentialSource::empty(),
+            None,
+        )
+        .await;
         assert!(issue.is_none(), "unset token must skip the lookup");
+    }
+    /// Why: #272 — the per-commit classify lookup must not read a workspace
+    /// other than `linear.workspace`, even when called outside the pipeline.
+    /// What: a guard expecting `pace` against an org answering `other` yields
+    /// `None` and sends no issue query; answering `pace`, the issue resolves.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn classify_fetch_issue_is_guarded() {
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (org, want_issue) in [("other", false), ("pace", true)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(body_string_contains("organization"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"data": {"organization": {"urlKey": org}}}),
+                    ),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(body_string_contains("issue(id:"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": {"issue": {"identifier": "PLA-12", "type": null,
+                                       "labels": {"nodes": []}, "cycle": null}}
+                })))
+                .mount(&server)
+                .await;
+            let creds = CredentialSource::fixed([("LINEAR_API_TOKEN_G", "test-token")]); // pragma: allowlist secret
+            let config = LinearSourceConfig {
+                api_key_env: "LINEAR_API_TOKEN_G".to_string(), // pragma: allowlist secret
+                ..LinearSourceConfig::default()
+            };
+            let guard = WorkspaceGuard::new("pace");
+            let issue = fetch_issue_with_creds(
+                &reqwest::Client::new(),
+                &config,
+                "PLA-12",
+                Some(&server.uri()),
+                &creds,
+                Some(&guard),
+            )
+            .await;
+            assert_eq!(issue.is_some(), want_issue, "org {org}");
+            let issue_queries = server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .filter(|r| String::from_utf8_lossy(&r.body).contains("issue(id:"))
+                .count();
+            assert_eq!(issue_queries, usize::from(want_issue), "org {org}");
+        }
     }
 }

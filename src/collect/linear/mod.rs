@@ -16,6 +16,8 @@ pub mod issue;
 pub(crate) mod projection;
 pub mod store;
 pub mod sync;
+// #272: workspace guard and read-only check.
+pub mod workspace;
 
 pub use activity::{ActivityKind, ActivityTarget};
 pub use bulk::{IssueQuery, LinearTeam};
@@ -24,3 +26,4 @@ pub use entities::EntityKind;
 pub use store::{
     plan_linear_issues, upsert_linear_issues, upsert_linear_issues_in, ChangeCounts, IssueChange,
 };
+pub use workspace::{ensure_read_only, WorkspaceGuard, WorkspaceGuardError};

@@ -216,6 +216,12 @@ pub enum CollectError {
         message: String,
     },
 
+    /// A Linear request was refused before it was sent (#272): the API key
+    /// belongs to a workspace other than `linear.workspace`, the workspace
+    /// check itself failed, or the document was not a read-only query.
+    #[error(transparent)]
+    LinearWorkspace(#[from] crate::collect::linear::WorkspaceGuardError),
+
     /// A Linear GraphQL `issues` bulk-page call returned a non-success
     /// status, with its body kept (issue #7139).
     ///

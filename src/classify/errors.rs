@@ -46,6 +46,10 @@ pub enum ClassifyError {
     /// invalid (e.g. unbuildable LLM provider).
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// The Linear workspace guard refused the run (#272).
+    #[error(transparent)]
+    LinearWorkspace(#[from] crate::collect::linear::WorkspaceGuardError),
 }
 
 /// Module-wide `Result` alias.

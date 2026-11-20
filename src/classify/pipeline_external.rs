@@ -45,6 +45,20 @@ use tracing::info;
 use super::pipeline_db::CommitRow;
 use super::sources::{ExternalSignal, ExternalSourceResolver};
 use super::tiers::ClassificationResult;
+use crate::collect::pm_adapter::scope;
+use crate::collect::PmSource;
+use crate::core::config::Config;
+
+/// A resolved signal's key: the commit's PM scope and its message (#272).
+///
+/// The scope is part of the key because one message text can occur in a
+/// Linear-bound repo and in an unbound one, and the two resolve differently.
+pub(super) type SignalKey = (Option<PmSource>, String);
+
+/// The PM scope of a commit's repository (#272): `None` when unbound.
+pub(super) fn commit_scope(config: &Config, repository: &str) -> Option<PmSource> {
+    scope::bound_source(config, repository)
+}
 
 /// Maximum number of external-source lookups in flight at once.
 ///
@@ -82,9 +96,41 @@ const PROGRESS_LOG_EVERY: usize = 50;
 /// Test: `pipeline_tests::pipeline_external_sources_dedupe_and_apply` and
 /// `pipeline_external_sources_dedupe_distinct_messages_same_ticket`.
 pub(super) async fn resolve_external_signals(
+    config: &Config,
     commits: &[CommitRow],
     overrides: &HashMap<i64, ClassificationResult>,
     resolver: &ExternalSourceResolver,
+) -> HashMap<SignalKey, ExternalSignal> {
+    // #272: one pass per PM scope, so a Linear-bound repo's commits only ever
+    // reach Linear sources. Unbound commits form the `None` pass, unchanged.
+    let mut scopes: Vec<Option<PmSource>> = Vec::new();
+    for c in commits {
+        let s = commit_scope(config, &c.repository);
+        if !scopes.contains(&s) {
+            scopes.push(s);
+        }
+    }
+    let mut out = HashMap::new();
+    for only in scopes {
+        let group: Vec<CommitRow> = commits
+            .iter()
+            .filter(|c| commit_scope(config, &c.repository) == only)
+            .cloned()
+            .collect();
+        for (message, signal) in resolve_scope(&group, overrides, resolver, only).await {
+            out.insert((only, message), signal);
+        }
+    }
+    out
+}
+
+/// One scope's pass of [`resolve_external_signals`]: warm, then resolve,
+/// against the sources `only` allows.
+async fn resolve_scope(
+    commits: &[CommitRow],
+    overrides: &HashMap<i64, ClassificationResult>,
+    resolver: &ExternalSourceResolver,
+    only: Option<PmSource>,
 ) -> HashMap<String, ExternalSignal> {
     // Dedupe BEFORE spawning: firing one future per commit would launch
     // duplicate in-flight requests for the same ticket; collapsing to unique
@@ -100,7 +146,7 @@ pub(super) async fn resolve_external_signals(
     // bounded-concurrent. This is what actually prevents the duplicate-fetch
     // race — message-level dedupe alone does not (code-critic HIGH, PR #2720).
     resolver
-        .warm_cache(&unique, EXTERNAL_SOURCE_CONCURRENCY)
+        .warm_cache_in_scope(&unique, EXTERNAL_SOURCE_CONCURRENCY, only)
         .await;
 
     let total = unique.len();
@@ -113,7 +159,7 @@ pub(super) async fn resolve_external_signals(
     // each `resolve` call below performs no network I/O — safe to fan out
     // concurrently purely for progress-reporting granularity.
     let map = resolve_unique(unique, EXTERNAL_SOURCE_CONCURRENCY, |message| async move {
-        let signal = resolver.resolve(&message).await;
+        let signal = resolver.resolve_in_scope(&message, only).await;
         pb_ref.inc(1);
         let n = done_ref.fetch_add(1, Ordering::Relaxed) + 1;
         if n.is_multiple_of(PROGRESS_LOG_EVERY) || n == total {

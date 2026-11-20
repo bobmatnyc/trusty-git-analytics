@@ -158,6 +158,10 @@ impl LinearClient {
         scope: &str,
         page: usize,
     ) -> Result<serde_json::Value> {
+        // #272: read-only and workspace guard; a body with no query string
+        // fails the read-only check rather than skipping it.
+        self.preflight(body["query"].as_str().unwrap_or_default())
+            .await?;
         let resp = self
             .client
             .post(&self.endpoint)
