@@ -72,14 +72,19 @@ impl Serialize for LinearConfig {
             ticket_regex,
             stats,
             sync_on_collect,
+            workspace,
+            repos,
         } = self;
-        let mut s = serializer.serialize_struct("LinearConfig", 6)?;
+        let mut s = serializer.serialize_struct("LinearConfig", 8)?;
         s.serialize_field("api_key", &mask(api_key.as_ref()))?;
         s.serialize_field("team_keys", team_keys)?;
         s.serialize_field("fetch_on_reference", fetch_on_reference)?;
         s.serialize_field("ticket_regex", ticket_regex)?;
         s.serialize_field("stats", stats)?;
         s.serialize_field("sync_on_collect", sync_on_collect)?;
+        // #272: the two scope keys carry no secret.
+        s.serialize_field("workspace", workspace)?;
+        s.serialize_field("repos", repos)?;
         s.end()
     }
 }

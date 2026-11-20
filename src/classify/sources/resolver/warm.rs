@@ -61,6 +61,7 @@ impl ExternalSourceResolver {
                 concurrency,
                 self.github_budget(),
                 self.creds(),
+                self.linear_guard(),
             )
             .await;
         }
@@ -83,6 +84,7 @@ async fn warm_source(
     concurrency: usize,
     github_budget: &FetchBudget,
     creds: &CredentialSource,
+    linear_guard: Option<&crate::collect::linear::WorkspaceGuard>,
 ) {
     match state {
         SourceState::Jira {
@@ -193,6 +195,8 @@ async fn warm_source(
                         std::slice::from_ref(&k),
                         api_base_override,
                         creds,
+                        // #272: the warm pass is guarded too.
+                        linear_guard,
                     )
                     .await;
                     result.remove(&k)

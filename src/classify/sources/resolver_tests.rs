@@ -258,3 +258,48 @@ async fn resolver_times_out_on_stalled_server_255() {
         "resolver returned after {elapsed:?}; expected the 30 s timeout to end it"
     );
 }
+
+/// Why: #272 — a Linear key for the wrong workspace must fail the classify
+/// run, and an unset `linear.workspace` must send no org query.
+/// What: org `other` fails `verify_linear_workspace` naming both urlKeys;
+/// org `pace` passes; no guard sends nothing.
+/// Test: this test itself.
+#[tokio::test]
+async fn resolver_workspace_guard_fails_closed() {
+    use crate::classify::sources::LinearSourceConfig;
+    for (org, workspace, ok, org_queries) in [
+        ("other", Some("pace"), false, 1),
+        ("pace", Some("pace"), true, 1),
+        ("other", None, true, 0),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": {"organization": {"urlKey": org}}})),
+            )
+            .mount(&server)
+            .await;
+        let config = LinearSourceConfig {
+            api_key_env: "LINEAR_API_TOKEN_R".to_string(), // pragma: allowlist secret
+            ..LinearSourceConfig::default()
+        };
+        let resolver = ExternalSourceResolver::new(&[SourceConfig::Linear(config)])
+            .unwrap()
+            .with_linear_api_base(0, server.uri())
+            .with_credentials([("LINEAR_API_TOKEN_R", "test-token")]) // pragma: allowlist secret
+            .with_linear_workspace(workspace);
+        let result = resolver.verify_linear_workspace().await;
+        assert_eq!(result.is_ok(), ok, "org {org}: {result:?}");
+        if let Err(e) = result {
+            let text = e.to_string();
+            assert!(
+                text.contains("`pace`") && text.contains("`other`"),
+                "{text}"
+            );
+        }
+        let sent = server.received_requests().await.unwrap_or_default().len();
+        assert_eq!(sent, org_queries, "org {org}");
+    }
+}

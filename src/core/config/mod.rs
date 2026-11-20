@@ -1001,6 +1001,24 @@ pub struct LinearConfig {
     // #190: opt-in (D8f); off, collect makes no bulk Linear request.
     #[serde(default)]
     pub sync_on_collect: bool,
+
+    /// Expected Linear workspace `urlKey` (e.g. `pace`). When set, every
+    /// Linear client first reads `organization { urlKey }` once and refuses
+    /// to send any other request if the API key belongs to a different
+    /// workspace. Absent: no check, no extra request.
+    // #272: workspace guard; additive and optional.
+    #[serde(default)]
+    pub workspace: Option<String>,
+
+    /// Repositories whose ticket keys resolve against Linear only.
+    ///
+    /// Each entry matches a repository's label (`name`, else the path
+    /// basename) or its owner (`org`, else the owner half of `github_repo`).
+    /// A matched repo is skipped by every other PM adapter, so a key such as
+    /// `PLA-12` is never looked up in JIRA. Empty: today's behaviour.
+    // #272: per-repo PM scope; additive and optional.
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 /// Project management integrations config block.

@@ -20,7 +20,7 @@
 //! mock-HTTP integration tests.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tracing::{debug, warn};
 
@@ -30,6 +30,7 @@ use super::{
     jira, linear, shortcut, ExternalSignal, SourceConfig,
 };
 use crate::classify::errors::ClassifyError;
+use crate::collect::linear::WorkspaceGuard;
 use crate::core::creds::CredentialSource;
 
 mod warm;
@@ -100,6 +101,9 @@ pub struct ExternalSourceResolver {
     /// #6405: where every source's token comes from. The process environment
     /// in production; a fixed table in tests, so no test has to `set_var`.
     creds: CredentialSource,
+    /// #272: the `linear.workspace` guard shared by every Linear lookup;
+    /// `None` when the key is unset.
+    linear_guard: Option<Arc<WorkspaceGuard>>,
 }
 
 impl ExternalSourceResolver {
@@ -158,7 +162,61 @@ impl ExternalSourceResolver {
             sources: states,
             github_budget: crate::collect::github::budget::FetchBudget::new(),
             creds: CredentialSource::from_env(),
+            linear_guard: None,
         })
+    }
+
+    /// Guard every Linear lookup with `linear.workspace` (#272).
+    ///
+    /// `None` or a blank value leaves the resolver unguarded, as before.
+    #[must_use]
+    pub fn with_linear_workspace(mut self, workspace: Option<&str>) -> Self {
+        self.linear_guard = WorkspaceGuard::from_config(workspace);
+        self
+    }
+
+    /// Run the Linear workspace guard once, before any lookup.
+    ///
+    /// Why: #272 — a key for the wrong workspace must fail the run, not
+    /// degrade to "no Linear signal". Per-commit lookups return `Option`, so
+    /// the pipeline calls this first to turn a refusal into an error.
+    /// What: no-op without a guard or without a Linear source. Otherwise reads
+    /// the first Linear source's token and verifies the workspace against
+    /// its endpoint; the verdict is cached for every later lookup. A missing
+    /// token is a failed check, not a skipped one.
+    /// Test: `resolver_tests::resolver_workspace_guard_fails_closed`.
+    ///
+    /// # Errors
+    ///
+    /// [`ClassifyError::LinearWorkspace`] on a mismatch or a failed check.
+    pub async fn verify_linear_workspace(&self) -> Result<(), ClassifyError> {
+        let Some(guard) = &self.linear_guard else {
+            return Ok(());
+        };
+        let Some((config, base)) = self.sources.iter().find_map(|s| match s {
+            SourceState::Linear {
+                config,
+                api_base_override,
+                ..
+            } => Some((config, api_base_override.as_deref())),
+            _ => None,
+        }) else {
+            return Ok(());
+        };
+        let token = self.creds.get(&config.api_key_env).ok_or_else(|| {
+            crate::collect::linear::WorkspaceGuardError::Unverified {
+                expected: guard.expected().to_string(),
+                reason: format!("Linear API key env var `{}` is not set", config.api_key_env),
+            }
+        })?;
+        let url = format!("{}/graphql", base.unwrap_or("https://api.linear.app"));
+        guard.verify(&self.client, &url, &token).await?;
+        Ok(())
+    }
+
+    /// The Linear workspace guard, if any (#272).
+    pub(crate) fn linear_guard(&self) -> Option<&WorkspaceGuard> {
+        self.linear_guard.as_deref()
     }
 
     /// The GitHub fetch budget this resolver's sources share (#6084).
@@ -382,6 +440,8 @@ impl ExternalSourceResolver {
                     &filtered,
                     api_base_override.as_deref(),
                     &self.creds,
+                    // #272: the per-commit path is guarded too.
+                    self.linear_guard(),
                 )
                 .await;
 

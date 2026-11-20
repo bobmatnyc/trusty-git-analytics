@@ -531,7 +531,13 @@ impl ClassificationPipeline {
             return Ok(None);
         }
         // #255: a client build failure fails the run instead of going untimed.
-        ExternalSourceResolver::new(sources).map(Some)
+        // #272: every Linear lookup carries the `linear.workspace` guard.
+        let workspace = self
+            .config
+            .linear
+            .as_ref()
+            .and_then(|l| l.workspace.as_deref());
+        ExternalSourceResolver::new(sources).map(|r| Some(r.with_linear_workspace(workspace)))
     }
 
     /// Execute the pipeline against `db`.
@@ -593,6 +599,10 @@ impl ClassificationPipeline {
         engine: ClassificationEngine,
         resolver: Option<ExternalSourceResolver>,
     ) -> Result<ClassificationStats> {
+        // #272: a refused Linear workspace guard fails the run up front.
+        if let Some(res) = &resolver {
+            res.verify_linear_workspace().await?;
+        }
         // 2. Read candidate commits. The default flow returns only the
         //    rows that lack a verdict; `--force` widens this to every row
         //    (optionally bounded by `--since`/`--until`/`--repos`).

@@ -1015,6 +1015,8 @@ is the only way an engagement states its own window.
 | `stats.concentration_completed_since` | date (`YYYY-MM-DD`) | None | `tga linear stats` concentration (C14) counts only issues completed on or after this UTC date. None = every completed issue. |
 | `sync_on_collect` | bool | false | `tga collect` and `tga analyze` also run the bulk Linear sync with entities: each `team_keys` entry, or every team the key can see when `team_keys` is empty. Off: no bulk Linear request. See [collection.md](collection.md#linear-bulk-sync-in-collect-190). |
 | `stats.report` | bool | false | Append the Linear delivery section to `report.md` in `tga report` and `tga analyze`, when the database holds synced Linear issues. The bounds above apply. See [reporting.md](reporting.md#linear-delivery-section). |
+| `workspace` | string | None | Expected Linear workspace `urlKey` (e.g. `pace`). When set, every Linear client (`tga linear *`, the collect lookups and bulk sync, the classify `linear` source) first reads `organization { urlKey }` once per run. A different urlKey, or a failed org query, fails the command with an error naming both urlKeys; no other Linear request is sent. Unset: no check, no extra request. Added in #272. |
+| `repos` | list[string] | [] | Repositories whose ticket keys resolve against Linear only. An entry matches a repository label or owner; see [Per-repo PM scope](#per-repo-pm-scope-272). Empty: every PM adapter scans every repo, as before. Added in #272. |
 
 The `stats` block is optional (#190). A value that is not a `YYYY-MM-DD`
 date fails the config load. See
@@ -1035,6 +1037,29 @@ There is no `team_id` key; the team scope is `team_keys`. The bulk sync
 takes its scope from `--team`, `--all-teams` or `team_keys`. Under
 `sync_on_collect`, `tga collect` syncs every `team_keys` entry, or all teams
 when the list is empty.
+
+#### Per-repo PM scope (#272)
+
+JIRA and Linear keys share the `KEY-N` shape, so a repo tracked in Linear can
+carry keys (`PLA-`, `DP-`, `FD-`) that collide with JIRA project prefixes.
+`linear.repos` binds repos to Linear. A bound repo's commits are scanned by
+the Linear lookup only; the JIRA, GitHub and Azure DevOps work-item adapters
+skip them. Precedence, first match wins:
+
+1. an entry equal to the repository label (`name`, else the path basename);
+2. an entry equal to the repo's owner (`org`, else the owner half of
+   `github_repo`), compared case-insensitively;
+3. no match: the repo is unbound and keeps today's behaviour.
+
+The classify-stage external sources (`classification.sources`) do not read
+this binding yet.
+
+```yaml
+linear:
+  api_key: "${LINEAR_API_KEY}"
+  workspace: pace          # #272: refuse any other Linear workspace
+  repos: [pacerevenue]     # #272: pacerevenue repos resolve keys in Linear only
+```
 
 ### `notion` — NotionConfig (added issue #252)
 
