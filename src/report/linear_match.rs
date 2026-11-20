@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::collect::linear::closed_weekly::{assignee_identities, closed_issues};
+use crate::collect::linear::closed_weekly::{assignee_identities, closed_issues, ClosedIssue};
 use crate::collect::linear::developer::DeveloperIndex;
 use crate::collect::pm_adapter::scope::bound_source;
 use crate::core::config::{split_github_slug, Config};
@@ -138,10 +138,7 @@ pub fn compute_match_report(
 
     let closed = closed_issues(conn, index, since, until)?;
     for issue in &closed.issues {
-        let key = (
-            issue.developer.as_ref().map(|d| d.id),
-            issue.credited_name(),
-        );
+        let key = (issue.developer.as_ref().map(|d| d.id), report_name(issue));
         engineer(&mut rows, key).closed_issues += 1;
     }
 
@@ -159,6 +156,24 @@ pub fn compute_match_report(
         unmatched_linear_assignees,
         unmatched_tga_authors,
     })
+}
+
+/// The label an assignee with neither a tga identity nor a display name
+/// renders under.
+const UNNAMED_ASSIGNEE: &str = "unnamed assignee";
+
+/// The name a closed issue is credited under in the match report: the
+/// resolved tga developer's name, else the Linear display name, else
+/// [`UNNAMED_ASSIGNEE`].
+// #280: never fall back to the assignee email, as `credited_name` does.
+fn report_name(issue: &ClosedIssue) -> String {
+    issue
+        .developer
+        .as_ref()
+        .map(|d| d.name.clone())
+        .or_else(|| issue.assignee_name.clone())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| UNNAMED_ASSIGNEE.to_string())
 }
 
 fn engineer(rows: &mut BTreeMap<EngineerKey, EngineerRow>, key: EngineerKey) -> &mut EngineerRow {
@@ -332,7 +347,7 @@ fn linear_identities(
             None if is_assignee == 1 => {
                 unmatched.insert(
                     name.filter(|n| !n.trim().is_empty())
-                        .unwrap_or_else(|| "(no name)".to_string()),
+                        .unwrap_or_else(|| UNNAMED_ASSIGNEE.to_string()),
                 );
             }
             None => {}
