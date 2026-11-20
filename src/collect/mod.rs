@@ -50,6 +50,8 @@ mod notify;
 pub mod notion;
 pub mod pm_adapter;
 // #5734: the concurrent PR fetch drain, split out of `collector` (frozen SLOC).
+// #272: PR-to-work-item links (attachments and key sources).
+pub mod pr_links;
 mod pr_pipeline;
 pub mod pr_provider;
 // #6748: the detector-generation re-classification pass, run before the walk.

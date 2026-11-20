@@ -9,6 +9,8 @@
 
 // #190 step 6: per-issue history and comments.
 pub mod activity;
+// #272: issue attachments and GitHub PR URL parsing.
+pub mod attachment;
 pub mod bulk;
 pub mod client;
 pub mod entities;

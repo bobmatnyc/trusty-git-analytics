@@ -318,6 +318,9 @@ pub fn upsert_linear_issues_in(
     // `linear_issues` (`tga collect` and `tga linear sync`) records a moved or
     // older-new issue in the same transaction as its row.
     queue_comment_reads(conn, issues, &out)?;
+    // #272: attachments are stored for every issue read, changed or not, so
+    // the ISSUE_FIELDS_VERSION re-read fills them for unchanged issues too.
+    crate::collect::linear::attachment::store_attachments_in(conn, issues)?;
     Ok(out)
 }
 

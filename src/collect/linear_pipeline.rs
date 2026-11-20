@@ -22,6 +22,7 @@ use tracing::info;
 
 use crate::collect::collector::CollectionStats;
 use crate::collect::linear::{LinearClient, LinearIssue};
+use crate::collect::pm_adapter::{scope, PmSource};
 use crate::core::config::Config;
 use crate::core::db::{Database, WorkItemRow};
 
@@ -63,95 +64,129 @@ pub(super) async fn fetch_and_store_linear_issues(
     if let Some(linear_cfg) = &config.linear {
         if linear_cfg.fetch_on_reference {
             match LinearClient::new(linear_cfg) {
-                Ok(client) => {
-                    // #5219: `sha` joins the fetch to `commit_work_items`; the
-                    // pre-fix query read `message` alone, so no commit link
-                    // could be written even once the issues were known.
-                    let commits: Vec<(String, String)> = {
-                        let conn = db.connection();
-                        let mut stmt = match conn.prepare("SELECT sha, message FROM commits") {
-                            Ok(s) => s,
-                            Err(e) => {
-                                stats.fail_stage(format!("Linear: query commits failed: {e}"));
-                                return;
-                            }
-                        };
-                        let rows = match stmt.query_map([], |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                        }) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                stats.fail_stage(format!("Linear: read commits failed: {e}"));
-                                return;
-                            }
-                        };
-                        let mut out = Vec::new();
-                        for r in rows.flatten() {
-                            out.push(r);
-                        }
-                        out
-                    };
-
-                    let messages: Vec<String> =
-                        commits.iter().map(|(_, msg)| msg.clone()).collect();
-                    let msg_refs: Vec<&str> = messages.iter().map(String::as_str).collect();
-                    // #5665: a rejected API key used to arrive here as an empty
-                    // vec, so the run wrote zero rows and reported nothing.
-                    let issues = match client
-                        .fetch_referenced_issues(&msg_refs, &linear_cfg.team_keys)
-                        .await
-                    {
-                        Ok(issues) => issues,
-                        Err(e) => {
-                            // #5727: the whole stage's data is absent — the walk
-                            // stops at the first failure and nothing is written.
-                            stats.fail_stage(format!("Linear: fetch issues failed: {e}"));
-                            return;
-                        }
-                    };
-                    for issue in &issues {
-                        info!(
-                            id = %issue.identifier,
-                            state = %issue.state,
-                            team = %issue.team,
-                            "Linear issue fetched"
-                        );
-                    }
-                    match client.store_issues(db, &issues) {
-                        Ok(n) => {
-                            info!(stored = n, "persisted linear_issues rows");
-                            stats.linear_issues_fetched += n;
-                        }
-                        Err(e) => {
-                            stats.fail_stage(format!("Linear: store issues failed: {e}"));
-                        }
-                    }
-
-                    // #5219: the same issues also land in the source-agnostic
-                    // `work_items` corpus, which is what correlation and
-                    // DOC-70's board axis read.
-                    let commit_refs = build_commit_refs(&commits);
-                    match persist_work_items(db, &issues, &commit_refs) {
-                        Ok(n) => {
-                            info!(
-                                stored = n,
-                                source = LINEAR_SOURCE,
-                                "persisted work_items rows"
-                            );
-                        }
-                        Err(e) => {
-                            // #5655: this Err is why the exit code exists — a
-                            // dropped work_items write must not report success.
-                            stats.fail_stage(format!("Linear: store work_items failed: {e}"));
-                        }
-                    }
-                }
+                Ok(client) => store_referenced_issues(db, config, &client, stats).await,
                 Err(e) => {
                     stats.fail_stage(format!("Linear client init failed: {e}"));
                 }
             }
         }
     }
+}
+
+/// The `(sha, message)` pairs whose messages may be sent to Linear (#272).
+///
+/// Why: `fetch_on_reference` sent every commit message to Linear. With
+/// `linear.repos` bindings set, only bound repos are Linear's; an unbound
+/// repo's keys belong to another PM system.
+/// What: with no bindings, every commit; with bindings, only commits whose
+/// repository [`scope::bound_source`] binds to Linear.
+/// Test: `fetch_on_reference_skips_unbound_repos_when_bindings_exist`.
+fn reference_commits(
+    config: &Config,
+    commits: Vec<(String, String, String)>,
+) -> Vec<(String, String)> {
+    let bound = config.linear.as_ref().is_some_and(|l| !l.repos.is_empty());
+    commits
+        .into_iter()
+        .filter(|(_, _, repo)| {
+            !bound || scope::bound_source(config, repo) == Some(PmSource::Linear)
+        })
+        .map(|(sha, message, _)| (sha, message))
+        .collect()
+}
+
+/// Look up and store the Linear issues the in-scope commits reference.
+///
+/// Why: split from [`fetch_and_store_linear_issues`] (#272) so a test can
+/// pass a client pointed at a mock server.
+/// What: reads `(sha, message, repository)` for every commit, keeps the ones
+/// [`reference_commits`] allows, fetches the issues they name and stores them
+/// in `linear_issues` and `work_items` / `commit_work_items`. Every failure
+/// is a stage failure on `stats`.
+/// Test: `fetch_on_reference_skips_unbound_repos_when_bindings_exist`.
+async fn store_referenced_issues(
+    db: &mut Database,
+    config: &Config,
+    client: &LinearClient,
+    stats: &mut CollectionStats,
+) {
+    let team_keys: &[String] = config
+        .linear
+        .as_ref()
+        .map(|l| l.team_keys.as_slice())
+        .unwrap_or(&[]);
+    // #5219: `sha` joins the fetch to `commit_work_items`; the pre-fix query
+    // read `message` alone, so no commit link could be written even once the
+    // issues were known. #272: `repository` drives the `linear.repos` scope.
+    let all = match read_commits(db) {
+        Ok(all) => all,
+        Err(e) => {
+            stats.fail_stage(format!("Linear: query commits failed: {e}"));
+            return;
+        }
+    };
+    // #272: with `linear.repos` set, unbound repos' messages are never sent.
+    let commits = reference_commits(config, all);
+
+    let msg_refs: Vec<&str> = commits.iter().map(|(_, msg)| msg.as_str()).collect();
+    // #5665: a rejected API key used to arrive here as an empty vec, so the
+    // run wrote zero rows and reported nothing.
+    let issues = match client.fetch_referenced_issues(&msg_refs, team_keys).await {
+        Ok(issues) => issues,
+        Err(e) => {
+            // #5727: the whole stage's data is absent — the walk stops at the
+            // first failure and nothing is written.
+            stats.fail_stage(format!("Linear: fetch issues failed: {e}"));
+            return;
+        }
+    };
+    for issue in &issues {
+        info!(
+            id = %issue.identifier,
+            state = %issue.state,
+            team = %issue.team,
+            "Linear issue fetched"
+        );
+    }
+    match client.store_issues(db, &issues) {
+        Ok(n) => {
+            info!(stored = n, "persisted linear_issues rows");
+            stats.linear_issues_fetched += n;
+        }
+        Err(e) => {
+            stats.fail_stage(format!("Linear: store issues failed: {e}"));
+        }
+    }
+
+    // #5219: the same issues also land in the source-agnostic `work_items`
+    // corpus, which is what correlation and DOC-70's board axis read.
+    let commit_refs = build_commit_refs(&commits);
+    match persist_work_items(db, &issues, &commit_refs) {
+        Ok(n) => {
+            info!(
+                stored = n,
+                source = LINEAR_SOURCE,
+                "persisted work_items rows"
+            );
+        }
+        Err(e) => {
+            // #5655: this Err is why the exit code exists — a dropped
+            // work_items write must not report success.
+            stats.fail_stage(format!("Linear: store work_items failed: {e}"));
+        }
+    }
+}
+
+/// Every `(sha, message, repository)` triple in the `commits` table.
+fn read_commits(db: &Database) -> crate::core::Result<Vec<(String, String, String)>> {
+    let conn = db.connection();
+    let mut stmt = conn.prepare("SELECT sha, message, repository FROM commits")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 /// Map each commit SHA to the Linear identifiers its message mentions.
@@ -461,6 +496,81 @@ mod tests {
             0,
             "the issue upsert that already succeeded must roll back with the transaction"
         );
+    }
+
+    /// The issue identifiers a mock Linear server was asked for.
+    async fn requested_ids(server: &wiremock::MockServer) -> Vec<String> {
+        let mut ids: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
+            .filter_map(|b| {
+                let q = b["query"].as_str()?.to_string();
+                let rest = q.split_once("issue(id: \"")?.1;
+                Some(rest.split_once('"')?.0.to_string())
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// #272: with `linear.repos` bindings, `fetch_on_reference` sends only
+    /// bound repos' keys to Linear; with none, every repo's keys, as before.
+    /// Every request is answered by a mock server, never the real API.
+    #[tokio::test]
+    async fn fetch_on_reference_skips_unbound_repos_when_bindings_exist() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (repos, want) in [
+            ("[pacerevenue]", vec!["PLA-1".to_string()]),
+            ("[]", vec!["DUE-2".to_string(), "PLA-1".to_string()]),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"data": {"issue": null}})),
+                )
+                .mount(&server)
+                .await;
+            let config: Config = serde_yaml::from_str(&format!(
+                "repositories:\n  - path: /src/pla-app\n    org: pacerevenue\n  \
+                 - path: /src/duetto\n    org: duettoresearch\n\
+                 linear:\n  api_key: test-key\n  fetch_on_reference: true\n  repos: {repos}\n"
+            ))
+            .expect("yaml parses");
+            let mut db = Database::open_in_memory().expect("db");
+            for (sha, message, repo) in [
+                ("s1", "PLA-1 fix", "pla-app"),
+                ("s2", "DUE-2 fix", "duetto"),
+            ] {
+                db.connection()
+                    .execute(
+                        "INSERT INTO commits (sha, author_name, author_email, timestamp, \
+                         message, repository) VALUES (?1, 'A', 'a@x', '2026-01-01T00:00:00Z', ?2, ?3)",
+                        rusqlite::params![sha, message, repo],
+                    )
+                    .expect("insert commit");
+            }
+            let linear_cfg = config.linear.clone().expect("linear");
+            let client = LinearClient::with_endpoint(&linear_cfg, server.uri()).expect("client");
+            let mut stats = CollectionStats::default();
+            store_referenced_issues(&mut db, &config, &client, &mut stats).await;
+
+            assert!(stats.errors.is_empty(), "faults: {:?}", stats.errors);
+            assert_eq!(requested_ids(&server).await, want, "repos: {repos}");
+            // #272 read-only: every document sent, now carrying the
+            // attachments selection, is a query.
+            for req in server.received_requests().await.unwrap_or_default() {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).expect("json body");
+                let doc = body["query"].as_str().expect("query string");
+                assert!(doc.trim_start().starts_with("query"), "{doc}");
+                assert!(doc.contains("attachments(first: 25)"), "{doc}");
+            }
+        }
     }
 
     /// #5655: every fault this pipeline records is a stage failure — each arm

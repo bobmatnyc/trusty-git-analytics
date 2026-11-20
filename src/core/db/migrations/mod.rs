@@ -268,6 +268,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "notion_activity",
         sql: include_str!("../sql/0040_notion_activity.sql"),
     },
+    // #272: Linear issue attachments and PR-to-work-item links; additive,
+    // see the SQL file header.
+    Migration {
+        version: 41,
+        name: "linear_attachments_pr_links",
+        sql: include_str!("../sql/0041_linear_attachments_pr_links.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

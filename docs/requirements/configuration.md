@@ -1009,7 +1009,7 @@ is the only way an engagement states its own window.
 |-------|------|---------|-------------|
 | `api_key` | string | env `LINEAR_API_KEY` | Linear API key. Supports `${LINEAR_API_KEY}`; when unset, the shared credential resolver is asked for the `linear` key. |
 | `team_keys` | list[string] | [] | Team keys (e.g. `["ENG"]`). The per-commit lookup fetches only issues whose identifier prefix is listed (empty = every team). `tga linear sync` with no `--team` and no `--all-teams` needs exactly one entry. |
-| `fetch_on_reference` | bool | true | During `collect`, fetch the Linear issues that commit messages name. |
+| `fetch_on_reference` | bool | true | During `collect`, fetch the Linear issues that commit messages name. When `repos` is non-empty, only commits from repos bound to Linear are sent; with no bindings every commit is sent, as before (#272). |
 | `ticket_regex` | string | None | Override regex for detecting Linear ticket refs (e.g. `([A-Z]+-\d+)`) in commit messages. Added in v1.0.6 (#75). |
 | `stats.field_use_created_since` | date (`YYYY-MM-DD`) | None | `tga linear stats` field use (C9) counts only issues created on or after this UTC date. None = every issue. |
 | `stats.concentration_completed_since` | date (`YYYY-MM-DD`) | None | `tga linear stats` concentration (C14) counts only issues completed on or after this UTC date. None = every completed issue. |

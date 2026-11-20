@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use super::activity_sync::ActivityOutcome;
 use super::comment_sync::CommentsOutcome;
 use super::LinearSyncArgs;
+use tga::collect::linear::bulk::ISSUES_PAGE_SIZE;
 use tga::collect::linear::issue::ISSUE_FIELDS_VERSION;
 use tga::collect::linear::sync::{next_cursor, resolve_scope};
 use tga::collect::linear::{
@@ -40,6 +41,30 @@ pub(crate) struct TeamOutcome {
     /// #190: the incremental comments pass (`--comments` without
     /// `--backfill`).
     pub comments: Option<CommentsOutcome>,
+    /// #272 (D94): the field-set refresh notice printed to stderr before the
+    /// first request, when this run re-reads the team's whole history.
+    pub refresh_notice: Option<String>,
+    /// #272: issues whose attachments exceeded the per-issue cap; attachments
+    /// past the cap were not read.
+    pub attachments_truncated: usize,
+}
+
+/// The stderr notice for a field-set refresh (#272, owner rule D94).
+///
+/// Why: an `ISSUE_FIELDS_VERSION` bump makes the next sync re-read every
+/// stored issue, including unattended runs (`sync_on_collect`, the audit
+/// sweep). The call count must be visible before any request is sent.
+/// What: names the team, the stored and current field-set versions, and the
+/// planned issue-page count: the team's stored issues divided by
+/// [`ISSUES_PAGE_SIZE`], rounded up, at least 1.
+/// Test: `sync_tests::older_field_set_refetches_full_history_once`.
+pub(crate) fn refresh_notice(team_key: &str, old: i64, new: i64, stored_issues: usize) -> String {
+    let pages = stored_issues.div_ceil(ISSUES_PAGE_SIZE).max(1);
+    format!(
+        "Linear sync ({team_key}): field set v{old} -> v{new}; re-reading the team's full \
+         history, about {pages} issue page(s) ({stored_issues} stored issue(s), \
+         {ISSUES_PAGE_SIZE} per page)."
+    )
 }
 
 impl TeamOutcome {
@@ -48,7 +73,8 @@ impl TeamOutcome {
         let c = &self.counts;
         format!(
             "Linear sync ({}): {} issue(s) fetched, {} archived; {} {} \
-             ({} new, {} changed, {} moved, {} unchanged){}.",
+             ({} new, {} changed, {} moved, {} unchanged); \
+             {} issue(s) over the attachment cap{}.",
             self.team_key,
             self.fetched,
             self.archived,
@@ -58,6 +84,8 @@ impl TeamOutcome {
             c.changed,
             c.moved,
             c.unchanged,
+            // #272: attachments past the cap are not read; say how many issues.
+            self.attachments_truncated,
             if dry_run { " [dry-run: no writes]" } else { "" }
         )
     }
@@ -125,6 +153,26 @@ pub(super) async fn sync_team(
         "starting tga linear sync"
     );
 
+    // #272 (D94): announce a field-set refresh and its page count before the
+    // first request, on stderr, so an unattended run shows it too.
+    let refresh_notice = if refresh {
+        let stored: i64 = db.connection().query_row(
+            "SELECT COUNT(*) FROM linear_issues WHERE team_key = ?1",
+            [team_key],
+            |r| r.get(0),
+        )?;
+        let notice = refresh_notice(
+            team_key,
+            stored_version,
+            ISSUE_FIELDS_VERSION,
+            usize::try_from(stored).unwrap_or(0),
+        );
+        eprintln!("{notice}");
+        Some(notice)
+    } else {
+        None
+    };
+
     let query = IssueQuery::new(team_key, scope.since, include_archived);
     // #190: no default cap; a configured cap that is reached is an error.
     let issues = client.fetch_team_issues(&query, args.max_issues).await?;
@@ -176,6 +224,8 @@ pub(super) async fn sync_team(
         counts: ChangeCounts::of(&changes),
         activity: Vec::new(),
         comments: None,
+        refresh_notice,
+        attachments_truncated: issues.iter().filter(|i| i.attachments_truncated).count(),
     };
     // #190 step 6: the dry run's activity count reads the fetched issues.
     Ok((outcome, issues))

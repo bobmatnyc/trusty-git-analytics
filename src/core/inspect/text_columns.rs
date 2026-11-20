@@ -64,6 +64,8 @@ pub const FREE_TEXT: &[&str] = &[
     "linear_labels.name",
     "linear_milestones.name",
     "linear_projects.name",
+    // #272: the title Linear shows for an attachment (often a PR title).
+    "linear_issue_attachments.title",
     "pull_requests.title",
     // Comma-separated labels, typed upstream.
     "work_items.tags",
@@ -388,6 +390,16 @@ pub const CONSTRAINED: &[&str] = &[
     "work_items.fetched_at",
     // #190 step 3: the provider's stable item id (a Linear issue UUID).
     "work_items.stable_id",
+    // #272 (migration v41): Linear attachment ids and links, and the
+    // PR-to-work-item link keys.
+    "linear_issue_attachments.issue_id",
+    "linear_issue_attachments.url",
+    "linear_issue_attachments.source_type",
+    "pr_work_items.provider",
+    "pr_work_items.repository",
+    "pr_work_items.work_item_id",
+    "pr_work_items.work_item_source",
+    "pr_work_items.source",
 ];
 
 /// Resolve one `table.column` against the three inventories.
