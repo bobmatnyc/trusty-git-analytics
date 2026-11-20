@@ -400,6 +400,15 @@ pub const CONSTRAINED: &[&str] = &[
     "pr_work_items.work_item_id",
     "pr_work_items.work_item_source",
     "pr_work_items.source",
+    // #272 (migration v42): closed Linear issues per developer per ISO week.
+    // The developer name is a canonical author name or a Linear user name,
+    // classified like `authors.canonical_name` and `linear_users.name`; the
+    // keys column is a JSON array of issue identifiers.
+    "fact_linear_closed_weekly.developer_name",
+    "fact_linear_closed_weekly.team_key",
+    "fact_linear_closed_weekly.iso_week",
+    "fact_linear_closed_weekly.week_start",
+    "fact_linear_closed_weekly.closed_issue_keys",
 ];
 
 /// Resolve one `table.column` against the three inventories.

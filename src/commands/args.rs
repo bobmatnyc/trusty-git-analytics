@@ -15,7 +15,9 @@ use clap::{Args, Subcommand};
 use crate::commands::deployments::{self, DeploymentsCollectArgs};
 use crate::commands::incidents::{self, IncidentsCollectArgs};
 use crate::commands::jira::{self, JiraFreshnessArgs, JiraSyncArgs};
-use crate::commands::linear::{self, LinearFreshnessArgs, LinearStatsArgs, LinearSyncArgs};
+use crate::commands::linear::{
+    self, LinearFreshnessArgs, LinearStatsArgs, LinearSyncArgs, MatchReportArgs,
+};
 use crate::core::config::Config;
 use crate::core::db::Database;
 
@@ -95,6 +97,9 @@ pub enum LinearSubcommand {
     /// Print Linear delivery metrics from the synced tables (#190). No
     /// network call.
     Stats(LinearStatsArgs),
+    /// #272: PRs with and without a Linear ticket, per-engineer counts and
+    /// unmatched identities. No network call.
+    MatchReport(MatchReportArgs),
 }
 
 // #111: the subcommand enums above are `#[non_exhaustive]`, and `main.rs` is a
@@ -150,6 +155,8 @@ impl LinearSubcommandArgs {
             // #190: `main` sends stats to `linear::run_stats_at` before the
             // shared open; this arm serves a caller that already holds a database.
             LinearSubcommand::Stats(a) => linear::run_stats(&config, db, &a),
+            // #272: `main` sends match-report to its read-only open first.
+            LinearSubcommand::MatchReport(a) => linear::run_match_report(&config, db, &a),
         }
     }
 
@@ -159,7 +166,9 @@ impl LinearSubcommandArgs {
     pub fn is_dry_run(&self) -> bool {
         match &self.subcommand {
             LinearSubcommand::Sync(a) => a.dry_run,
-            LinearSubcommand::Freshness(_) | LinearSubcommand::Stats(_) => false,
+            LinearSubcommand::Freshness(_)
+            | LinearSubcommand::Stats(_)
+            | LinearSubcommand::MatchReport(_) => false,
         }
     }
 }

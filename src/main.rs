@@ -436,6 +436,13 @@ async fn run() -> anyhow::Result<()> {
     {
         return commands::linear::run_stats_at(&config, &db_path, args);
     }
+    // #272: `tga linear match-report` is a report too; same read-only open.
+    if let Commands::Linear(LinearSubcommandArgs {
+        subcommand: LinearSubcommand::MatchReport(args),
+    }) = &cli.command
+    {
+        return commands::linear::run_match_report_at(&config, &db_path, args);
+    }
 
     // #111: the eval harness reads a database copy through its own read-only
     // open (`--db`) and must never reach the creating, migrating open below.

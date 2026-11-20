@@ -30,6 +30,9 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::Args;
 
 use tga::collect::errors::CollectError;
+use tga::collect::identity::IdentityResolver;
+use tga::collect::linear::closed_weekly::rebuild_closed_weekly;
+use tga::collect::linear::developer::DeveloperIndex;
 use tga::collect::linear::sync::validate_team_key;
 use tga::collect::linear::{ActivityKind, LinearClient};
 use tga::core::config::Config;
@@ -42,9 +45,16 @@ mod comment_sync;
 // #190 step 5: the bulk sync `tga collect` runs under `linear.sync_on_collect`.
 pub mod collect_sync;
 mod entity_sync;
+// #272: the read-only PR/ticket coverage and identity report.
+mod match_report;
+// #272 (D94): the pre-flight API call plan.
+mod plan;
 // #190 step 4: the read-only metrics command.
 mod stats;
 mod team_sync;
+pub use match_report::{
+    render_match_report, run_match_report, run_match_report_at, MatchReportArgs,
+};
 pub use stats::{render_stats, run_stats, run_stats_at, LinearStatsArgs};
 use team_sync::{sync_team, TeamOutcome};
 
@@ -135,6 +145,12 @@ pub struct LinearSyncArgs {
     /// Comment bodies are never stored.
     #[arg(long, default_value_t = false)]
     pub comments: bool,
+    /// #272 (D94): print the planned API call count per team (team + issue
+    /// pages + one history walk per issue with --history) and exit without
+    /// fetching any issue. With --all-teams, the team list is read (one
+    /// query); otherwise no request is sent.
+    #[arg(long, visible_alias = "count-only", default_value_t = false)]
+    pub plan: bool,
 }
 
 impl LinearSyncArgs {
@@ -277,8 +293,12 @@ pub async fn run_sync(
 /// issue Linear no longer has is counted and tombstoned, not a failure
 /// (owner ruling D28); any other failure stops the run the same way, after
 /// the team's issue rows and cursor are committed. With `--entities`,
-/// [`entity_sync::sync_entities`] runs last.
-/// Test: `sync_tests::all_teams_syncs_each_team_under_its_own_cursor`,
+/// [`entity_sync::sync_entities`] runs last. #272: `--plan` prints the call
+/// plan after resolving the teams and returns before any issue request; a
+/// non-dry run ends by rebuilding `fact_linear_closed_weekly`.
+/// Test: `plan_tests::plan_flag_fetches_no_issue`,
+/// `plan_tests::sync_rebuilds_the_weekly_table`,
+/// `sync_tests::all_teams_syncs_each_team_under_its_own_cursor`,
 /// `activity_sync_tests::a_failed_history_read_fails_the_sync_and_stays_due`,
 /// `activity_sync_tests::a_missing_issue_is_tombstoned_and_the_run_goes_on`,
 /// `comment_cursor_tests::a_failed_comments_page_fails_the_run_and_keeps_the_cursor`,
@@ -313,6 +333,20 @@ pub(crate) async fn run_sync_with(
     } else {
         vec![resolve_team_key(config, args.team.as_deref())?]
     };
+
+    // #272 (D94): --plan prints the call plan and fetches no issue.
+    if args.plan {
+        let mut teams = Vec::with_capacity(team_keys.len());
+        for team_key in &team_keys {
+            teams.push(plan::team_plan(db, team_key, args, explicit_since)?);
+        }
+        let sync_plan = plan::SyncPlan {
+            team_list_queries: usize::from(args.all_teams),
+            teams,
+        };
+        println!("{}", sync_plan.render());
+        return Ok(Vec::new());
+    }
 
     let mut outcomes = Vec::with_capacity(team_keys.len());
     for team_key in &team_keys {
@@ -391,7 +425,28 @@ pub(crate) async fn run_sync_with(
     if args.entities {
         entity_sync::sync_entities(client, db, args.dry_run).await?;
     }
+    // #272: rebuild the weekly closed-issue table from the stored issues,
+    // users and authors. A dry run wrote nothing, so it rebuilds nothing.
+    if !args.dry_run {
+        rebuild_weekly(config, db)?;
+    }
     Ok(outcomes)
+}
+
+/// Rebuild `fact_linear_closed_weekly` and print one summary line (#272).
+///
+/// # Errors
+///
+/// A malformed `authors.aliases` or `completed_at`, or a database failure.
+fn rebuild_weekly(config: &Config, db: &mut Database) -> anyhow::Result<()> {
+    let index = DeveloperIndex::load(db.connection(), IdentityResolver::from_config(config))?;
+    let w = rebuild_closed_weekly(db.connection_mut(), &index)?;
+    println!(
+        "Linear closed-weekly: {} row(s) from {} closed issue(s); {} with an unmatched \
+         assignee, {} unassigned.",
+        w.rows, w.credited, w.unmatched_issues, w.unassigned
+    );
+    Ok(())
 }
 
 /// Dispatch entry point for `tga linear freshness`.
@@ -496,3 +551,7 @@ mod activity_sync_tests;
 
 #[cfg(test)]
 mod comment_cursor_tests;
+
+// #272: the call plan, --plan, and the weekly rebuild after a sync.
+#[cfg(test)]
+mod plan_tests;

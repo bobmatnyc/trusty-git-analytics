@@ -22,6 +22,8 @@ pub mod errors;
 pub mod formatters;
 // #190: the Linear delivery section `tga report` appends to report.md.
 mod linear_section;
+// #272: PR/ticket coverage and identity gaps behind `tga linear match-report`.
+pub mod linear_match;
 // #190: Linear delivery metrics behind `tga linear stats`.
 pub mod linear_stats;
 pub mod models;
