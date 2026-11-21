@@ -190,3 +190,29 @@ fn pr_repository_binding_follows_linear_repos() {
         "pacerevenue/rates"
     ));
 }
+
+/// #280: an unmatched assignee with no display name renders as
+/// "unnamed assignee", never by its email, in every match-report output.
+#[test]
+fn match_report_never_prints_an_unnamed_assignee_email() {
+    let db = Database::open_in_memory().expect("db");
+    let c = db.connection();
+    c.execute(
+        "INSERT INTO linear_issues (identifier, title, state, team, team_key, fetched_at, \
+                                    linear_id, state_type, completed_at, assignee_email) \
+         VALUES ('PLA-9', 't', 'Done', 'Pace', 'PLA', '2026-01-01T00:00:00Z', 'PLA-9', \
+                 'completed', '2026-03-03T00:00:00Z', 'quiet@example.org')",
+        [],
+    )
+    .expect("insert issue");
+    let index = DeveloperIndex::load(c, IdentityResolver::new(None)).expect("idx");
+    let r = compute_match_report(c, &config(), &index, None, None).expect("report");
+
+    let names: Vec<&str> = r.engineers.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["unnamed assignee"]);
+    assert_eq!(r.unmatched_linear_assignees, vec!["unnamed assignee"]);
+    let text = render_text(&r);
+    assert!(!text.contains('@'), "names only, no email: {text}");
+    let json = serde_json::to_string(&r).expect("json");
+    assert!(!json.contains('@'), "names only, no email: {json}");
+}
