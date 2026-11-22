@@ -26,6 +26,8 @@
 //! in CI / background tasks where stdin is unavailable.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use git2::{Cred, CredentialType, FetchOptions, RemoteCallbacks, Repository};
 use tracing::{info, warn};
@@ -144,6 +146,7 @@ pub fn fetch_and_record(repo: &Repository, repo_name: &str, remote_name: &str) -
         remote_name,
         RetryPolicy::default(),
         &mut RetryBudget::default(),
+        None,
     )
     .0
 }
@@ -156,14 +159,35 @@ pub fn fetch_and_record(repo: &Repository, repo_name: &str, remote_name: &str) -
 /// What: retries the single `remote.fetch` via [`fetch_with_retry`], sleeping
 /// on the calling thread between attempts. Returns the record and the number
 /// of attempts made.
-/// Test: `retry::tests::real_connection_refused_is_retried_to_exhaustion`.
+/// `timeout` bounds each attempt's connect and each socket read/write (#269);
+/// `None` restores libgit2's defaults.
+/// Test: `retry::tests::real_connection_refused_is_retried_to_exhaustion`,
+/// `tests::stalled_remote_times_out_and_is_retried`.
 pub fn fetch_and_record_with_retry(
     repo: &Repository,
     repo_name: &str,
     remote_name: &str,
     policy: RetryPolicy,
     budget: &mut RetryBudget,
+    timeout: Option<Duration>,
 ) -> (PerRepoFetch, u32) {
+    // #269: enforce fetch_timeout_secs so an unreachable remote fails instead
+    // of hanging; the timeout error is transient, so #262's retry still applies.
+    let _timeout_guard = match apply_fetch_timeout(timeout) {
+        Ok(guard) => guard,
+        Err(e) => {
+            return (
+                PerRepoFetch {
+                    repo: repo_name.to_string(),
+                    outcome: FetchOutcome::Failed {
+                        remote: remote_name.to_string(),
+                        error: format!("failed to set fetch timeout: {e}"),
+                    },
+                },
+                0,
+            )
+        }
+    };
     // #262: the retry loop wraps exactly one fetch per attempt.
     let (outcome, attempts) = fetch_with_retry(
         || {
@@ -281,6 +305,53 @@ fn non_interactive_credentials(
 /// path lookup; `$HOME` is set on every supported platform.
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// libgit2's own timeouts, read once before the first override (#269).
+static LIBGIT2_DEFAULT_TIMEOUTS: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+
+/// Set libgit2's server connect and socket I/O timeouts for the next fetch.
+///
+/// Why (#269): `fetch_timeout_secs` was logged but never applied, so a remote
+/// that never answers hung `tga collect`. libgit2 exposes the timeouts only as
+/// process-global options.
+/// What: `Some(d)` sets both timeouts to `d` (clamped to `1..=i32::MAX` ms);
+/// `None` restores the values libgit2 had before the first override. Returns
+/// the held lock: the caller keeps it for the whole fetch, so a concurrent
+/// fetch cannot change the timeout under it. The pipeline fetches repos one at
+/// a time, so holding it costs nothing there.
+/// Test: `tests::stalled_remote_times_out_and_is_retried`.
+fn apply_fetch_timeout(
+    timeout: Option<Duration>,
+) -> Result<MutexGuard<'static, Option<(i32, i32)>>> {
+    let mut defaults = LIBGIT2_DEFAULT_TIMEOUTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: libgit2 stores these options as plain ints. Every tga write goes
+    // through this mutex, and every timed fetch holds it until it returns.
+    unsafe {
+        let (connect_ms, io_ms) = match *defaults {
+            Some(d) => d,
+            None => {
+                let d = (
+                    git2::opts::get_server_connect_timeout_in_milliseconds()?,
+                    git2::opts::get_server_timeout_in_milliseconds()?,
+                );
+                *defaults = Some(d);
+                d
+            }
+        };
+        let (connect_ms, io_ms) = match timeout {
+            Some(d) => {
+                let ms = i32::try_from(d.as_millis()).unwrap_or(i32::MAX).max(1);
+                (ms, ms)
+            }
+            None => (connect_ms, io_ms),
+        };
+        git2::opts::set_server_connect_timeout_in_milliseconds(connect_ms)?;
+        git2::opts::set_server_timeout_in_milliseconds(io_ms)?;
+    }
+    Ok(defaults)
 }
 
 /// Classify an error as an auth/transport failure suitable for soft-failing.
@@ -482,5 +553,59 @@ mod tests {
             "scp-style remote was rejected for want of a transport, not for want of a \
              reachable host: {error}"
         );
+    }
+
+    /// Why (#269): `fetch_timeout_secs` was logged but never applied, so a
+    /// remote that accepts the connection and then never answers hung the
+    /// fetch forever.
+    /// What: a loopback listener accepts and holds every connection without
+    /// replying. A fetch with a 1 s timeout and 2 attempts must fail within the
+    /// 30 s watchdog, retry once (#262), and record a retryable error.
+    /// Test: this test itself.
+    #[test]
+    fn stalled_remote_times_out_and_is_retried() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let td = tempfile::tempdir().expect("tempdir");
+            let repo = git2::Repository::init(td.path()).expect("init");
+            let url = format!("http://127.0.0.1:{port}/org/repo.git");
+            repo.remote("origin", &url).expect("remote");
+            let policy = RetryPolicy {
+                max_attempts: 2,
+                base: Duration::from_millis(1),
+                cap: Duration::from_millis(1),
+            };
+            let result = fetch_and_record_with_retry(
+                &repo,
+                "stalled",
+                "origin",
+                policy,
+                &mut RetryBudget::default(),
+                Some(Duration::from_secs(1)),
+            );
+            let _ = tx.send(result);
+        });
+        let (prf, attempts) = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("fetch hung past 30 s: fetch_timeout_secs not enforced");
+        assert_eq!(attempts, 2, "{:?}", prf.outcome);
+        match prf.outcome {
+            FetchOutcome::Failed { error, .. } => {
+                let first = error.trim_end_matches(" (after 2 attempts)");
+                assert!(
+                    crate::collect::git::retry::is_retryable_fetch_error(first),
+                    "{error}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 }
