@@ -1071,11 +1071,14 @@ activity events in `fact_notion_activity` (see
 | `token` | string | required | Notion token: a personal access token or an integration token. Collection covers the pages and comments that token can read. Use `"${NOTION_TOKEN}"` so the token stays in the environment. Redacted in every `Debug` and `Serialize` rendering of the config; never logged. Unset or empty after expansion: the Notion stage fails and `tga collect` exits non-zero. |
 | `workspace_id` | string | `"default"` | Label for the workspace. Keys the `notion_sync_cursor` row and fills `fact_notion_activity.workspace_id`. |
 | `lookback_minutes` | integer | `60` | Minutes below the stored watermark each sync re-reads. Notion search is indexed asynchronously, so a page edited just before the watermark can appear after the sync that set it. Re-read events are upserted, not duplicated. |
+| `user_map` | map string→string | `{}` | Notion user id → email (#257). A personal access token cannot list `/v1/users`, so this map is how actors are attributed. Each email goes through the identity resolver, and the canonical email and name are stored. Every sync also backfills stored rows of a mapped id that still have a NULL `actor_email`; the backfill is idempotent. `Debug` renders only the entry count. |
 
 ```yaml
 notion:
   token: "${NOTION_TOKEN}"
   workspace_id: acme
+  user_map:
+    "0f3c1a2b-0000-4000-8000-000000000001": ada@example.com
 ```
 
 When the token is an integration token, the integration needs the "Read
@@ -1139,7 +1142,11 @@ read only for pages edited since the previous sync.
 Identity: each Notion person's `(name, email)` goes through the identity
 resolver, and the canonical email is stored as `actor_email`. Bots, users with
 no email, and users the token cannot list keep a NULL `actor_email`; the
-collect summary prints how many such actors the run stored.
+collect summary prints how many such actors the run stored. An id listed in
+`notion.user_map` resolves through the same resolver from its mapped email,
+and the map entry wins over the `/v1/users` listing (#257). Unmapped ids keep
+a NULL `actor_email` and are counted as unresolved. Output prints counts
+only, never a Notion user id or an email.
 
 Notion activity is its own signal. It is never summed into effort or any
 existing effort or volume metric.

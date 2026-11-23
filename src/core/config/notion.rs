@@ -9,6 +9,8 @@
 //! Test: `debug_never_renders_the_notion_token`,
 //! `serialize_never_renders_the_notion_token`, `notion_block_parses_from_yaml`.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 /// The workspace label used when `notion.workspace_id` is unset.
@@ -45,6 +47,15 @@ pub struct NotionConfig {
     /// [`NOTION_DEFAULT_LOOKBACK_MINUTES`].
     #[serde(default)]
     pub lookback_minutes: Option<u32>,
+
+    // #257: a personal access token cannot list `/v1/users`, so page and
+    // comment payloads carry only the user id; this map supplies the person.
+    /// Notion user id → email. Each email goes through the identity
+    /// resolver (as git and ADO identities do), and the canonical email it
+    /// returns is stored as `actor_email`. Stored rows for a mapped id with a
+    /// NULL email are backfilled on every sync. Empty by default.
+    #[serde(default)]
+    pub user_map: BTreeMap<String, String>,
 }
 
 impl NotionConfig {

@@ -25,6 +25,9 @@ mod wire;
 
 #[cfg(test)]
 mod client_tests;
+// #257: `notion.user_map` id → person mapping.
+#[cfg(test)]
+mod identity_tests;
 #[cfg(test)]
 mod pipeline_tests;
 

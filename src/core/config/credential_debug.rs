@@ -103,11 +103,14 @@ impl fmt::Debug for NotionConfig {
             token,
             workspace_id,
             lookback_minutes,
+            user_map,
         } = self;
         f.debug_struct("NotionConfig")
             .field("token", &mask(token.as_ref()))
             .field("workspace_id", workspace_id)
             .field("lookback_minutes", lookback_minutes)
+            // #257: the map holds work emails; a log gets only its size.
+            .field("user_map_entries", &user_map.len())
             .finish()
     }
 }
@@ -422,6 +425,7 @@ mod tests {
                 token: Some(secret.to_string()),
                 workspace_id: Some(PROBE.to_string()),
                 lookback_minutes: None,
+                user_map: Default::default(),
             };
             format!("{cfg:?}{cfg:#?}")
         });
@@ -430,6 +434,7 @@ mod tests {
             token: None,
             workspace_id: Some(PROBE.to_string()),
             lookback_minutes: None,
+            user_map: Default::default(),
         };
         let rendered = format!("{unset:?}");
         assert!(

@@ -11,7 +11,7 @@
 //! Test: `identity_resolves_people_and_leaves_bots_and_emailless_null`,
 //! `iso_week_buckets_follow_iso_8601`, `events_are_keyed_for_idempotent_upsert`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 
@@ -96,7 +96,25 @@ impl ActorDirectory {
     /// falls back to the Notion email. A bot, or a person with no email,
     /// keeps its name and a `None` email.
     pub fn build(users: &[NotionUser], resolver: &IdentityResolver) -> Self {
-        let mut actors = HashMap::with_capacity(users.len());
+        Self::build_with_map(users, &BTreeMap::new(), resolver)
+    }
+
+    /// [`Self::build`], then apply the configured `notion.user_map` (#257).
+    ///
+    /// Why: a personal access token cannot list users, so without the map
+    /// every actor stays unresolved.
+    /// What: each mapped id's email goes through
+    /// [`IdentityResolver::resolve`]; the canonical email and name replace
+    /// whatever the listing gave for that id. A blank email is ignored.
+    /// Unmapped, unlisted ids still resolve to nothing.
+    /// Test: `a_mapped_actor_resolves_to_the_canonical_identity`,
+    /// `an_unmapped_actor_stays_unresolved_and_counted`.
+    pub fn build_with_map(
+        users: &[NotionUser],
+        user_map: &BTreeMap<String, String>,
+        resolver: &IdentityResolver,
+    ) -> Self {
+        let mut actors = HashMap::with_capacity(users.len() + user_map.len());
         for u in users {
             let name = u.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
             let email = if u.kind.as_deref() == Some("person") {
@@ -109,24 +127,7 @@ impl ActorDirectory {
                 None
             };
             let actor = match email {
-                Some(raw) => {
-                    let (canon_name, canon_email) = resolver.resolve(name.unwrap_or(""), raw);
-                    let canon_email = canon_email.trim();
-                    let email = if canon_email.is_empty() {
-                        raw
-                    } else {
-                        canon_email
-                    };
-                    let name = if canon_name.trim().is_empty() {
-                        name.map(str::to_string)
-                    } else {
-                        Some(canon_name)
-                    };
-                    Actor {
-                        email: Some(email.to_string()),
-                        name,
-                    }
-                }
+                Some(raw) => resolve_person(resolver, name, raw),
                 None => Actor {
                     email: None,
                     name: name.map(str::to_string),
@@ -134,7 +135,33 @@ impl ActorDirectory {
             };
             actors.insert(u.id.clone(), actor);
         }
+        // #257: the config map is the only identity source a personal
+        // access token leaves, and an explicit entry wins over the listing.
+        for (id, raw) in user_map {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let listed = actors.remove(id.trim()).unwrap_or_default();
+            actors.insert(
+                id.trim().to_string(),
+                resolve_person(resolver, listed.name.as_deref(), raw),
+            );
+        }
         Self { actors }
+    }
+
+    /// `(actor_id, canonical email, name)` for every id resolved through
+    /// the config map; the backfill writes these onto stored rows (#257).
+    pub fn mapped<'a>(
+        &'a self,
+        user_map: &'a BTreeMap<String, String>,
+    ) -> impl Iterator<Item = (&'a str, &'a str, Option<&'a str>)> + 'a {
+        user_map.keys().filter_map(move |id| {
+            let id = id.trim();
+            let actor = self.actors.get(id)?;
+            Some((id, actor.email.as_deref()?, actor.name.as_deref()))
+        })
     }
 
     /// The actor for a user reference; unlisted ids resolve to nothing.
@@ -146,6 +173,29 @@ impl ActorDirectory {
             ),
             None => (None, Actor::default()),
         }
+    }
+}
+
+/// Resolve `(name, raw email)` to the canonical identity.
+///
+/// An empty canonical email falls back to `raw`, an empty canonical name to
+/// `name`.
+fn resolve_person(resolver: &IdentityResolver, name: Option<&str>, raw: &str) -> Actor {
+    let (canon_name, canon_email) = resolver.resolve(name.unwrap_or(""), raw);
+    let canon_email = canon_email.trim();
+    let email = if canon_email.is_empty() {
+        raw
+    } else {
+        canon_email
+    };
+    let name = if canon_name.trim().is_empty() {
+        name.map(str::to_string)
+    } else {
+        Some(canon_name)
+    };
+    Actor {
+        email: Some(email.to_string()),
+        name,
     }
 }
 
