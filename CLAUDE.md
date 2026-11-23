@@ -120,6 +120,14 @@ cargo run --bin tga -- <subcommand>
 
 # Check the crate
 cargo check
+
+# Local PR gate (all ci.yml jobs); --post-status posts `local-gate` on HEAD
+scripts/gate.sh --post-status
+# EVO mode (#264): clippy/test/msrv run on EVO via evo-gate-log with the CI
+# pins (check 1.94.1, clippy 1.98.1, test 1.99.0); fmt stays local. Needs a
+# clean, pushed HEAD; any EVO refusal FAILs the gate. GATE_LOCAL_CARGO picks
+# the Mac cargo (e.g. ~/.cargo/bin/cargo if the mise shim hangs on fmt).
+scripts/gate.sh --evo --post-status        # or GATE_EVO=1 scripts/gate.sh
 ```
 
 🔴 **CI requirements**: `cargo clippy -- -D warnings` and `cargo fmt --check` must both pass before merging.
