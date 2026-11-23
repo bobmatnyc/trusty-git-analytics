@@ -107,3 +107,35 @@ pub fn persist(
     tx.commit()?;
     Ok(events.len())
 }
+
+/// Attribute stored rows of mapped actors that still carry a NULL email.
+///
+/// Why: the sync is cursor-based, so rows stored before an id was mapped
+/// are never re-read; without this they stay unattributed (#257).
+/// What: one `UPDATE` per `(actor_id, email, name)`, limited to
+/// `workspace` and `actor_email IS NULL`, in one transaction. Idempotent:
+/// a second call changes 0 rows. Returns the rows changed.
+/// Test: `the_backfill_attributes_stored_rows_once`.
+///
+/// # Errors
+///
+/// [`NotionError::Db`]; the transaction is rolled back.
+pub fn backfill_mapped_actors<'a>(
+    conn: &mut Connection,
+    workspace: &str,
+    mapped: impl IntoIterator<Item = (&'a str, &'a str, Option<&'a str>)>,
+) -> Result<usize, NotionError> {
+    let tx = conn.transaction()?;
+    let mut changed = 0;
+    {
+        let mut stmt = tx.prepare(
+            "UPDATE fact_notion_activity SET actor_email = ?3, actor_name = ?4 \
+             WHERE workspace_id = ?1 AND actor_id = ?2 AND actor_email IS NULL",
+        )?;
+        for (id, email, name) in mapped {
+            changed += stmt.execute(params![workspace, id, email, name])?;
+        }
+    }
+    tx.commit()?;
+    Ok(changed)
+}

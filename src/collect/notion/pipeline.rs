@@ -22,7 +22,7 @@
 //! `a_refused_user_listing_stores_events_with_actors_unresolved`,
 //! `a_non_access_user_listing_failure_still_fails_the_sync`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::Utc;
 use tracing::{debug, info, warn};
@@ -57,6 +57,8 @@ pub struct NotionSyncOutcome {
     pub unreadable_comment_pages: usize,
     /// `/v1/users` answered 403 or 404, so no actor was resolved (#252).
     pub users_unlisted: bool,
+    /// Stored rows attributed by the `notion.user_map` backfill (#257).
+    pub backfilled: usize,
 }
 
 /// The fault text recorded when no listed person carries an email (#252).
@@ -90,10 +92,21 @@ pub(crate) async fn fetch_and_store_notion_activity(
             return;
         }
     };
-    sync_workspace(db, &client, cfg.workspace_label(), resolver, stats).await;
+    // #257: the configured id → email map resolves actors.
+    sync_workspace_with_map(
+        db,
+        &client,
+        cfg.workspace_label(),
+        &cfg.user_map,
+        resolver,
+        stats,
+    )
+    .await;
 }
 
 /// Sync one workspace; see the module doc for the failure contract.
+// #257: production goes through `sync_workspace_with_map`.
+#[cfg(test)]
 pub(crate) async fn sync_workspace(
     db: &mut Database,
     client: &NotionClient,
@@ -101,8 +114,20 @@ pub(crate) async fn sync_workspace(
     resolver: &IdentityResolver,
     stats: &mut CollectionStats,
 ) -> Option<NotionSyncOutcome> {
+    sync_workspace_with_map(db, client, workspace, &BTreeMap::new(), resolver, stats).await
+}
+
+/// [`sync_workspace`] with the `notion.user_map` id → email map (#257).
+pub(crate) async fn sync_workspace_with_map(
+    db: &mut Database,
+    client: &NotionClient,
+    workspace: &str,
+    user_map: &BTreeMap<String, String>,
+    resolver: &IdentityResolver,
+    stats: &mut CollectionStats,
+) -> Option<NotionSyncOutcome> {
     let mut progress = Progress::default();
-    let result = try_sync(db, client, workspace, resolver, &mut progress).await;
+    let result = try_sync(db, client, workspace, user_map, resolver, &mut progress).await;
     if let Some(cause) = &progress.users_refused {
         // #252: non-fatal, recorded once whether or not the sync later fails.
         warn!(workspace, "{USERS_UNLISTED}: {cause}");
@@ -115,6 +140,7 @@ pub(crate) async fn sync_workspace(
                 workspace,
                 events = outcome.events,
                 unresolved_actors = outcome.unresolved_actors,
+                backfilled = outcome.backfilled,
                 "Notion activity stored"
             );
             stats.notion_events += outcome.events;
@@ -167,6 +193,8 @@ struct Progress {
     unreadable_comment_pages: usize,
     /// #252: the `/v1/users` refusal (403/404), when the listing was refused.
     users_refused: Option<String>,
+    /// #257: rows the user-map backfill attributed.
+    backfilled: usize,
 }
 
 impl Progress {
@@ -177,6 +205,7 @@ impl Progress {
             email_capability_missing: self.email_capability_missing,
             unreadable_comment_pages: self.unreadable_comment_pages,
             users_unlisted: self.users_refused.is_some(),
+            backfilled: self.backfilled,
         }
     }
 }
@@ -194,6 +223,7 @@ async fn try_sync(
     db: &mut Database,
     client: &NotionClient,
     workspace: &str,
+    user_map: &BTreeMap<String, String>,
     resolver: &IdentityResolver,
     progress: &mut Progress,
 ) -> Result<(), NotionError> {
@@ -212,7 +242,11 @@ async fn try_sync(
         Err(e) => return Err(e),
     };
     progress.email_capability_missing = people_without_any_email(&users);
-    let actors = ActorDirectory::build(&users, resolver);
+    let actors = ActorDirectory::build_with_map(&users, user_map, resolver);
+    // #257: rows stored before an id was mapped are behind the cursor and
+    // never re-read; attribute them now. Idempotent (NULL-email rows only).
+    progress.backfilled =
+        store::backfill_mapped_actors(db.connection_mut(), workspace, actors.mapped(user_map))?;
 
     let pages = client.search_pages_since(watermark).await?;
     if pages.is_empty() {
