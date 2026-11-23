@@ -171,7 +171,14 @@ fn report_name(issue: &ClosedIssue) -> String {
         .developer
         .as_ref()
         .map(|d| d.name.clone())
-        .or_else(|| issue.assignee_name.clone())
+        // #285: an `assignee_name` equal to the Linear user id is the
+        // collector's id fallback, not a name; never print it.
+        .or_else(|| {
+            issue
+                .assignee_name
+                .clone()
+                .filter(|n| issue.assignee_id.as_deref() != Some(n.as_str()))
+        })
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| UNNAMED_ASSIGNEE.to_string())
 }

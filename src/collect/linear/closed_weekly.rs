@@ -40,6 +40,8 @@ pub struct ClosedIssue {
     pub assignee_email: Option<String>,
     /// Assignee name (issue row, else `linear_users`).
     pub assignee_name: Option<String>,
+    /// Linear user id of the assignee, when the issue row carries one.
+    pub assignee_id: Option<String>,
     /// The matched developer, `None` when unmatched.
     pub developer: Option<DeveloperMatch>,
 }
@@ -164,7 +166,10 @@ pub fn closed_issues(
             team_key,
             completed_at,
             assignee_email: email,
-            assignee_name: name.or(assignee_id),
+            // #285: the id fallback stays for the weekly table's grouping;
+            // the match report drops it via `assignee_id`.
+            assignee_name: name.or_else(|| assignee_id.clone()),
+            assignee_id,
             developer,
         });
     }
