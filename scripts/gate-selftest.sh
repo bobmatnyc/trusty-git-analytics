@@ -96,6 +96,26 @@ NONCE_FILE="${WORK}/gate-nonce"
 printf '%s' "${NONCE}" >"${NONCE_FILE}"
 STRAY_ENV=()
 
+# #264: stub EVO scripts. evo-gate-log logs and runs the rest of its argv
+# unless STUB_EGL_RC refuses (66 = unpushed SHA); evo logs and exits
+# STUB_EVO_RC (75 = EVO unreachable). Every run points GATE_EVO_SCRIPTS here,
+# so no case can reach the real EVO.
+EVO_STUBS="${WORK}/evo-scripts"
+mkdir -p "${EVO_STUBS}"
+cat >"${EVO_STUBS}/evo-gate-log" <<'STUBEOF'
+#!/bin/bash
+echo "evo-gate-log $*" >>"${STUB_LOG}"
+[[ "${STUB_EGL_RC:-0}" == 0 ]] || { echo "evo-gate-log: refused" >&2; exit "${STUB_EGL_RC}"; }
+shift 2   # --tag NAME
+exec "$@"
+STUBEOF
+cat >"${EVO_STUBS}/evo" <<'STUBEOF'
+#!/bin/bash
+echo "evo $*" >>"${STUB_LOG}"
+exit "${STUB_EVO_RC:-0}"
+STUBEOF
+chmod +x "${EVO_STUBS}/evo-gate-log" "${EVO_STUBS}/evo"
+
 # Same stubs without pnpm, for the missing-tool case.
 NOPNPM="${WORK}/stubs-nopnpm"
 cp -R "${STUBS}" "${NOPNPM}"
@@ -136,6 +156,8 @@ run_gate() {
     fi
     set +e
     OUT="$(env -u GATE_SELFTEST_NONCE -u GATE_SELFTEST_NONCE_FILE -u GATE_NESTED \
+        -u GATE_EVO -u GATE_LOCAL_CARGO GATE_EVO_SCRIPTS="${EVO_SCRIPTS_DIR:-${EVO_STUBS}}" \
+        ${GATE_EVO_T:+GATE_EVO="${GATE_EVO_T}"} STUB_EVO_RC="${STUB_EVO_RC:-0}" STUB_EGL_RC="${STUB_EGL_RC:-0}" \
         PATH="${stubs}:/usr/bin:/bin" ${nest[@]+"${nest[@]}"} ${STRAY_ENV[@]+"${STRAY_ENV[@]}"} \
         STUB_LOG="${LOG}" STUB_FAIL="${STUB_FAIL:-}" STUB_MIDRUN="${STUB_MIDRUN:-}" \
         STUB_TREE_OUT="${STUB_TREE_OUT:-}" STUB_NO_MSRV="${STUB_NO_MSRV:-}" STUB_GH_RC="${STUB_GH_RC:-0}" \
@@ -171,6 +193,11 @@ if [[ ${STATUS} -eq 0 ]] && has_line '^GATE: PASS' && ! has_line 'FAIL' \
     pass "--all with every step green exits 0, runs the ci.yml commands, and a nested gate skips gate-selftest"
 else
     fail "all-green run: status ${STATUS}"$'\n'"${OUT}"
+fi
+if ! grep -qE '^evo(-gate-log)? ' "${LOG}"; then
+    pass "default mode never calls evo or evo-gate-log (#264)"
+else
+    fail "default mode called EVO:"$'\n'"$(cat "${LOG}")"
 fi
 if [[ ! -e "${repo}/crates/trusty-audit/ui/dist/index.html" ]]; then
     pass "the stub ui/dist/index.html is removed after the run"
@@ -328,6 +355,64 @@ for stray in "stale nonce file|GATE_SELFTEST_NONCE_FILE=${WORK}/no-such-nonce GA
         fail "stray ${stray%%|*}: status ${STATUS}"$'\n'"${OUT}"
     fi
 done
+
+# 13 -- #264 EVO mode: heavy steps go to evo-gate-log + evo with the CI pins,
+#       fmt and cargo tree stay local, no local MSRV toolchain is needed.
+repo13="$(make_repo evo)"
+EGL="evo-gate-log --tag gate-sh ${EVO_STUBS}/evo"
+STUB_NO_MSRV=1 run_gate "${STUBS}" "${repo13}" --evo --all
+if [[ ${STATUS} -eq 0 ]] && has_line '^GATE: PASS .*cargo on EVO' \
+    && logged "${EGL} cargo +1.98.1 clippy --workspace --exclude trusty-audit-ui --all-targets -- -D warnings" \
+    && logged "${EGL} cargo +1.99.0 test --workspace --exclude trusty-audit-ui" \
+    && logged "${EGL} cargo +1.94.1 check --workspace --exclude trusty-audit-ui" \
+    && logged "${EGL} cargo +1.98.1 clippy -p tga --no-default-features --all-targets -- -D warnings" \
+    && logged "${EGL} cargo +1.99.0 test -p tga --no-default-features" \
+    && logged "${EGL} --env SKIP_UI_BUILD=1 cargo +1.98.1 clippy -p trusty-audit-ui --all-targets -- -D warnings" \
+    && logged "${EGL} --env SKIP_UI_BUILD=1 cargo +1.99.0 test -p trusty-audit-ui" \
+    && logged "cargo fmt --all --check" && logged "cargo tree --workspace --exclude trusty-audit-ui -d" \
+    && ! grep -qE '^cargo (clippy|test|\+)' "${LOG}"; then
+    pass "--evo sends clippy/test/check to EVO with the CI pins and keeps fmt and tree local"
+else
+    fail "evo routing: status ${STATUS}"$'\n'"${OUT}"$'\n'"$(cat "${LOG}")"
+fi
+GATE_EVO_T=1 run_gate "${STUBS}" "${repo13}"
+if [[ ${STATUS} -eq 0 ]] && logged "${EGL} cargo +1.99.0 test --workspace"; then
+    pass "GATE_EVO=1 selects EVO mode like --evo"
+else
+    fail "GATE_EVO=1: status ${STATUS}"$'\n'"${OUT}"
+fi
+
+# 14 -- fail closed: EVO unreachable (evo 75) or evo-gate-log refusing
+#       (66, unpushed SHA) fails every heavy step, posts failure, exits 1,
+#       and never falls back to a Mac cargo build.
+for c in "75 0 EVO unreachable (evo exit 75)" "0 66 evo-gate-log refusal (exit 66, unpushed SHA)"; do
+    read -r evo_rc egl_rc what <<<"${c}"
+    STUB_EVO_RC="${evo_rc}" STUB_EGL_RC="${egl_rc}" run_gate "${STUBS}" "${repo13}" --evo --post-status
+    if [[ ${STATUS} -eq 1 ]] && has_line '^  FAIL +clippy' && has_line '^  FAIL +test ' \
+        && has_line '^  FAIL +audit-ui-test' && has_line '^  PASS +fmt' && has_line '^GATE: FAIL' \
+        && logged "-f state=failure -f context=local-gate" && ! logged "state=success" \
+        && ! grep -qE '^cargo (clippy|test|\+)' "${LOG}"; then
+        pass "${what} fails the gate closed and posts failure"
+    else
+        fail "${what}: status ${STATUS}"$'\n'"${OUT}"
+    fi
+done
+
+# 15 -- missing EVO scripts or a dirty tree: preflight exit 2, no step runs.
+EVO_SCRIPTS_DIR="${WORK}/no-such-dir" run_gate "${STUBS}" "${repo13}" --evo
+if [[ ${STATUS} -eq 2 ]] && has_line 'no-such-dir/evo-gate-log \(EVO mode\)' && ! logged "cargo fmt"; then
+    pass "--evo without the EVO scripts exits 2 before any step"
+else
+    fail "missing evo scripts: status ${STATUS}"$'\n'"${OUT}"
+fi
+echo dirty >"${repo13}/dirty.txt"
+run_gate "${STUBS}" "${repo13}" --evo
+rm "${repo13}/dirty.txt"
+if [[ ${STATUS} -eq 2 ]] && has_line 'needs a clean, committed and pushed tree' && ! logged "cargo fmt"; then
+    pass "--evo refuses a dirty tree before any step"
+else
+    fail "evo dirty tree: status ${STATUS}"$'\n'"${OUT}"
+fi
 
 echo "== ${PASS} passed, ${FAIL} failed =="
 [[ ${FAIL} -eq 0 ]]

@@ -20,11 +20,25 @@
 #   a live run of that selftest (a nonce only that run holds) lists the step
 #   as SKIPPED(nested) instead of starting the selftest again.
 #
-# Usage: scripts/gate.sh [--all] [--post-status]
+# Usage: scripts/gate.sh [--all] [--post-status] [--evo]
 #   --all          run every path-conditional step, whatever the diff says
 #   --post-status  post the result as the `local-gate` commit status on the
 #                  HEAD the steps checked (needs `gh` and a clean working
 #                  tree; refuses if HEAD or the tree changes during the run)
+#   --evo          (or GATE_EVO=1) EVO mode, #264: the heavy cargo steps
+#                  (clippy, test, msrv check, no-default-features,
+#                  audit-ui) run on EVO through `evo-gate-log --tag gate-sh
+#                  evo cargo +<pin>`, with the CI pins: check 1.94.1,
+#                  clippy 1.98.1, test 1.99.0. fmt, cargo tree and the
+#                  non-cargo steps stay on the Mac. Needs a committed, clean
+#                  tree whose HEAD is pushed (evo-gate-log refuses otherwise).
+#                  Fails closed: an EVO or evo-gate-log refusal is a FAIL
+#                  step, never a skip or a Mac fallback. GATE_EVO_SCRIPTS
+#                  names the directory holding `evo` and `evo-gate-log`
+#                  (default: the mpm-utils checkout's scripts/).
+#                  GATE_LOCAL_CARGO names the Mac cargo for the light steps
+#                  (default `cargo`; e.g. ~/.cargo/bin/cargo past a hung
+#                  mise shim).
 #
 # Exit: 0 gate passed; 1 a blocking step failed; 2 usage, preflight, git or
 #   missing-tool failure; 3 posting the commit status failed; 4 HEAD or the
@@ -44,18 +58,30 @@ SEMVER_CHECKS_PIN="0.50.0"        # semver.yml install-action pin
 BASE_REF="origin/main"
 AUDIT_UI_DIST="crates/trusty-audit/ui/dist"
 
+# #264: EVO mode. Pins match ci.yml (msrv check, clippy, test jobs).
+EVO_CHECK_PIN="1.94.1"
+EVO_CLIPPY_PIN="1.98.1"
+EVO_TEST_PIN="1.99.0"
+EVO_TAG="gate-sh"
+EVO_SCRIPTS="${GATE_EVO_SCRIPTS:-/Users/masa/trusty-mpm-projects/bobmatnyc/mpm-utils/scripts}"
+LOCAL_CARGO="${GATE_LOCAL_CARGO:-cargo}"
+
 usage() {
-    echo "Usage: scripts/gate.sh [--all] [--post-status]"
+    echo "Usage: scripts/gate.sh [--all] [--post-status] [--evo]"
     echo "  --all          run every path-conditional step, whatever the diff says"
     echo "  --post-status  post the result as the '${STATUS_CONTEXT}' commit status on HEAD"
+    echo "  --evo          run the heavy cargo steps on EVO (also GATE_EVO=1); see the header"
 }
 
 ALL=0
 POST=0
+EVO=0
+[[ "${GATE_EVO:-0}" == "1" ]] && EVO=1
 for arg in "$@"; do
     case "${arg}" in
         --all) ALL=1 ;;
         --post-status) POST=1 ;;
+        --evo) EVO=1 ;;
         -h | --help) usage; exit 0 ;;
         *) echo "gate: unknown argument '${arg}'" >&2; usage >&2; exit 2 ;;
     esac
@@ -141,9 +167,17 @@ need() {
 }
 
 need git "xcode-select --install"
-need cargo "https://rustup.rs"
-need rustup "https://rustup.rs"
-if command -v rustup >/dev/null 2>&1; then
+need "${LOCAL_CARGO}" "https://rustup.rs"
+if [[ ${EVO} -eq 1 ]]; then
+    # #264: the MSRV toolchain lives on EVO; the Mac needs the two scripts.
+    for s in evo evo-gate-log; do
+        [[ -x "${EVO_SCRIPTS}/${s}" ]] \
+            || MISSING+=("${EVO_SCRIPTS}/${s} (EVO mode) -- set GATE_EVO_SCRIPTS to the mpm-utils scripts/ directory")
+    done
+else
+    need rustup "https://rustup.rs"
+fi
+if [[ ${EVO} -eq 0 ]] && command -v rustup >/dev/null 2>&1; then
     TOOLCHAINS="$(rustup toolchain list 2>/dev/null)" || TOOLCHAINS=""
     HAVE_MSRV=0
     while IFS= read -r tc; do
@@ -199,28 +233,63 @@ if [[ ${POST} -eq 1 && -n "${START_STATUS}" ]]; then
     echo "      must describe HEAD. Commit your changes first. No step ran." >&2
     exit 2
 fi
+# #264: EVO syncs HEAD only; evo-gate-log refuses a dirty tree per step, so
+# refuse once up front instead of failing every heavy step the same way.
+if [[ ${EVO} -eq 1 && -n "${START_STATUS}" ]]; then
+    echo "gate: FAIL -- --evo needs a clean, committed and pushed tree (EVO builds HEAD)." >&2
+    echo "      Commit and push first. No step ran." >&2
+    exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # Steps. Each runs in a subshell with errexit, so its first failing command
 # ends it; the gate itself keeps going.
 # ---------------------------------------------------------------------------
-step_fmt() { x cargo fmt --all --check; }
-step_clippy() { x cargo clippy --workspace --exclude trusty-audit-ui --all-targets -- -D warnings; }
-step_test() { x cargo test --workspace --exclude trusty-audit-ui; }
-step_msrv() { x cargo "+${MSRV}" check --workspace --exclude trusty-audit-ui; }
+
+# heavy [--env K=V] <evo-pin> <cargo args...>: a heavy cargo command. Default
+# mode runs it on the Mac exactly as before (the pin is unused). #264: EVO
+# mode sends it through evo-gate-log + evo with `+<evo-pin>`; their exit code
+# (cargo's, or a refusal such as 66 unpushed / 75 unreachable) is the step's.
+heavy() {
+    local envs=()
+    while [[ "$1" == --env ]]; do envs+=("$2"); shift 2; done
+    local pin="$1"
+    shift
+    if [[ ${EVO} -eq 1 ]]; then
+        local evo_env=()
+        for e in ${envs[@]+"${envs[@]}"}; do evo_env+=(--env "${e}"); done
+        x "${EVO_SCRIPTS}/evo-gate-log" --tag "${EVO_TAG}" \
+            "${EVO_SCRIPTS}/evo" ${evo_env[@]+"${evo_env[@]}"} cargo "+${pin}" "$@"
+    elif [[ ${#envs[@]} -gt 0 ]]; then
+        x env "${envs[@]}" cargo "$@"
+    else
+        x cargo "$@"
+    fi
+}
+
+step_fmt() { x "${LOCAL_CARGO}" fmt --all --check; }
+step_clippy() { heavy "${EVO_CLIPPY_PIN}" clippy --workspace --exclude trusty-audit-ui --all-targets -- -D warnings; }
+step_test() { heavy "${EVO_TEST_PIN}" test --workspace --exclude trusty-audit-ui; }
+step_msrv() {
+    if [[ ${EVO} -eq 1 ]]; then
+        heavy "${EVO_CHECK_PIN}" check --workspace --exclude trusty-audit-ui
+    else
+        x cargo "+${MSRV}" check --workspace --exclude trusty-audit-ui
+    fi
+}
 # Port of ci.yml `no-default-features`. The default build includes Bedrock, so
 # this is the only step that compiles, lints and tests the
 # `cfg(not(feature = "bedrock"))` arm.
 step_no_default_features() {
-    x cargo clippy -p tga --no-default-features --all-targets -- -D warnings
-    x cargo test -p tga --no-default-features
+    heavy "${EVO_CLIPPY_PIN}" clippy -p tga --no-default-features --all-targets -- -D warnings
+    heavy "${EVO_TEST_PIN}" test -p tga --no-default-features
 }
 
 # Port of ci.yml `dependency-duplicates`.
 step_dep_dupes() {
     local out rc
     set +e
-    out="$(cargo tree --workspace --exclude trusty-audit-ui -d 2>&1)"
+    out="$("${LOCAL_CARGO}" tree --workspace --exclude trusty-audit-ui -d 2>&1)"
     rc=$?
     set -e
     echo "${out}"
@@ -235,8 +304,8 @@ step_dep_dupes() {
     echo "OK -- no duplicate ratatui, crossterm, or libsqlite3-sys version in the graph."
 }
 
-step_audit_ui_clippy() { x env SKIP_UI_BUILD=1 cargo clippy -p trusty-audit-ui --all-targets -- -D warnings; }
-step_audit_ui_test() { x env SKIP_UI_BUILD=1 cargo test -p trusty-audit-ui; }
+step_audit_ui_clippy() { heavy --env SKIP_UI_BUILD=1 "${EVO_CLIPPY_PIN}" clippy -p trusty-audit-ui --all-targets -- -D warnings; }
+step_audit_ui_test() { heavy --env SKIP_UI_BUILD=1 "${EVO_TEST_PIN}" test -p trusty-audit-ui; }
 
 step_website_test() {
     cd website
@@ -426,9 +495,10 @@ else
 fi
 
 echo
-echo "== local gate summary: HEAD ${HEAD_SHA:0:12}, base ${MERGE_BASE:0:12}$([[ ${ALL} -eq 1 ]] && echo ', --all') =="
+echo "== local gate summary: HEAD ${HEAD_SHA:0:12}, base ${MERGE_BASE:0:12}$([[ ${ALL} -eq 1 ]] && echo ', --all')$([[ ${EVO} -eq 1 ]] && echo ', --evo') =="
 for line in "${RESULTS[@]}"; do echo "${line}"; done
 DESC="${NPASS} passed, ${NFAIL} failed, ${NSKIP} skipped by path"
+[[ ${EVO} -eq 1 ]] && DESC="${DESC}; cargo on EVO"
 [[ ${SEMVER_FAILED} -eq 1 ]] && DESC="${DESC}; semver-checks failed (report-only)"
 if [[ ${NFAIL} -eq 0 ]]; then
     STATE=success
