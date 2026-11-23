@@ -752,7 +752,7 @@ In floor mode:
 | `org` (alias `owner`) | string | None | GitHub owner used when `origin` gives no GitHub repo |
 | `project_key` | string | None | JIRA project key prefix |
 | `branch` | string | None | Override default branch detection |
-| `fetch_timeout_secs` | u64 | None | Stored and logged; not yet enforced |
+| `fetch_timeout_secs` | u64 | None | Bounds the fetch's connect and each socket read/write, in seconds; a timeout is retried like any connect failure (#269) |
 | `fetch_retries` | u32 | 2 | Retries after the first pre-walk `git fetch` when it fails with a transient connect error (connect timeout, timed out, connection refused or reset, failed to connect; git2 class Net, Http, Ssh or Os — libgit2 reports a TCP connect failure as class Os). Auth, credential, certificate, not-found and unsupported-protocol errors are never retried. `0` disables retries. After 10 consecutive repositories exhaust their retries, the rest of the run makes one attempt each. A repo that still fails keeps the stale-data refusal unless `--allow-stale` is given (#262) |
 | `fetch_retry_base_secs` | u64 | 2 | Backoff before the first retry. It doubles per retry, is capped at 30 s, and adds up to 25% jitter (#262) |
 

@@ -225,6 +225,7 @@ fn real_connection_refused_is_retried_to_exhaustion() {
         "origin",
         fast,
         &mut RetryBudget::default(),
+        None,
     );
     assert_eq!(attempts, 3, "{:?}", prf.outcome);
     match prf.outcome {

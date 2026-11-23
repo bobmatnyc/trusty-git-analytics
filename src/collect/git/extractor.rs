@@ -68,9 +68,8 @@ pub struct GitCollector {
     explicit_branches: Vec<String>,
     /// Optional per-repo fetch timeout in seconds.
     ///
-    /// When `Some(n)`, stored for future enforcement via a thread-based
-    /// watchdog.  When `None` (the default), the system / git2 transport
-    /// defaults apply.  See issue #334 and `RepositoryConfig::fetch_timeout_secs`.
+    /// When `Some(n)`, bounds the fetch's connect and each socket read/write
+    /// (#269).  When `None` (the default), the git2 transport defaults apply.  See issue #334 and `RepositoryConfig::fetch_timeout_secs`.
     fetch_timeout_secs: Option<u64>,
     /// #262: retry policy for the pre-walk fetch, from `fetch_retries` and
     /// `fetch_retry_base_secs`.
@@ -225,9 +224,8 @@ impl GitCollector {
     /// Why: the value from [`crate::core::config::RepositoryConfig::fetch_timeout_secs`]
     /// is set via `new`; this builder lets callers override it without
     /// constructing a new config struct.
-    /// What: stores the value; enforcement is scheduled for a future release
-    /// once git2 exposes transport-level timeouts. For now the field is
-    /// persisted and logged but not acted upon.
+    /// What: stores the value; [`Self::perform_fetch`] applies it to the
+    /// fetch's connect and socket I/O (#269).
     /// Test: constructor round-trip is verified in `tests::fetch_timeout_stored`.
     pub fn with_fetch_timeout(mut self, secs: Option<u64>) -> Self {
         self.fetch_timeout_secs = secs;
@@ -243,8 +241,8 @@ impl GitCollector {
     /// summary (issue #334).
     /// What: if `no_fetch` is set, returns a `Skipped` outcome immediately.
     /// Otherwise opens the repository, calls `fetch_and_record`, and returns
-    /// the result. A `fetch_timeout_secs` value is logged but not yet enforced
-    /// at the libgit2 level (scheduled for a future release).
+    /// the result. A `fetch_timeout_secs` value bounds the connect and each
+    /// socket read/write (#269).
     /// Test: see `fetch::tests::fetch_outcome_skipped_for_local_repo` and
     /// the `no_fetch_returns_skipped` test in `extractor::tests`.
     pub fn perform_fetch(&self) -> PerRepoFetch {
@@ -274,13 +272,6 @@ impl GitCollector {
                 0,
             );
         }
-        if let Some(t) = self.fetch_timeout_secs {
-            tracing::debug!(
-                repo = %self.name,
-                timeout_secs = t,
-                "fetch_timeout_secs configured (enforcement pending future release)"
-            );
-        }
         let repo = match Repository::open(&self.path) {
             Ok(r) => r,
             Err(e) => {
@@ -303,6 +294,8 @@ impl GitCollector {
             &self.remote_name,
             self.fetch_retry_policy,
             budget,
+            // #269: fetch_timeout_secs bounds the connect and each socket read.
+            self.fetch_timeout_secs.map(std::time::Duration::from_secs),
         )
     }
 
