@@ -42,9 +42,13 @@ use crate::collect::git::retry::{fetch_with_retry, RetryBudget, RetryPolicy};
 /// per-repo outcome tracking use this.
 /// What: returns `Ok(())` whether the fetch succeeds or fails so that
 /// collection can always proceed on whatever the local clone has.
-/// Test: covered indirectly by extractor tests that call `GitCollector::collect`.
-pub fn fetch_remote(repo: &Repository, remote_name: &str) -> Result<()> {
-    fetch_remote_with_outcome(repo, remote_name).map(|_| ())
+/// `timeout` bounds the connect and each socket read/write; `None` restores
+/// libgit2's defaults. Either way it is applied under the timeout lock (#286).
+/// Test: `extractor::tests::legacy_collect_window_fetch_times_out`.
+pub fn fetch_remote(repo: &Repository, remote_name: &str, timeout: Option<Duration>) -> Result<()> {
+    // #286: the legacy path skipped the lock and inherited a stale timeout.
+    let _timeout_guard = apply_fetch_timeout(timeout)?;
+    fetch_once(repo, remote_name).map(|_| ())
 }
 
 /// Fetch all refs from the configured remote and return a typed outcome.
@@ -61,7 +65,16 @@ pub fn fetch_remote(repo: &Repository, remote_name: &str) -> Result<()> {
 /// Test: unit test `tests::fetch_outcome_skipped_for_local_repo` in this
 /// module verifies the Skipped path; Failed and Success paths are exercised
 /// by integration tests against real git fixtures.
+/// Runs with libgit2's default timeouts, set under the timeout lock (#286).
 pub fn fetch_remote_with_outcome(repo: &Repository, remote_name: &str) -> Result<FetchOutcome> {
+    // #286: every fetch path sets its timeout under the same lock.
+    let _timeout_guard = apply_fetch_timeout(None)?;
+    fetch_once(repo, remote_name)
+}
+
+/// One `remote.fetch` with no timeout handling; the caller holds the lock
+/// returned by [`apply_fetch_timeout`] for its duration (#286).
+fn fetch_once(repo: &Repository, remote_name: &str) -> Result<FetchOutcome> {
     let mut remote = match repo.find_remote(remote_name) {
         Ok(r) => r,
         Err(e) => {
@@ -191,7 +204,8 @@ pub fn fetch_and_record_with_retry(
     // #262: the retry loop wraps exactly one fetch per attempt.
     let (outcome, attempts) = fetch_with_retry(
         || {
-            fetch_remote_with_outcome(repo, remote_name).unwrap_or_else(|e| FetchOutcome::Failed {
+            // #286: fetch_once, because this function already holds the lock.
+            fetch_once(repo, remote_name).unwrap_or_else(|e| FetchOutcome::Failed {
                 remote: remote_name.to_string(),
                 error: e.to_string(),
             })
