@@ -35,7 +35,7 @@
 #                  Fails closed: an EVO or evo-gate-log refusal is a FAIL
 #                  step, never a skip or a Mac fallback. GATE_EVO_SCRIPTS
 #                  names the directory holding `evo` and `evo-gate-log`
-#                  (default: the mpm-utils checkout's scripts/).
+#                  (default: $HOME/trusty-mpm-projects/bobmatnyc/mpm-utils/scripts).
 #                  GATE_LOCAL_CARGO names the Mac cargo for the light steps
 #                  (default `cargo`; e.g. ~/.cargo/bin/cargo past a hung
 #                  mise shim).
@@ -58,12 +58,13 @@ SEMVER_CHECKS_PIN="0.50.0"        # semver.yml install-action pin
 BASE_REF="origin/main"
 AUDIT_UI_DIST="crates/trusty-audit/ui/dist"
 
-# #264: EVO mode. Pins match ci.yml (msrv check, clippy, test jobs).
+# #264: EVO mode. EVO-installed pins (instance-evo skill); ci.yml uses stable
+# for clippy and test.
 EVO_CHECK_PIN="1.94.1"
 EVO_CLIPPY_PIN="1.98.1"
 EVO_TEST_PIN="1.99.0"
 EVO_TAG="gate-sh"
-EVO_SCRIPTS="${GATE_EVO_SCRIPTS:-/Users/masa/trusty-mpm-projects/bobmatnyc/mpm-utils/scripts}"
+EVO_SCRIPTS="${GATE_EVO_SCRIPTS:-${HOME}/trusty-mpm-projects/bobmatnyc/mpm-utils/scripts}"
 LOCAL_CARGO="${GATE_LOCAL_CARGO:-cargo}"
 
 usage() {
