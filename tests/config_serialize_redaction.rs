@@ -148,6 +148,34 @@ fn serialize_never_renders_the_notion_token() {
     );
 }
 
+// #288: user_map pairs Notion user ids with work emails; serialized output
+// carries only the entry count, as `Debug` does, while loading keeps the map.
+#[test]
+fn serialize_never_renders_the_notion_user_map() {
+    let id = "8f3c2a1e-user-id-probe";
+    let email = "someone.private@example.com";
+    let cfg: NotionConfig = load(&format!(
+        "workspace_id: \"{PROBE}\"\nuser_map:\n  \"{id}\": \"{email}\"\n  \"second-id-probe\": \"second@example.com\"\n"
+    ));
+    assert_eq!(
+        cfg.user_map.get(id).map(String::as_str),
+        Some(email),
+        "loading must keep the real map"
+    );
+    let rendered = render(&cfg);
+    for leaked in [id, email, "second-id-probe", "second@example.com", "@"] {
+        assert!(
+            !rendered.contains(leaked),
+            "user_map content `{leaked}` reached serialized output: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("\"user_map_entries\":2") && rendered.contains("user_map_entries: 2"),
+        "the entry count must be present: {rendered}"
+    );
+    assert!(rendered.contains(PROBE), "other fields kept: {rendered}");
+}
+
 #[test]
 fn serialize_never_renders_the_github_token() {
     for_each_shape::<GithubConfig>(|secret| format!("token: \"{secret}\"\norg: \"{PROBE}\"\n"));

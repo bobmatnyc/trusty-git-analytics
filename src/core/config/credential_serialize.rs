@@ -103,8 +103,9 @@ impl Serialize for NotionConfig {
         s.serialize_field("token", &mask(token.as_ref()))?;
         s.serialize_field("workspace_id", workspace_id)?;
         s.serialize_field("lookback_minutes", lookback_minutes)?;
-        // #257: not a credential; written verbatim like the other fields.
-        s.serialize_field("user_map", user_map)?;
+        // #288: ids and work emails are personal data; write only the count,
+        // matching `Debug`. No path writes a config back to disk.
+        s.serialize_field("user_map_entries", &user_map.len())?;
         s.end()
     }
 }
