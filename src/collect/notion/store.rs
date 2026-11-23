@@ -115,7 +115,8 @@ pub fn persist(
 /// What: one `UPDATE` per `(actor_id, email, name)`, limited to
 /// `workspace` and `actor_email IS NULL`, in one transaction. Idempotent:
 /// a second call changes 0 rows. Returns the rows changed.
-/// Test: `the_backfill_attributes_stored_rows_once`.
+/// Test: `the_backfill_attributes_stored_rows_once`,
+/// `the_backfill_keeps_an_existing_actor_name`.
 ///
 /// # Errors
 ///
@@ -128,8 +129,10 @@ pub fn backfill_mapped_actors<'a>(
     let tx = conn.transaction()?;
     let mut changed = 0;
     {
+        // #257: COALESCE keeps a stored name when the resolution has none.
         let mut stmt = tx.prepare(
-            "UPDATE fact_notion_activity SET actor_email = ?3, actor_name = ?4 \
+            "UPDATE fact_notion_activity SET actor_email = ?3, \
+             actor_name = COALESCE(?4, actor_name) \
              WHERE workspace_id = ?1 AND actor_id = ?2 AND actor_email IS NULL",
         )?;
         for (id, email, name) in mapped {

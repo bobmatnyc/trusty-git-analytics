@@ -183,3 +183,38 @@ fn user_map_parses_from_yaml() {
     let notion = cfg.notion.expect("block present");
     assert_eq!(notion.user_map, map(&[("u1", "ada@example.com")]));
 }
+
+/// #257: a backfill whose resolution yields no name sets the email and
+/// keeps the name already stored, never overwriting it with NULL.
+#[test]
+fn the_backfill_keeps_an_existing_actor_name() {
+    use super::store;
+    use super::wire::NotionUser;
+    let listed = NotionUser {
+        id: "u1".into(),
+        kind: Some("person".into()),
+        name: Some("Ada L".into()),
+        person: None,
+    };
+    let actors = ActorDirectory::build(&[listed], &IdentityResolver::new(None));
+    let (events, _) = build_events(&[page_by("p1", "u1")], &[], &actors).expect("events");
+    let mut db = Database::open_in_memory().expect("db");
+    store::persist(db.connection_mut(), WS, &events, None, chrono::Utc::now()).expect("persist");
+
+    let changed =
+        store::backfill_mapped_actors(db.connection_mut(), WS, [("u1", "ada@example.com", None)])
+            .expect("backfill");
+    assert_eq!(changed, 2);
+    let rows: Vec<(Option<String>, Option<String>)> = db
+        .connection()
+        .prepare("SELECT actor_email, actor_name FROM fact_notion_activity WHERE actor_id = 'u1'")
+        .expect("prepare")
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    for (email, name) in rows {
+        assert_eq!(email.as_deref(), Some("ada@example.com"));
+        assert_eq!(name.as_deref(), Some("Ada L"), "existing name kept");
+    }
+}
