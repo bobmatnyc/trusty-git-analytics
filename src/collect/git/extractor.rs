@@ -368,7 +368,9 @@ impl GitCollector {
         // Legacy callers that invoke `collect_window` directly on a collector
         // with `no_fetch = false` will still get a fetch here as a safety net.
         if !self.no_fetch {
-            if let Err(e) = fetch_remote(&repo, &self.remote_name) {
+            // #286: apply fetch_timeout_secs here too, under the shared lock.
+            let timeout = self.fetch_timeout_secs.map(std::time::Duration::from_secs);
+            if let Err(e) = fetch_remote(&repo, &self.remote_name, timeout) {
                 warn!(
                     repo = %self.name,
                     remote = %self.remote_name,
@@ -1711,6 +1713,40 @@ mod tests {
             prf.repo,
             _t.path.file_name().unwrap().to_string_lossy().as_ref()
         );
+    }
+
+    /// Why (#286): the safety-net fetch in `collect_window` skipped
+    /// `fetch_timeout_secs`, so a stalled remote hung the walk.
+    /// What: a loopback listener holds every connection without replying; a
+    /// collector with a 1 s timeout and fetching enabled must return from
+    /// `collect_window` within the 30 s watchdog.
+    /// Test: this test itself.
+    #[test]
+    fn legacy_collect_window_fetch_times_out() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let td = tempfile::tempdir().expect("tempdir");
+            let repo = Repository::init(td.path()).expect("init");
+            let url = format!("http://127.0.0.1:{port}/org/repo.git");
+            repo.remote("origin", &url).expect("remote");
+            let collector = GitCollector::new(&make_repo_config(td.path()))
+                .expect("new")
+                .with_fetch_timeout(Some(1));
+            let mut db = open_in_memory_db();
+            // The walk result is irrelevant; returning at all is the assertion.
+            let _ = collector.collect_window(&mut db, None, None);
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("collect_window hung past 30 s: legacy fetch ignored fetch_timeout_secs");
     }
 
     /// Why: `perform_fetch` on a local-only repo (no remotes) must return
