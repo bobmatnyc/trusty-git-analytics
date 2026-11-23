@@ -216,3 +216,28 @@ fn match_report_never_prints_an_unnamed_assignee_email() {
     let json = serde_json::to_string(&r).expect("json");
     assert!(!json.contains('@'), "names only, no email: {json}");
 }
+
+/// #285: an assignee with a Linear user id but no name and no email renders
+/// as "unnamed assignee", never by its raw Linear user id.
+#[test]
+fn match_report_never_prints_a_raw_linear_user_id() {
+    let db = Database::open_in_memory().expect("db");
+    let c = db.connection();
+    c.execute(
+        "INSERT INTO linear_issues (identifier, title, state, team, team_key, fetched_at, \
+                                    linear_id, state_type, completed_at, assignee_id) \
+         VALUES ('PLA-10', 't', 'Done', 'Pace', 'PLA', '2026-01-01T00:00:00Z', 'PLA-10', \
+                 'completed', '2026-03-03T00:00:00Z', 'usr-9b2e41c7')",
+        [],
+    )
+    .expect("insert issue");
+    let index = DeveloperIndex::load(c, IdentityResolver::new(None)).expect("idx");
+    let r = compute_match_report(c, &config(), &index, None, None).expect("report");
+
+    let names: Vec<&str> = r.engineers.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["unnamed assignee"]);
+    let text = render_text(&r);
+    assert!(!text.contains("usr-9b2e41c7"), "no Linear user id: {text}");
+    let json = serde_json::to_string(&r).expect("json");
+    assert!(!json.contains("usr-9b2e41c7"), "no Linear user id: {json}");
+}
