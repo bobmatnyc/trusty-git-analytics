@@ -6,6 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [10.9.0] — 2026-11-23
+
+### Breaking
+
+- The public `collect::git::fetch::fetch_remote` gains a third parameter, `timeout: Option<Duration>`; pass `None` for the previous behaviour ([#269](https://github.com/bobmatnyc/trusty-git-analytics/issues/269)).
+
+### Added
+
+- `notion.user_map` maps Notion user ids to emails, so Notion activity is attributed to the tga identity even when the token cannot list users. Each sync also attributes already-stored rows of a newly mapped id; unmapped ids stay unresolved and counted (#257).
+
+### Fixed
+
+- `fetch_timeout_secs` is now enforced: it bounds a git fetch's connect and each socket read/write, so an unreachable or stalled remote fails instead of hanging, and the failure is retried like any other connect failure (#269).
+- `tga linear match-report` no longer prints a Linear assignee's email when the assignee has no display name; it shows the resolved tga developer's name, else "unnamed assignee" (#280).
+- `tga linear match-report` no longer prints a raw Linear user id for an assignee with no name and no email; it shows the resolved tga developer's name, else "unnamed assignee" (#285).
+- The safety-net fetch in `collect_window` now applies `fetch_timeout_secs` under the same lock as the pipeline fetch, so it can no longer hang on a stalled remote or inherit another fetch's timeout (#286).
+- Serializing a config no longer writes `notion.user_map` Notion user ids and emails; it writes `user_map_entries` with the count, as `Debug` does. Loading the map is unchanged (#288).
+
+### Changed
+
+- `scripts/gate.sh --evo` (or `GATE_EVO=1`) runs the heavy cargo steps on EVO through `evo-gate-log` with the CI toolchain pins and keeps fmt and `cargo tree` on the Mac; an unreachable EVO or an `evo-gate-log` refusal fails the gate (#264).
+
 ## [10.8.0] — 2026-11-20
 
 ### Breaking
